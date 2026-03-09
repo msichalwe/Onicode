@@ -5,6 +5,9 @@ const https = require('https');
 const crypto = require('crypto');
 const { registerTerminalIPC, killAllSessions } = require('./terminal');
 const { registerProjectIPC } = require('./projects');
+const { registerGitIPC } = require('./git');
+const { registerConnectorIPC } = require('./connectors');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents } = require('./aiTools');
 
 let mainWindow = null;
 
@@ -314,7 +317,7 @@ function testOpenAI(apiKey) {
                     resolve({ error: 'Authentication failed (401). Check your API key.' });
                 } else {
                     let msg = `HTTP ${res.statusCode}`;
-                    try { msg = JSON.parse(data).error?.message || msg; } catch {}
+                    try { msg = JSON.parse(data).error?.message || msg; } catch { }
                     resolve({ error: msg });
                 }
             });
@@ -347,7 +350,7 @@ function testGateway(baseUrl, apiKey) {
                     try {
                         const json = JSON.parse(data);
                         if (json.data) { modelCount = json.data.length; models = json.data.map((m) => m.id).sort(); }
-                    } catch {}
+                    } catch { }
                     resolve({ success: true, models: models?.length > 0 ? models : undefined, modelCount });
                 } else {
                     resolve({ error: `HTTP ${res.statusCode} — check URL and credentials` });
@@ -372,7 +375,7 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
 
     // Abort any in-flight request
     if (currentAIRequest) {
-        try { currentAIRequest.destroy(); } catch {}
+        try { currentAIRequest.destroy(); } catch { }
         currentAIRequest = null;
     }
 
@@ -448,7 +451,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
             try {
                 const errJson = JSON.parse(errText);
                 errorMsg = errJson.error?.message || errJson.detail || errorMsg;
-            } catch {}
+            } catch { }
             if (response.status === 401) errorMsg = 'OAuth token expired. Go to Settings and sign in again.';
             if (response.status === 403) errorMsg = 'Access denied. Your ChatGPT subscription may not include this model.';
             console.error('[AI] ChatGPT backend error:', response.status, errText.slice(0, 500));
@@ -484,7 +487,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
                     else if (json.choices?.[0]?.delta?.content) {
                         mainWindow?.webContents.send('ai-stream-chunk', json.choices[0].delta.content);
                     }
-                } catch {}
+                } catch { }
             }
         }
 
@@ -497,7 +500,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
                     if (json.type === 'response.output_text.delta' && json.delta) {
                         mainWindow?.webContents.send('ai-stream-chunk', json.delta);
                     }
-                } catch {}
+                } catch { }
             }
         }
 
@@ -517,8 +520,11 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
     }
 }
 
-/** Stream chat via standard OpenAI API (for sk-... keys and gateways) */
-function streamOpenAI(messages, providerConfig) {
+/**
+ * Single streaming call to OpenAI API. Returns accumulated response
+ * including any tool_calls. Streams text content to renderer in real-time.
+ */
+function streamOpenAISingle(messages, providerConfig, includeTools = true) {
     let endpoint;
     if (providerConfig.id === 'codex') {
         endpoint = 'https://api.openai.com/v1/chat/completions';
@@ -535,8 +541,15 @@ function streamOpenAI(messages, providerConfig) {
         messages: isOModel ? messages.filter((m) => m.role !== 'system') : messages,
         stream: true,
     };
-    if (isOModel) bodyObj.max_completion_tokens = 4096;
-    else bodyObj.max_tokens = 4096;
+
+    // Add tools for function calling (skip for o-models which may not support tools well)
+    if (includeTools && !isOModel) {
+        bodyObj.tools = TOOL_DEFINITIONS;
+        bodyObj.tool_choice = 'auto';
+    }
+
+    if (isOModel) bodyObj.max_completion_tokens = 16384;
+    else bodyObj.max_tokens = 16384;
 
     const bodyStr = JSON.stringify(bodyObj);
 
@@ -562,49 +575,78 @@ function streamOpenAI(messages, providerConfig) {
                     res.on('end', () => {
                         currentAIRequest = null;
                         let errorMsg = `HTTP ${res.statusCode}`;
-                        try { errorMsg = JSON.parse(data).error?.message || errorMsg; } catch {}
+                        try { errorMsg = JSON.parse(data).error?.message || errorMsg; } catch { }
                         if (res.statusCode === 401) errorMsg = 'Authentication failed (401). Check your API key.';
                         if (res.statusCode === 403) errorMsg = `Access denied for model "${model}". Try a different model.`;
                         console.error('[AI] OpenAI API error:', res.statusCode, data.slice(0, 200));
-                        mainWindow?.webContents.send('ai-stream-done', errorMsg);
                         resolve({ error: errorMsg });
                     });
                     return;
                 }
 
+                // Accumulators
+                let textContent = '';
+                const toolCalls = {};  // index -> { id, name, arguments }
+                let finishReason = null;
                 let buffer = '';
+
+                function processLine(trimmed) {
+                    if (!trimmed || trimmed === 'data: [DONE]') return;
+                    if (!trimmed.startsWith('data: ')) return;
+                    try {
+                        const json = JSON.parse(trimmed.slice(6));
+                        const choice = json.choices?.[0];
+                        if (!choice) return;
+
+                        // Track finish reason
+                        if (choice.finish_reason) finishReason = choice.finish_reason;
+
+                        const delta = choice.delta;
+                        if (!delta) return;
+
+                        // Text content — stream to renderer
+                        if (delta.content) {
+                            textContent += delta.content;
+                            mainWindow?.webContents.send('ai-stream-chunk', delta.content);
+                        }
+
+                        // Tool calls — accumulate
+                        if (delta.tool_calls) {
+                            for (const tc of delta.tool_calls) {
+                                const idx = tc.index;
+                                if (!toolCalls[idx]) {
+                                    toolCalls[idx] = { id: tc.id || '', name: '', arguments: '' };
+                                }
+                                if (tc.id) toolCalls[idx].id = tc.id;
+                                if (tc.function?.name) toolCalls[idx].name = tc.function.name;
+                                if (tc.function?.arguments) toolCalls[idx].arguments += tc.function.arguments;
+                            }
+                        }
+                    } catch { }
+                }
+
                 res.on('data', (chunk) => {
                     buffer += chunk.toString();
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || '';
-                    for (const line of lines) {
-                        const trimmed = line.trim();
-                        if (!trimmed || trimmed === 'data: [DONE]') continue;
-                        if (!trimmed.startsWith('data: ')) continue;
-                        try {
-                            const json = JSON.parse(trimmed.slice(6));
-                            const delta = json.choices?.[0]?.delta?.content;
-                            if (delta) mainWindow?.webContents.send('ai-stream-chunk', delta);
-                        } catch {}
-                    }
+                    for (const line of lines) processLine(line.trim());
                 });
 
                 res.on('end', () => {
-                    currentAIRequest = null;
-                    if (buffer.trim() && buffer.trim().startsWith('data: ') && buffer.trim() !== 'data: [DONE]') {
-                        try {
-                            const json = JSON.parse(buffer.trim().slice(6));
-                            const delta = json.choices?.[0]?.delta?.content;
-                            if (delta) mainWindow?.webContents.send('ai-stream-chunk', delta);
-                        } catch {}
-                    }
-                    mainWindow?.webContents.send('ai-stream-done', null);
-                    resolve({ success: true });
+                    // Process remaining buffer
+                    if (buffer.trim()) processLine(buffer.trim());
+
+                    const toolCallsArray = Object.values(toolCalls).filter(tc => tc.name);
+                    resolve({
+                        textContent,
+                        toolCalls: toolCallsArray,
+                        finishReason,
+                        hasToolCalls: toolCallsArray.length > 0,
+                    });
                 });
 
                 res.on('error', (err) => {
                     currentAIRequest = null;
-                    mainWindow?.webContents.send('ai-stream-done', err.message);
                     resolve({ error: err.message });
                 });
             });
@@ -612,15 +654,101 @@ function streamOpenAI(messages, providerConfig) {
             currentAIRequest = req;
             req.on('error', (err) => {
                 currentAIRequest = null;
-                mainWindow?.webContents.send('ai-stream-done', err.message);
                 resolve({ error: err.message });
             });
             req.write(bodyStr);
             req.end();
         });
     } catch (err) {
-        return { error: err.message || 'Unknown error' };
+        return Promise.resolve({ error: err.message || 'Unknown error' });
     }
+}
+
+/**
+ * Agentic OpenAI loop with tool calling.
+ * Streams text, executes tools, loops until done or max iterations.
+ */
+async function streamOpenAI(messages, providerConfig) {
+    const MAX_TOOL_ROUNDS = 25;  // Safety limit
+    let conversationMessages = [...messages];
+    let round = 0;
+
+    while (round < MAX_TOOL_ROUNDS) {
+        round++;
+
+        // Notify renderer of agentic step
+        if (round > 1) {
+            mainWindow?.webContents.send('ai-agent-step', { round, status: 'thinking' });
+        }
+
+        const result = await streamOpenAISingle(conversationMessages, providerConfig, true);
+
+        if (result.error) {
+            mainWindow?.webContents.send('ai-stream-done', result.error);
+            return { error: result.error };
+        }
+
+        // If no tool calls, we're done — the text was already streamed
+        if (!result.hasToolCalls) {
+            currentAIRequest = null;
+            mainWindow?.webContents.send('ai-stream-done', null);
+            return { success: true };
+        }
+
+        // ── Tool calling round ──
+        // Add assistant message with tool calls to conversation
+        const assistantMsg = { role: 'assistant', content: result.textContent || null };
+        assistantMsg.tool_calls = result.toolCalls.map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: tc.arguments },
+        }));
+        conversationMessages.push(assistantMsg);
+
+        // Execute each tool call
+        for (const tc of result.toolCalls) {
+            let args;
+            try {
+                args = JSON.parse(tc.arguments);
+            } catch {
+                args = {};
+            }
+
+            // Notify renderer: tool call starting
+            mainWindow?.webContents.send('ai-tool-call', {
+                id: tc.id,
+                name: tc.name,
+                args,
+                round,
+            });
+
+            // Execute the tool
+            const toolResult = await executeTool(tc.name, args);
+
+            // Notify renderer: tool result
+            mainWindow?.webContents.send('ai-tool-result', {
+                id: tc.id,
+                name: tc.name,
+                result: toolResult,
+                round,
+            });
+
+            // Add tool result to conversation
+            conversationMessages.push({
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: JSON.stringify(toolResult),
+            });
+        }
+
+        // Loop back for next round — AI will see tool results and decide next action
+    }
+
+    // Safety: max rounds reached
+    mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum tool-calling rounds. Stopping.]*');
+    mainWindow?.webContents.send('ai-stream-done', null);
+    currentAIRequest = null;
+    return { success: true };
 }
 
 ipcMain.handle('ai-abort', () => {
@@ -629,7 +757,7 @@ ipcMain.handle('ai-abort', () => {
             // AbortController (fetch-based) or raw request (https-based)
             if (typeof currentAIRequest.abort === 'function') currentAIRequest.abort();
             else if (typeof currentAIRequest.destroy === 'function') currentAIRequest.destroy();
-        } catch {}
+        } catch { }
         currentAIRequest = null;
     }
     return { success: true };
@@ -641,6 +769,8 @@ ipcMain.handle('ai-abort', () => {
 
 registerTerminalIPC(ipcMain, () => mainWindow);
 registerProjectIPC(ipcMain, () => mainWindow);
+registerGitIPC(ipcMain);
+registerConnectorIPC(ipcMain, () => mainWindow);
 
 // ══════════════════════════════════════════
 //  App Lifecycle

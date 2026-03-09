@@ -4,6 +4,123 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.3.0] — 2025-03-10
+
+### Phase 2: Cascade-Like Agentic AI Engine
+
+#### Added
+
+- **Agentic Tool-Calling Loop** (`src/main/index.js`)
+  - Replaced simple text-streaming `streamOpenAI` with full agentic loop (`streamOpenAISingle` + `streamOpenAI`)
+  - AI can now call tools iteratively (up to 25 rounds) — read files, edit files, run commands, search, etc.
+  - Streams text content to renderer in real-time while accumulating tool calls
+  - Sends `ai-tool-call`, `ai-tool-result`, `ai-agent-step` IPC events to renderer
+  - Increased `max_tokens` to 16384 for larger code generation
+
+- **AI Tool System** (`src/main/aiTools.js`) — 14 tools:
+  - **File Operations**: `read_file` (with line ranges), `edit_file` (find-and-replace), `multi_edit`, `create_file`, `delete_file`
+  - **Search & Navigate**: `list_directory` (recursive, hidden files), `search_files` (grep with patterns)
+  - **Terminal**: `run_command` (with cwd, timeout, stdout/stderr capture)
+  - **Restore Points**: `create_restore_point`, `restore_to_point`, `list_restore_points` — file-level snapshots stored at `~/.onicode/restore-points/`
+  - **Context Tracking**: `get_context_summary` — tracks files read/modified/created/deleted per session
+  - **Sub-Agents**: `spawn_sub_agent`, `get_agent_status` — agent spawning and tracking infrastructure
+
+- **File Context Tracker** (in `aiTools.js`)
+  - Tracks all file reads, edits, creates, and deletes during a session
+  - Provides summary to system prompt so AI knows what it's already touched
+
+- **Restore Point Manager** (in `aiTools.js`)
+  - Creates file-level snapshots before big changes
+  - Stores backups with manifest at `~/.onicode/restore-points/<id>/`
+  - List, restore, and delete restore points
+
+- **Enhanced System Prompt** (`src/chat/ai/systemPrompt.ts`)
+  - Full Cascade-like instructions: THINK → ACT → VERIFY → REPORT protocol
+  - Edit Protocol: read before edit, exact string matching, restore points before refactors
+  - Complete tool reference with parameters
+  - File context summary injection
+  - Slash command awareness
+
+- **Tool Steps UI** (`ChatView.tsx`)
+  - Real-time tool call visualization during AI execution
+  - Each tool step shows: icon, name, file/command detail, spinner (running) / checkmark (done)
+  - Error display for failed tools
+  - Tool steps attached to completed messages for history
+  - Active tool steps shown during streaming
+
+- **CSS for Tool Steps** (`index.css`)
+  - `.tool-steps` container with step rows, icons, status indicators
+  - Animated spinner for running tools
+  - Green checkmark for completed, red X for errors
+
+- **IPC Events** (preload.js + window.d.ts)
+  - `onToolCall` — notifies renderer when AI calls a tool
+  - `onToolResult` — notifies renderer with tool execution result
+  - `onAgentStep` — notifies renderer of agentic round progress
+
+- **New Command**: `/git [status|log|branches]` added to registry
+
+#### Changed
+
+- `streamOpenAI` is now an agentic loop wrapper around `streamOpenAISingle`
+- System prompt is now ~3x larger with full tool documentation
+- `Message` type now includes optional `toolSteps` array
+- Streaming UI shows tool steps alongside text content
+
+---
+
+## [0.2.0] — 2025-03-10
+
+### Phase 1.9: Git Integration + Project Management + Connectors
+
+#### Added
+
+- **Git Integration (Full Backend + UI)**
+  - `git.js` — IPC handlers for 15 git operations: `is-repo`, `init`, `status`, `branches`, `log`, `diff`, `stage`, `unstage`, `commit`, `checkout`, `stash`, `remotes`, `pull`, `push`, `show`
+  - Wired `git.js` into `index.js`, `preload.js`, and `window.d.ts` with full TypeScript types (`GitStatusFile`, `GitBranch`, `GitCommit`, `GitRemote`)
+  - **Git Tab** in ProjectsView — three sub-tabs:
+    - **Changes**: staged/unstaged file list with status badges (M/A/D/?/R/C/U), inline stage/unstage buttons, commit box, diff viewer
+    - **Branches**: local + remote branch list, create new branch, checkout with one click, current branch indicator
+    - **History**: commit log with timeline UI (dot + line), short hash, author, date
+  - Branch info bar with ahead/behind badges, pull/push/refresh buttons
+  - "Initialize Git Repo" button for non-git project paths
+
+- **Project Management Tabs**
+  - **Tasks / Kanban Board**: 4-column drag-and-drop kanban (Backlog → To Do → In Progress → Done)
+    - Create tasks with title, description, type (Task/User Story/Bug), priority (Critical/High/Medium/Low)
+    - Priority color dots, type icons, drag-to-move between columns
+    - localStorage persistence per project
+  - **Milestones Tab**: create milestones with title, description, optional due date
+    - Open/closed toggle, overall progress bar from task completion
+    - localStorage persistence per project
+
+- **Connectors (OAuth, No Manual API Keys)**
+  - `connectors.js` — connector OAuth backend with persistent storage at `~/.onicode/connectors.json`
+  - **GitHub**: Device Flow OAuth (no client secret needed) — user gets a code, enters it on github.com, app polls for token
+  - **Gmail**: Google OAuth 2.0 with PKCE + localhost redirect server on port 1456 — opens browser, captures callback automatically
+  - Connector list/get/disconnect IPC handlers
+  - Full preload + window.d.ts wiring for all connector methods
+
+- **Settings Panel (Functional Connectors)**
+  - GitHub connector: shows device code during auth, "Connected as @username" when done, disconnect button
+  - Gmail connector: opens Google consent screen in browser, shows email when connected, disconnect button
+  - Slack connector: placeholder (coming soon)
+
+- **CSS Styles** (~600 lines added)
+  - Project tabs navigation
+  - Git tab: header, sub-tabs, file rows with status badges, commit box, diff viewer, branch list, commit log timeline
+  - Kanban board: 4-column grid, draggable cards, priority dots, type icons
+  - Milestones: card layout, circular check/uncheck buttons, progress display
+  - Connector items: colored icons (GH dark, Gm red, Sl purple), connect/disconnect buttons, device code display
+
+#### Fixed
+
+- `ChatView.tsx` — confirmed `handleSend`, `handleKeyDown`, `handleSuggestionClick` are intact (no fix needed, documentation was stale)
+- Accessibility: added `title` attributes to buttons and select elements in ProjectsView
+- Replaced inline styles with CSS classes (`connector-error`, `connector-device-code`)
+
+---
+
 ## [0.1.0] — 2025-03-09
 
 ### Phase 1: Chat Shell + Core Infrastructure

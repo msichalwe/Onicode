@@ -7,12 +7,22 @@ import { buildSystemPrompt } from '../ai/systemPrompt';
 //  Types
 // ══════════════════════════════════════════
 
+export interface ToolStep {
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    result?: Record<string, unknown>;
+    round: number;
+    status: 'running' | 'done' | 'error';
+}
+
 export interface Message {
     id: string;
     role: 'user' | 'ai';
     content: string;
     timestamp: number;
     attachments?: Attachment[];
+    toolSteps?: ToolStep[];
 }
 
 export interface Attachment {
@@ -137,6 +147,7 @@ export default function ChatView() {
     const [showSlashMenu, setShowSlashMenu] = useState(false);
     const [slashFilter, setSlashFilter] = useState('');
     const [slashIndex, setSlashIndex] = useState(0);
+    const [activeToolSteps, setActiveToolSteps] = useState<ToolStep[]>([]);
 
     // ── Refs ──
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -209,50 +220,80 @@ export default function ChatView() {
         cmd.name.toLowerCase().includes('/' + slashFilter)
     );
 
-    // ── Send via Electron IPC ──
+    // ── Send via Electron IPC (with agentic tool-call support) ──
+    const toolStepsRef = useRef<ToolStep[]>([]);
+
     const sendViaIPC = useCallback(async (
         apiMessages: Array<{ role: string; content: string }>,
         provider: ProviderConfig
     ) => {
         streamContentRef.current = '';
+        toolStepsRef.current = [];
+        setActiveToolSteps([]);
 
         const removeChunkListener = window.onicode!.onStreamChunk((chunk: string) => {
             streamContentRef.current += chunk;
             setStreamingContent(streamContentRef.current);
         });
 
+        // Listen for tool calls from the agentic loop
+        const removeToolCallListener = window.onicode!.onToolCall((data) => {
+            const step: ToolStep = {
+                id: data.id,
+                name: data.name,
+                args: data.args,
+                round: data.round,
+                status: 'running',
+            };
+            toolStepsRef.current = [...toolStepsRef.current, step];
+            setActiveToolSteps([...toolStepsRef.current]);
+        });
+
+        // Listen for tool results
+        const removeToolResultListener = window.onicode!.onToolResult((data) => {
+            toolStepsRef.current = toolStepsRef.current.map(s =>
+                s.id === data.id ? { ...s, result: data.result, status: 'done' as const } : s
+            );
+            setActiveToolSteps([...toolStepsRef.current]);
+        });
+
         const removeDoneListener = window.onicode!.onStreamDone((error: string | null) => {
             removeChunkListener();
             removeDoneListener();
+            removeToolCallListener();
+            removeToolResultListener();
             cleanupRef.current = null;
             setIsTyping(false);
 
             const finalContent = streamContentRef.current;
+            const finalToolSteps = [...toolStepsRef.current];
             setStreamingContent('');
             streamContentRef.current = '';
+            setActiveToolSteps([]);
+            toolStepsRef.current = [];
             sendingRef.current = false;
 
             if (error) {
-                setMessages((prev) => {
-                    const updated = [...prev, {
-                        id: generateId(), role: 'ai' as const,
-                        content: `Failed to get response: ${error}\n\nCheck your API key and connection in **Settings**.`,
-                        timestamp: Date.now(),
-                    }];
-                    return updated;
-                });
-            } else if (finalContent.trim()) {
-                setMessages((prev) => {
-                    const updated = [...prev, {
-                        id: generateId(), role: 'ai' as const,
-                        content: finalContent, timestamp: Date.now(),
-                    }];
-                    return updated;
-                });
+                setMessages((prev) => [...prev, {
+                    id: generateId(), role: 'ai' as const,
+                    content: `Failed to get response: ${error}\n\nCheck your API key and connection in **Settings**.`,
+                    timestamp: Date.now(),
+                    toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
+                }]);
+            } else if (finalContent.trim() || finalToolSteps.length > 0) {
+                setMessages((prev) => [...prev, {
+                    id: generateId(), role: 'ai' as const,
+                    content: finalContent || '*(Completed using tools)*',
+                    timestamp: Date.now(),
+                    toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
+                }]);
             }
         });
 
-        cleanupRef.current = () => { removeChunkListener(); removeDoneListener(); };
+        cleanupRef.current = () => {
+            removeChunkListener(); removeDoneListener();
+            removeToolCallListener(); removeToolResultListener();
+        };
 
         const result = await window.onicode!.sendMessage(apiMessages, {
             id: provider.id,
@@ -264,10 +305,14 @@ export default function ChatView() {
         if (result.error) {
             removeChunkListener();
             removeDoneListener();
+            removeToolCallListener();
+            removeToolResultListener();
             cleanupRef.current = null;
             setIsTyping(false);
             setStreamingContent('');
             streamContentRef.current = '';
+            setActiveToolSteps([]);
+            toolStepsRef.current = [];
             sendingRef.current = false;
             setMessages((prev) => [...prev, {
                 id: generateId(), role: 'ai' as const,
@@ -604,6 +649,60 @@ export default function ChatView() {
         if (activeConvId === convId) newChat();
     }, [activeConvId, newChat]);
 
+    // ── Render tool steps (Cascade-like agentic UI) ──
+    const renderToolSteps = (steps: ToolStep[]) => {
+        if (!steps || steps.length === 0) return null;
+
+        const toolIcons: Record<string, string> = {
+            read_file: '📄', edit_file: '✏️', create_file: '📝', delete_file: '🗑️',
+            list_directory: '📁', search_files: '🔍', run_command: '⚡',
+            create_restore_point: '💾', restore_to_point: '⏪', list_restore_points: '📋',
+            get_context_summary: '🧠', spawn_sub_agent: '🤖', get_agent_status: '📊',
+            multi_edit: '✏️',
+        };
+
+        const toolLabel = (name: string) => {
+            return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        };
+
+        const formatArgs = (name: string, args: Record<string, unknown>) => {
+            if (name === 'read_file') return String(args.file_path || '').split('/').pop() || '';
+            if (name === 'edit_file') return String(args.file_path || '').split('/').pop() || '';
+            if (name === 'multi_edit') return String(args.file_path || '').split('/').pop() || '';
+            if (name === 'create_file') return String(args.file_path || '').split('/').pop() || '';
+            if (name === 'delete_file') return String(args.file_path || '').split('/').pop() || '';
+            if (name === 'list_directory') return String(args.dir_path || '').split('/').pop() || '';
+            if (name === 'search_files') return `"${args.query}"`;
+            if (name === 'run_command') return `\`${String(args.command || '').slice(0, 60)}\``;
+            if (name === 'create_restore_point') return String(args.name || '');
+            return '';
+        };
+
+        return (
+            <div className="tool-steps">
+                {steps.map((step) => (
+                    <div key={step.id} className={`tool-step tool-step-${step.status}`}>
+                        <div className="tool-step-header">
+                            <span className="tool-step-icon">{toolIcons[step.name] || '🔧'}</span>
+                            <span className="tool-step-name">{toolLabel(step.name)}</span>
+                            <span className="tool-step-detail">{formatArgs(step.name, step.args)}</span>
+                            <span className={`tool-step-status ${step.status}`}>
+                                {step.status === 'running' ? (
+                                    <span className="tool-spinner" />
+                                ) : step.status === 'done' ? '✓' : '✗'}
+                            </span>
+                        </div>
+                        {step.result && 'error' in step.result && (
+                            <div className="tool-step-error">
+                                {String(step.result.error)}
+                            </div>
+                        )}
+                    </div>
+                ))}
+            </div>
+        );
+    };
+
     // ── Render message content (simple markdown) ──
     const renderMessageContent = (content: string) => {
         const parts = content.split(/(```[\s\S]*?```|`[^`]+`|\*\*[^*]+\*\*)/g);
@@ -747,6 +846,7 @@ export default function ChatView() {
                                     )}
                                 </div>
                                 <div className="message-content-wrapper">
+                                    {message.toolSteps && message.toolSteps.length > 0 && renderToolSteps(message.toolSteps)}
                                     <div className="message-bubble">{renderMessageContent(message.content)}</div>
                                     {message.attachments && message.attachments.length > 0 && (
                                         <div className="message-attachments">
@@ -765,7 +865,7 @@ export default function ChatView() {
                                 </div>
                             </div>
                         ))}
-                        {isTyping && streamingContent && (
+                        {isTyping && (streamingContent || activeToolSteps.length > 0) && (
                             <div className="message message-ai">
                                 <div className="message-avatar ai">
                                     <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
@@ -773,10 +873,13 @@ export default function ChatView() {
                                         <path d="M24 14l8 6v12l-8-4V14z" fill="currentColor" opacity="0.6" />
                                     </svg>
                                 </div>
-                                <div className="message-bubble">{renderMessageContent(streamingContent)}</div>
+                                <div className="message-content-wrapper">
+                                    {activeToolSteps.length > 0 && renderToolSteps(activeToolSteps)}
+                                    {streamingContent && <div className="message-bubble">{renderMessageContent(streamingContent)}</div>}
+                                </div>
                             </div>
                         )}
-                        {isTyping && !streamingContent && (
+                        {isTyping && !streamingContent && activeToolSteps.length === 0 && (
                             <div className="message message-ai">
                                 <div className="message-avatar ai">
                                     <svg width="16" height="16" viewBox="0 0 48 48" fill="none">

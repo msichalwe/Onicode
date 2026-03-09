@@ -41,6 +41,11 @@ interface OnicodeAPI {
     onStreamDone: (callback: (error: string | null) => void) => () => void;
     abortAI: () => Promise<{ success: boolean }>;
 
+    // AI Agentic Events
+    onToolCall: (callback: (data: { id: string; name: string; args: Record<string, unknown>; round: number }) => void) => () => void;
+    onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;
+    onAgentStep: (callback: (data: { round: number; status: string }) => void) => () => void;
+
     // Codex OAuth
     codexOAuthGetAuthUrl: () => Promise<{ success?: boolean; error?: string; authUrl?: string }>;
     codexOAuthExchange: (redirectUrl: string) => Promise<{
@@ -101,10 +106,71 @@ interface OnicodeAPI {
     readFile: (filePath: string) => Promise<{ success?: boolean; content?: string; error?: string }>;
     writeFile: (filePath: string, content: string) => Promise<{ success?: boolean; error?: string }>;
 
+    // Connectors
+    connectorList: () => Promise<{ connectors: Record<string, { connected: boolean; username: string; avatarUrl: string; connectedAt: number }> }>;
+    connectorGet: (connectorId: string) => Promise<{ connected: boolean; username?: string; email?: string; avatarUrl?: string; picture?: string; connectedAt?: number }>;
+    connectorDisconnect: (connectorId: string) => Promise<{ success: boolean }>;
+    connectorGithubStart: () => Promise<{ success?: boolean; error?: string; deviceCode?: string; userCode?: string; verificationUri?: string; expiresIn?: number; interval?: number }>;
+    connectorGithubPoll: (deviceCode: string, interval?: number) => Promise<{ success?: boolean; error?: string; username?: string; avatarUrl?: string }>;
+    connectorGithubCancel: () => Promise<{ success: boolean }>;
+    connectorGoogleStart: () => Promise<{ success?: boolean; error?: string; authUrl?: string }>;
+    connectorGoogleCancel: () => Promise<{ success: boolean }>;
+    onConnectorGoogleResult: (callback: (result: { success?: boolean; error?: string; email?: string; name?: string; picture?: string }) => void) => () => void;
+
+    // Git
+    gitIsRepo: (repoPath: string) => Promise<{ isRepo: boolean }>;
+    gitInit: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitStatus: (repoPath: string) => Promise<{
+        success?: boolean; error?: string;
+        branch?: string; files?: GitStatusFile[];
+        ahead?: number; behind?: number; clean?: boolean;
+    }>;
+    gitBranches: (repoPath: string) => Promise<{ success?: boolean; branches?: GitBranch[]; error?: string }>;
+    gitLog: (repoPath: string, count?: number) => Promise<{ success?: boolean; commits?: GitCommit[]; error?: string }>;
+    gitDiff: (repoPath: string, filePath?: string, staged?: boolean) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitStage: (repoPath: string, files: string | string[]) => Promise<{ success?: boolean; error?: string }>;
+    gitUnstage: (repoPath: string, files: string | string[]) => Promise<{ success?: boolean; error?: string }>;
+    gitCommit: (repoPath: string, message: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitCheckout: (repoPath: string, branch: string, create?: boolean) => Promise<{ success?: boolean; error?: string }>;
+    gitStash: (repoPath: string, action?: string, message?: string) => Promise<{ success?: boolean; stashes?: string[]; error?: string }>;
+    gitRemotes: (repoPath: string) => Promise<{ success?: boolean; remotes?: GitRemote[]; error?: string }>;
+    gitPull: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitPush: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitShow: (repoPath: string, ref: string, filePath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+
     platform: string;
 }
 
 declare global {
+    interface GitStatusFile {
+        path: string;
+        status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted';
+        staged: boolean;
+    }
+
+    interface GitBranch {
+        name: string;
+        hash: string;
+        upstream: string | null;
+        current: boolean;
+        remote: boolean;
+    }
+
+    interface GitCommit {
+        hash: string;
+        shortHash: string;
+        author: string;
+        email: string;
+        timestamp: number;
+        message: string;
+    }
+
+    interface GitRemote {
+        name: string;
+        fetchUrl: string;
+        pushUrl: string;
+    }
+
     interface Window {
         onicode?: OnicodeAPI;
     }

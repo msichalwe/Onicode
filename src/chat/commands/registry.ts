@@ -28,6 +28,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     { name: '/projects', description: 'List all projects', usage: '/projects', category: 'project' },
     { name: '/open', description: 'Open project in external editor', usage: '/open <editor>', category: 'project' },
     { name: '/status', description: 'Show project and system status', usage: '/status', category: 'project' },
+    { name: '/git', description: 'Show git status for current project', usage: '/git [status|log|branches]', category: 'project' },
 
     // ── Terminal ──
     { name: '/run', description: 'Execute a command in AI terminal', usage: '/run <command>', category: 'terminal' },
