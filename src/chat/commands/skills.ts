@@ -9,7 +9,7 @@ export interface Skill {
     id: string;
     name: string;
     description: string;
-    category: 'code' | 'review' | 'testing' | 'docs' | 'devops' | 'debug' | 'design' | 'data';
+    category: 'code' | 'review' | 'testing' | 'docs' | 'devops' | 'debug' | 'design' | 'data' | 'research';
     prompt: string;
     enabled: boolean;
     icon: string; // SVG path or emoji-free label
