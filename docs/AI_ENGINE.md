@@ -1,23 +1,91 @@
 # Onicode — AI Engine
 
-## Overview
+> **Last updated:** 2025-03-09
+>
+> This document describes both what's **currently implemented** and the **future design** for the full AI Engine.
 
-The AI Engine is the shared brain between Chat Shell and Editor Shell. It handles model routing, context building, agent orchestration, inline completions, and the skills/knowledge system.
+---
 
-## Model Router
+## Current Implementation (v0.1.0)
 
-Routes AI requests to the right provider based on user configuration.
+### What's Built
 
-### Supported Providers
+The AI system currently lives in the main process (`src/main/index.js`) and chat shell (`src/chat/ai/`, `src/chat/commands/`).
 
-| Provider           | Models                          | Use Case                  |
-| ------------------ | ------------------------------- | ------------------------- |
-| **OniAI Gateway**  | All models via gateway          | Default — single endpoint |
-| **OpenAI**         | GPT-4.1, o3, o4-mini            | General + coding          |
-| **Anthropic**      | Claude Opus 4.5, Sonnet 4       | Deep reasoning + coding   |
-| **Ollama (Local)** | Llama, CodeLlama, Mistral, etc. | Offline, privacy-first    |
+### AI Chat (Implemented)
 
-### Routing Logic
+Streaming AI chat with dual-mode routing, handled entirely in the main process to avoid CORS.
+
+**Provider Flow:**
+
+1. User configures providers in Settings → Provider Settings
+2. Provider config (id, apiKey, baseUrl, model) sent with each message via IPC
+3. Main process routes based on token type:
+
+| Token Type    | Endpoint                                     | SSE Format                   |
+| ------------- | -------------------------------------------- | ---------------------------- |
+| `sk-` API key | `https://api.openai.com/v1/chat/completions` | `choices[0].delta.content`   |
+| OAuth JWT     | `chatgpt.com/backend-api/codex/responses`    | `response.output_text.delta` |
+| Gateway key   | `${baseUrl}/v1/chat/completions`             | `choices[0].delta.content`   |
+
+**ChatGPT Backend (Responses API) specifics:**
+
+- Requires `chatgpt-account-id` header (extracted from JWT)
+- Requires `OpenAI-Beta: responses=experimental` header
+- Body uses `instructions` (not `system` role), `store: false`
+- Uses Electron `net.fetch` for TLS compatibility
+
+### Supported Providers (Implemented)
+
+| Provider             | Auth Method        | Models                           | Status      |
+| -------------------- | ------------------ | -------------------------------- | ----------- |
+| **OpenAI Codex**     | `sk-` key or OAuth | GPT-5.x, GPT-4o, o4-mini, o3-pro | Implemented |
+| **OniAI Gateway**    | URL + API key      | All models via gateway           | Implemented |
+| **OpenClaw Gateway** | URL + API key      | Multi-model                      | Implemented |
+| **Anthropic**        | API key            | Claude Opus, Sonnet              | Planned     |
+| **Ollama (Local)**   | None (localhost)   | Llama, CodeLlama, Mistral, etc.  | Planned     |
+
+### System Prompt Builder (Implemented)
+
+`src/chat/ai/systemPrompt.ts` builds a context-aware system prompt including:
+
+- Available slash commands (from registry)
+- Terminal execution capabilities
+- Project management capabilities
+- Active project context (name, path, docs)
+- Custom user-defined system prompts
+- Output formatting guidelines
+
+### Slash Command System (Implemented)
+
+`src/chat/commands/registry.ts` + `executor.ts` — 20 commands across 6 categories:
+
+| Category | Commands                                            |
+| -------- | --------------------------------------------------- |
+| Chat     | `/new`, `/clear`, `/chathistory`, `/export`         |
+| AI       | `/model`, `/system`, `/context`, `/stop`, `/agents` |
+| Project  | `/init`, `/projects`, `/open`                       |
+| Terminal | `/run`, `/terminal`                                 |
+| Panel    | `/browser`, `/files`                                |
+| System   | `/help`, `/version`, `/status`                      |
+
+### Terminal Execution (Implemented)
+
+The AI can execute shell commands via the terminal system:
+
+- `terminal-exec` IPC: runs a command to completion (30s timeout), returns stdout+stderr+exitCode
+- Used by `/run <command>` slash command
+- Real shell sessions (`/bin/zsh -l`) via `child_process.spawn`
+
+---
+
+## Future Design (Phase 2+)
+
+> The following sections describe the **planned** architecture. None of this is implemented yet.
+
+### Model Router
+
+Routes AI requests to the right provider based on user configuration and task type.
 
 ```typescript
 interface ModelConfig {
@@ -30,11 +98,11 @@ interface ModelConfig {
 
 Users configure which model to use for each purpose. Fast models for autocomplete, powerful models for agents.
 
-## Context Engine
+### Context Engine
 
 Builds intelligent context for every AI request.
 
-### Context Sources
+**Context Sources:**
 
 1. **Open files** — currently visible code
 2. **Recent edits** — last N file changes
@@ -44,9 +112,7 @@ Builds intelligent context for every AI request.
 6. **Knowledge base** — persistent project/user knowledge
 7. **`@mentions`** — explicit file/folder/symbol references
 
-### Token Budget
-
-Context is assembled to fit within the model's context window:
+**Token Budget** (priority order):
 
 ```
 Priority 1: User's current message
@@ -58,11 +124,11 @@ Priority 6: Retrieved knowledge
 Priority 7: Codebase embeddings (fill remaining space)
 ```
 
-## Agent Orchestrator
+### Agent Orchestrator
 
 Multi-step autonomous task execution with tool use.
 
-### Available Tools
+**Available Tools:**
 
 | Tool             | Description                                 |
 | ---------------- | ------------------------------------------- |
@@ -75,7 +141,7 @@ Multi-step autonomous task execution with tool use.
 | `connector_call` | Invoke any connected service (GitHub, etc.) |
 | `key_store_read` | Read API keys from vault                    |
 
-### Approval Modes
+**Approval Modes:**
 
 | Mode           | Behavior                                      |
 | -------------- | --------------------------------------------- |
@@ -83,7 +149,7 @@ Multi-step autonomous task execution with tool use.
 | **Auto-apply** | Apply changes immediately, allow undo         |
 | **Full-auto**  | Sandboxed autonomous execution                |
 
-### Multi-Agent Cascade
+**Multi-Agent Cascade:**
 
 For complex tasks, the orchestrator can spawn parallel agents:
 
@@ -100,11 +166,11 @@ Orchestrator: Merges results, resolves conflicts, presents diff
 
 Each agent works on a separate git worktree to avoid conflicts.
 
-## Skills System
+### Skills System
 
 Skills are reusable capabilities the AI can invoke.
 
-### Built-In Skills
+**Built-In Skills:**
 
 | Skill         | Purpose                         |
 | ------------- | ------------------------------- |
@@ -115,9 +181,7 @@ Skills are reusable capabilities the AI can invoke.
 | `documenter`  | Generate documentation          |
 | `translator`  | Convert code between languages  |
 
-### Custom Skills
-
-Users create project-specific skills as markdown:
+**Custom Skills** — users create project-specific skills as markdown:
 
 ```markdown
 ---
@@ -133,7 +197,7 @@ description: Deploy the application to production
 4. Notify #deployments channel via Slack connector
 ```
 
-## Inline Completions
+### Inline Completions
 
 Ghost-text completions in the editor, powered by fast AI models.
 
