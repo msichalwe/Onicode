@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.9.0] — 2025-03-09
+
+### Inline Tool Results, Git Panel, Session Timer, Project Indexer, Skills Enhancement
+
+#### Added
+
+- **Inline tool results (expandable)** — Tool steps in chat are now clickable to expand rich content:
+  - `run_command`: terminal-style output with command prompt, stdout/stderr, exit code badge
+  - `edit_file` / `multi_edit`: diff view with +/- line counts, removed lines in red, added lines in green
+  - `create_file`: preview of created content with line count
+  - `search_files`: inline search results with file:line and matching content
+  - `git_status`: file list with status indicators (M/A/D/U)
+- **Session timer** — Shows elapsed time while the AI agent is working. Displays in agent status bar with format "Xm Ys". Persists 5s after completion for visibility.
+- **Git panel (RightPanel)** — Full native git widget in the side panel:
+  - Branch display and switching (dropdown with all local branches)
+  - Staged/unstaged file lists with per-file stage (+) / unstage (−) buttons
+  - Commit input with "Stage All" and "Commit (N)" buttons
+  - Pull/Push/Refresh action buttons in branch bar
+  - Ahead/behind commit counters
+  - Auto-refresh every 10 seconds
+  - Action log showing recent git operations
+  - Repository initialization for non-git projects
+- **Git AI tools** — Three new tools for the AI agent:
+  - `git_status(cwd?)` — check branch, changed files, ahead/behind
+  - `git_commit(message, cwd?, files?)` — stage and commit with conventional commit messages
+  - `git_push(cwd?, set_upstream?)` — push to remote with auto-upstream detection
+- **Project indexer tool** — `index_project(project_path, file_types?, max_files?)` builds a file map with exports, imports, components, line counts. Walks up to 6 levels deep, skips node_modules/dist/.git.
+- **Skills panel enhancement** — Expandable skill items showing the full system prompt injection text, category counts per group, "Active" badges, "How Skills Work" info box.
+- **Auto-commit/push protocol** — System prompt now instructs AI to auto-commit at milestones, auto-push after 3+ commits, and always push at session end.
+
+#### Changed
+
+- **System prompt** — Added git tools reference, index_project reference, enhanced Version Control section with mandatory auto-commit/push protocol.
+- **CLAUDE.md** — Major update: corrected theme count (12), added all new main process modules, updated directory structure, marked ChatView as working, added all new features to "What's Working" list.
+
+---
+
 ## [0.8.0] — 2025-03-09
 
 ### Gap Closure: OpenCode/Cascade Parity — New Tools, Context Compaction, Permissions, Agent Modes

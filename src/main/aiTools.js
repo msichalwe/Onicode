@@ -2479,6 +2479,91 @@ async function executeTool(name, args) {
                 return result;
             }
 
+            // ── Project Indexer ──
+
+            case 'index_project': {
+                const { project_path, file_types, max_files = 100 } = args;
+                const expandedPath = project_path.replace(/^~/, os.homedir());
+                if (!fs.existsSync(expandedPath)) {
+                    return { error: `Project path not found: ${project_path}` };
+                }
+
+                const extensions = (file_types || 'ts,tsx,js,jsx,py,go,rs,java,css,html,json,md').split(',').map(e => e.trim());
+                const skipDirs = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__', '.cache', '.turbo', '.venv', 'vendor', 'target']);
+                const index = [];
+
+                function walkDir(dir, depth = 0) {
+                    if (depth > 6 || index.length >= max_files) return;
+                    try {
+                        const entries = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            if (index.length >= max_files) return;
+                            if (entry.name.startsWith('.') && entry.name !== '.env.example') continue;
+                            const fullPath = path.join(dir, entry.name);
+                            if (entry.isDirectory()) {
+                                if (!skipDirs.has(entry.name)) walkDir(fullPath, depth + 1);
+                                continue;
+                            }
+                            const ext = path.extname(entry.name).slice(1);
+                            if (!extensions.includes(ext)) continue;
+
+                            try {
+                                const stat = fs.statSync(fullPath);
+                                if (stat.size > 500 * 1024) continue; // skip >500KB files
+                                const content = fs.readFileSync(fullPath, 'utf-8');
+                                const lines = content.split('\n');
+                                const relPath = path.relative(expandedPath, fullPath);
+
+                                // Extract key info based on file type
+                                const info = { path: relPath, lines: lines.length, size: stat.size };
+
+                                // Extract exports
+                                const exports = [];
+                                const imports = [];
+                                for (const line of lines.slice(0, 100)) {
+                                    const exportMatch = line.match(/export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum)\s+(\w+)/);
+                                    if (exportMatch) exports.push(exportMatch[1]);
+                                    const importMatch = line.match(/(?:import|from)\s+['"](.+?)['"]/);
+                                    if (importMatch) imports.push(importMatch[1]);
+                                    const pyDef = line.match(/^(?:def|class)\s+(\w+)/);
+                                    if (pyDef) exports.push(pyDef[1]);
+                                }
+                                if (exports.length > 0) info.exports = exports.slice(0, 10);
+                                if (imports.length > 0) info.imports = imports.slice(0, 10);
+
+                                // Extract component/function signatures for entry files
+                                if (['tsx', 'jsx'].includes(ext)) {
+                                    const componentMatch = content.match(/(?:export\s+(?:default\s+)?)?function\s+(\w+)\s*\(([^)]*)\)/);
+                                    if (componentMatch) info.component = `${componentMatch[1]}(${componentMatch[2].slice(0, 50)})`;
+                                }
+
+                                index.push(info);
+                            } catch { /* skip unreadable */ }
+                        }
+                    } catch { /* skip unreadable dirs */ }
+                }
+
+                walkDir(expandedPath);
+
+                // Build summary
+                const byExt = {};
+                for (const file of index) {
+                    const ext = path.extname(file.path).slice(1);
+                    byExt[ext] = (byExt[ext] || 0) + 1;
+                }
+
+                const totalLines = index.reduce((sum, f) => sum + f.lines, 0);
+
+                return {
+                    success: true,
+                    project_path,
+                    files_indexed: index.length,
+                    total_lines: totalLines,
+                    by_extension: byExt,
+                    index: index.slice(0, max_files),
+                };
+            }
+
             // ── Git Tools ──
 
             case 'git_status': {

@@ -15,11 +15,12 @@ See `docs/PRODUCT_VISION.md` for the full vision, `docs/ROADMAP.md` for mileston
 - **Desktop**: Electron 34 (main process in CommonJS `.js`)
 - **Chat Shell**: React 19 + Vite 6 (TypeScript `.tsx`)
 - **Editor Shell**: VS Code workbench (lazy-loaded, not yet implemented)
-- **Styling**: Single CSS file, CSS custom properties (4 themes: Sand, Midnight, Obsidian, Ocean)
+- **Styling**: Single CSS file, CSS custom properties (12 themes: Sand, Midnight, Obsidian, Ocean, Aurora, Monokai, Rosé Pine, Nord, Catppuccin, Default Light, Default Dark, Neutral)
 - **AI Providers**: OpenAI Codex (GPT-5.x, o-series via `sk-` keys or ChatGPT OAuth JWT), OniAI Gateway, OpenClaw Gateway
 - **State**: React useState + `localStorage` (no Redux/Zustand)
 - **IPC**: Electron contextBridge via `window.onicode` (`preload.js`)
-- **Local data**: JSON files (`~/.onicode/projects.json`), `localStorage`. SQLite planned.
+- **Local data**: JSON files (`~/.onicode/projects.json`), `localStorage`, SQLite (`~/.onicode/onicode.db`)
+- **Persistence**: SQLite for conversations, tasks, sessions; localStorage as fallback
 - **Security**: AES-256 key vault (planned), OS keychain integration (planned)
 - **Package manager**: npm
 
@@ -33,32 +34,43 @@ src/
     preload.js              # contextBridge → window.onicode API
     terminal.js             # Shell session management (spawn, stdin/stdout, exec)
     projects.js             # Project CRUD, onidocs templates, filesystem ops
-    git.js                  # Git operations via IPC — CREATED, NOT WIRED YET
+    git.js                  # Git operations via IPC (15 handlers, fully wired)
+    aiTools.js              # AI tool definitions (30+ tools), executor, task manager, file context tracker
+    storage.js              # SQLite persistence layer (tasks, conversations, sessions)
+    hooks.js                # Pre/post tool lifecycle hooks
+    commands.js             # Custom slash commands (user-defined)
+    compactor.js            # Context compaction (summarize old messages)
+    memory.js               # Persistent memory system (soul, user, long-term, daily)
+    browser.js              # Puppeteer headless browser integration
+    connectors.js           # OAuth connectors (GitHub, Gmail)
+    logger.js               # Structured logging system
 
   chat/                    # Chat Shell (React 19, TypeScript)
     main.tsx                # ReactDOM entry
-    App.tsx                 # Root component, view routing, ThemeProvider
+    App.tsx                 # Root component, view routing, ThemeProvider, floating editor
     components/
-      ChatView.tsx           # Chat UI, streaming, history, attachments, slash autocomplete
-                             # ⚠️ BROKEN — handleSend/handleKeyDown/handleSuggestionClick
-                             #   were removed during refactoring and not re-added
-      Sidebar.tsx            # Left nav (Chat, Projects, Docs, Settings)
-      SettingsPanel.tsx      # Theme picker, providers, connectors, key store
+      ChatView.tsx           # Chat UI, streaming, tool steps, inline diffs, session timer
+      Sidebar.tsx            # Left nav (Chat, Projects, Docs, Settings, Memories)
+      SettingsPanel.tsx      # Theme picker, providers, skills, connectors, hooks
       ProviderSettings.tsx   # AI provider config, Codex OAuth PKCE, test connection
-      RightPanel.tsx         # Widget panel: terminal, files, browser, etc.
+      RightPanel.tsx         # Widget panel: terminal, files, agents, tasks, git
       ProjectsView.tsx       # Project list, detail, file tree, docs, "Open in"
+      ProjectModeBar.tsx     # Project mode header bar
+      MemoriesView.tsx       # Memory file viewer/editor
+      OnboardingDialog.tsx   # First-run onboarding
       DocsView.tsx           # Aggregated docs from all projects' onidocs/
     commands/
-      registry.ts            # 20 slash command definitions across 6 categories
+      registry.ts            # 21 slash command definitions across 6 categories
       executor.ts            # Slash command execution logic
+      skills.ts              # 12 built-in AI skills (prompt templates)
     ai/
-      systemPrompt.ts        # Context-aware system prompt builder
+      systemPrompt.ts        # Context-aware system prompt builder with skills, tools, git
     hooks/
       useTheme.tsx           # ThemeContext, localStorage persistence
     types/
       window.d.ts            # TypeScript types for window.onicode API
     styles/
-      index.css              # All CSS: reset, 4 themes, layout, all components
+      index.css              # All CSS: reset, 12 themes, layout, all components
 
 docs/                      # Product docs (see docs/README.md)
 ```
@@ -187,8 +199,9 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Documents view (aggregated from all projects)
 - [x] Conversation history (localStorage + SQLite)
 - [x] File/URL attachments
-- [x] Right panel (Terminal, Project, Files, Agents)
-- [x] Git integration (15 operations, UI in Projects tab)
+- [x] Right panel (Terminal, Project, Files, Agents, Tasks, Git)
+- [x] Git panel (branch, stage, commit, push, pull, branch switching)
+- [x] Git AI tools (git_status, git_commit, git_push for auto-commit/push)
 - [x] SQLite persistence (tasks, conversations, sessions)
 - [x] Permission enforcement (tool-level allow/ask/deny)
 - [x] Sub-agent execution (real AI calls, read-only tools)
@@ -197,16 +210,25 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Context compaction (auto-summarize at token limit)
 - [x] Memory system (soul.md, user.md, daily logs)
 - [x] Logger, Browser (Puppeteer), Connectors modules
+- [x] Inline tool results (expandable: command output, file diffs, search results)
+- [x] Session timer (shows AI working duration)
+- [x] Project indexer tool (index_project: file map with exports/imports)
+- [x] Skills system (12 AI skills, expandable UI, system prompt injection)
+- [x] Markdown rendering (marked library, full GFM)
+- [x] Floating editor (syntax highlighting via highlight.js, draggable/resizable/snappable)
+- [x] Project mode (auto-detect, /switch command, "Work on Project" button)
+- [x] Conversation continuation (loads previous session context from SQLite)
 
 ## What's Missing
 
-- [ ] **Connectors** — GitHub OAuth, Gmail OAuth, Slack OAuth (currently placeholder)
-- [ ] **API Key Store** — encrypted vault (currently placeholder)
+- [ ] **Connectors** — GitHub OAuth, Gmail OAuth, Slack OAuth (placeholder UI exists)
+- [ ] **API Key Store** — AES-256 encrypted vault (placeholder)
 - [ ] **Anthropic provider** — Claude API
 - [ ] **Ollama provider** — local models
 - [ ] **Editor Shell** — VS Code workbench (lazy-loaded)
 - [ ] **MCP client** — extensible tool system for external integrations
 - [ ] **Auto-update** — electron-updater for seamless updates
+- [ ] **RAG/Embeddings** — semantic search over project files (currently simple indexer)
 - [ ] **Mobile companion** — React Native app
 
 ## Coding Conventions
@@ -226,5 +248,6 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 2. **API Key Store** — AES-256 encrypted vault with OS keychain
 3. **Anthropic provider** — Claude API support
 4. **MCP client** — Extensible tool system for external integrations
-5. **Editor Shell** — VS Code workbench (lazy-loaded)
-6. **Auto-update** — electron-updater for seamless updates
+5. **RAG / Embeddings** — Semantic search over project files for better context
+6. **Editor Shell** — VS Code workbench (lazy-loaded)
+7. **Auto-update** — electron-updater for seamless updates

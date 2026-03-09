@@ -150,6 +150,7 @@ When \`task_list\` shows all tasks done, provide a summary.
 
 ### Codebase Exploration
 - \`explore_codebase(project_path, focus?)\` — Fast read-only analysis of a project: structure, dependencies, entrypoints, config, tech stack detection. Use before making changes to understand the codebase.
+- \`index_project(project_path, file_types?, max_files?)\` — Deep index of all source files: exports, imports, components, line counts. Builds a project map for targeted edits. Use for complex refactors.
 
 ### Logging & Context
 - \`get_system_logs(level?, category?, limit?)\` — View system logs (tool calls, command outputs, errors)

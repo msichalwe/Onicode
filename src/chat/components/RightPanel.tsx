@@ -12,7 +12,7 @@ function stripAnsi(str: string): string {
 //  Widget Types (kernel layer)
 // ══════════════════════════════════════════
 
-export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks';
+export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks' | 'git';
 
 export interface PanelState {
     widget: WidgetType | null;
@@ -31,6 +31,7 @@ const WIDGETS: WidgetDef[] = [
     { id: 'files', label: 'Files', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg> },
     { id: 'agents', label: 'Agents', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg> },
     { id: 'tasks', label: 'Tasks', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg> },
+    { id: 'git', label: 'Git', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg> },
 ];
 
 // ══════════════════════════════════════════
@@ -825,9 +826,329 @@ function TasksWidget() {
 }
 
 // ══════════════════════════════════════════
-//  Placeholder
+//  Git Widget
 // ══════════════════════════════════════════
 
+interface GitFile { path: string; status: string; staged: boolean }
+interface GitBranch { name: string; current: boolean; remote: boolean }
+
+function GitWidget() {
+    const [branch, setBranch] = useState('');
+    const [files, setFiles] = useState<GitFile[]>([]);
+    const [branches, setBranches] = useState<GitBranch[]>([]);
+    const [ahead, setAhead] = useState(0);
+    const [behind, setBehind] = useState(0);
+    const [commitMsg, setCommitMsg] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [showBranches, setShowBranches] = useState(false);
+    const [repoPath, setRepoPath] = useState('');
+    const [isRepo, setIsRepo] = useState(false);
+    const [actionLog, setActionLog] = useState<string[]>([]);
+
+    const addLog = useCallback((msg: string) => {
+        setActionLog(prev => [...prev.slice(-10), `${new Date().toLocaleTimeString()} — ${msg}`]);
+    }, []);
+
+    // Get active project path
+    const getProjectPath = useCallback(() => {
+        try {
+            const stored = localStorage.getItem('onicode-active-project');
+            if (stored) {
+                const proj = JSON.parse(stored);
+                return proj.path || '';
+            }
+        } catch {}
+        return '';
+    }, []);
+
+    // Refresh git status
+    const refreshStatus = useCallback(async () => {
+        const projPath = repoPath || getProjectPath();
+        if (!projPath || !isElectron || !window.onicode?.gitStatus) return;
+        setRepoPath(projPath);
+
+        try {
+            // Check if it's a repo
+            const repoCheck = await window.onicode.gitIsRepo(projPath);
+            setIsRepo(repoCheck.isRepo);
+            if (!repoCheck.isRepo) return;
+
+            const status = await window.onicode.gitStatus(projPath);
+            if (status.success) {
+                setBranch(status.branch || 'unknown');
+                setFiles(status.files || []);
+                setAhead(status.ahead || 0);
+                setBehind(status.behind || 0);
+                setError('');
+            } else if (status.error) {
+                setError(status.error);
+            }
+        } catch (err) {
+            setError('Failed to get git status');
+        }
+    }, [repoPath, getProjectPath]);
+
+    // Load branches
+    const loadBranches = useCallback(async () => {
+        const projPath = repoPath || getProjectPath();
+        if (!projPath || !window.onicode?.gitBranches) return;
+        const result = await window.onicode.gitBranches(projPath);
+        if (result.success) setBranches(result.branches || []);
+    }, [repoPath, getProjectPath]);
+
+    // Init
+    useEffect(() => {
+        refreshStatus();
+        const interval = setInterval(refreshStatus, 10000); // Auto-refresh every 10s
+        return () => clearInterval(interval);
+    }, [refreshStatus]);
+
+    // Listen for project changes
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail?.path) {
+                setRepoPath(detail.path);
+                setTimeout(refreshStatus, 500);
+            }
+        };
+        window.addEventListener('onicode-project-activate', handler);
+        return () => window.removeEventListener('onicode-project-activate', handler);
+    }, [refreshStatus]);
+
+    // Stage file
+    const stageFile = useCallback(async (filePath: string) => {
+        if (!window.onicode?.gitStage) return;
+        await window.onicode.gitStage(repoPath, [filePath]);
+        addLog(`Staged: ${filePath}`);
+        refreshStatus();
+    }, [repoPath, refreshStatus, addLog]);
+
+    // Unstage file
+    const unstageFile = useCallback(async (filePath: string) => {
+        if (!window.onicode?.gitUnstage) return;
+        await window.onicode.gitUnstage(repoPath, [filePath]);
+        addLog(`Unstaged: ${filePath}`);
+        refreshStatus();
+    }, [repoPath, refreshStatus, addLog]);
+
+    // Stage all
+    const stageAll = useCallback(async () => {
+        if (!window.onicode?.gitStage) return;
+        await window.onicode.gitStage(repoPath, ['.']);
+        addLog('Staged all files');
+        refreshStatus();
+    }, [repoPath, refreshStatus, addLog]);
+
+    // Commit
+    const doCommit = useCallback(async () => {
+        if (!commitMsg.trim() || !window.onicode?.gitCommit) return;
+        setLoading(true);
+        try {
+            const result = await window.onicode.gitCommit(repoPath, commitMsg.trim());
+            if (result.success) {
+                addLog(`Committed: ${commitMsg.trim()}`);
+                setCommitMsg('');
+                refreshStatus();
+            } else {
+                setError(result.error || 'Commit failed');
+                addLog(`Commit failed: ${result.error}`);
+            }
+        } catch (err) {
+            setError('Commit failed');
+        }
+        setLoading(false);
+    }, [repoPath, commitMsg, refreshStatus, addLog]);
+
+    // Push
+    const doPush = useCallback(async () => {
+        if (!window.onicode?.gitPush) return;
+        setLoading(true);
+        try {
+            const result = await window.onicode.gitPush(repoPath);
+            if (result.success) {
+                addLog('Pushed to remote');
+                refreshStatus();
+            } else {
+                setError(result.error || 'Push failed');
+                addLog(`Push failed: ${result.error}`);
+            }
+        } catch {
+            setError('Push failed');
+        }
+        setLoading(false);
+    }, [repoPath, refreshStatus, addLog]);
+
+    // Pull
+    const doPull = useCallback(async () => {
+        if (!window.onicode?.gitPull) return;
+        setLoading(true);
+        try {
+            const result = await window.onicode.gitPull(repoPath);
+            if (result.success) {
+                addLog('Pulled from remote');
+                refreshStatus();
+            } else {
+                setError(result.error || 'Pull failed');
+                addLog(`Pull failed: ${result.error}`);
+            }
+        } catch {
+            setError('Pull failed');
+        }
+        setLoading(false);
+    }, [repoPath, refreshStatus, addLog]);
+
+    // Checkout branch
+    const checkoutBranch = useCallback(async (branchName: string) => {
+        if (!window.onicode?.gitCheckout) return;
+        setLoading(true);
+        const result = await window.onicode.gitCheckout(repoPath, branchName, false);
+        if (result.success) {
+            addLog(`Switched to branch: ${branchName}`);
+            setShowBranches(false);
+            refreshStatus();
+        } else {
+            setError(result.error || 'Checkout failed');
+        }
+        setLoading(false);
+    }, [repoPath, refreshStatus, addLog]);
+
+    // Init repo
+    const initRepo = useCallback(async () => {
+        const projPath = getProjectPath();
+        if (!projPath || !window.onicode?.gitInit) return;
+        const result = await window.onicode.gitInit(projPath);
+        if (result.success) {
+            setRepoPath(projPath);
+            addLog('Initialized git repository');
+            refreshStatus();
+        }
+    }, [getProjectPath, refreshStatus, addLog]);
+
+    const stagedFiles = files.filter(f => f.staged);
+    const unstagedFiles = files.filter(f => !f.staged);
+
+    if (!repoPath && !getProjectPath()) {
+        return (
+            <div className="widget-git">
+                <div className="git-empty">No project selected. Open a project to use Git.</div>
+            </div>
+        );
+    }
+
+    if (!isRepo) {
+        return (
+            <div className="widget-git">
+                <div className="git-empty">
+                    <p>Not a git repository</p>
+                    <button className="git-action-btn" onClick={initRepo}>Initialize Repository</button>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="widget-git">
+            {/* Branch bar */}
+            <div className="git-branch-bar">
+                <button className="git-branch-btn" onClick={() => { setShowBranches(!showBranches); if (!showBranches) loadBranches(); }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 01-9 9" />
+                    </svg>
+                    {branch || 'main'}
+                </button>
+                <div className="git-sync-info">
+                    {ahead > 0 && <span className="git-ahead" title={`${ahead} commits ahead`}>{ahead}↑</span>}
+                    {behind > 0 && <span className="git-behind" title={`${behind} commits behind`}>{behind}↓</span>}
+                </div>
+                <div className="git-sync-actions">
+                    <button className="git-icon-btn" onClick={doPull} disabled={loading} title="Pull">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="8 17 12 21 16 17" /><line x1="12" y1="12" x2="12" y2="21" /><path d="M20.88 18.09A5 5 0 0018 9h-1.26A8 8 0 103 16.29" /></svg>
+                    </button>
+                    <button className="git-icon-btn" onClick={doPush} disabled={loading} title="Push">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 16 12 12 8 16" /><line x1="12" y1="12" x2="12" y2="21" /><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3" /></svg>
+                    </button>
+                    <button className="git-icon-btn" onClick={refreshStatus} title="Refresh">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" /></svg>
+                    </button>
+                </div>
+            </div>
+
+            {/* Branch dropdown */}
+            {showBranches && (
+                <div className="git-branches-dropdown">
+                    {branches.filter(b => !b.remote).map(b => (
+                        <button key={b.name} className={`git-branch-option ${b.current ? 'current' : ''}`} onClick={() => checkoutBranch(b.name)}>
+                            {b.current && <span className="git-branch-current-dot" />}
+                            {b.name}
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {error && <div className="git-error">{error}</div>}
+
+            {/* Commit input */}
+            <div className="git-commit-area">
+                <input
+                    className="git-commit-input"
+                    value={commitMsg}
+                    onChange={e => setCommitMsg(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doCommit(); } }}
+                    placeholder="Commit message..."
+                    disabled={loading}
+                />
+                <div className="git-commit-actions">
+                    <button className="git-stage-all-btn" onClick={stageAll} disabled={loading || unstagedFiles.length === 0}>
+                        Stage All
+                    </button>
+                    <button className="git-commit-btn" onClick={doCommit} disabled={loading || !commitMsg.trim() || stagedFiles.length === 0}>
+                        {loading ? 'Working...' : `Commit (${stagedFiles.length})`}
+                    </button>
+                </div>
+            </div>
+
+            {/* File changes */}
+            <div className="git-files-section">
+                {stagedFiles.length > 0 && (
+                    <div className="git-file-group">
+                        <div className="git-file-group-label">Staged ({stagedFiles.length})</div>
+                        {stagedFiles.map(f => (
+                            <div key={f.path} className={`git-file-item git-file-${f.status}`}>
+                                <span className="git-file-status">{f.status[0].toUpperCase()}</span>
+                                <span className="git-file-path">{f.path}</span>
+                                <button className="git-file-action" onClick={() => unstageFile(f.path)} title="Unstage">−</button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                {unstagedFiles.length > 0 && (
+                    <div className="git-file-group">
+                        <div className="git-file-group-label">Changes ({unstagedFiles.length})</div>
+                        {unstagedFiles.map(f => (
+                            <div key={f.path} className={`git-file-item git-file-${f.status}`}>
+                                <span className="git-file-status">{f.status[0].toUpperCase()}</span>
+                                <span className="git-file-path">{f.path}</span>
+                                <button className="git-file-action" onClick={() => stageFile(f.path)} title="Stage">+</button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                {files.length === 0 && <div className="git-clean">Working tree clean</div>}
+            </div>
+
+            {/* Action log */}
+            {actionLog.length > 0 && (
+                <div className="git-log">
+                    {actionLog.map((msg, i) => (
+                        <div key={i} className="git-log-entry">{msg}</div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
 
 // ══════════════════════════════════════════
 //  Right Panel
@@ -866,6 +1187,7 @@ export default function RightPanel({ panel, onClose, onChangeWidget }: RightPane
             case 'files': return <FileViewerWidget data={panel.data} />;
             case 'agents': return <AgentsWidget />;
             case 'tasks': return <TasksWidget />;
+            case 'git': return <GitWidget />;
             default: return null;
         }
     };
