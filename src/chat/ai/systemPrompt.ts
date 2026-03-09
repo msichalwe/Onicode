@@ -151,7 +151,30 @@ When \`task_list\` shows all tasks done, provide a summary.
 
 ### Codebase Exploration
 - \`explore_codebase(project_path, focus?)\` — Fast read-only analysis of a project: structure, dependencies, entrypoints, config, tech stack detection. Use before making changes to understand the codebase.
-- \`index_project(project_path, file_types?, max_files?)\` — Deep index of all source files: exports, imports, components, line counts. Builds a project map for targeted edits. Use for complex refactors.
+- \`index_project(project_path, file_types?, max_files?)\` — Deep index of all source files: exports, imports, components, functions, line counts. Builds a project map for targeted edits.
+
+### Code Intelligence (LSP)
+- \`find_symbol(name, project_path?)\` — Find where a symbol (function, class, type, variable) is defined. Returns file path, line, kind, signature.
+- \`find_references(name, file_path?, project_path?)\` — Find all usages of a symbol across the codebase. Returns locations with code previews.
+- \`list_symbols(file_path)\` — List all symbols in a file: functions, classes, interfaces, types, variables, exports.
+- \`get_type_info(file_path, line, column)\` — Get type information, documentation, and signature for a symbol at a position.
+
+**Code Intelligence Protocol:**
+1. Before editing unfamiliar code → \`list_symbols(file)\` to understand structure
+2. Before renaming → \`find_references(name)\` to find all usages
+3. When debugging → \`find_symbol(name)\` to jump to definitions
+4. For large codebases → prefer LSP tools over grep for precision
+
+### Semantic Search
+- \`semantic_search(query, project_path?)\` — Find code related to a concept (e.g., "authentication logic", "database connection"). Uses TF-IDF indexing with camelCase/snake_case splitting. Returns ranked file list with relevance scores.
+- \`index_codebase(project_path?)\` — Build/rebuild the semantic search index. Auto-indexes on first search, but call explicitly after major changes.
+
+**Search Strategy:**
+1. For exact text → \`search_files(pattern)\` (grep/ripgrep)
+2. For concepts/intent → \`semantic_search(query)\` (TF-IDF)
+3. For symbol definitions → \`find_symbol(name)\` (LSP)
+4. For file structure → \`list_directory()\` or \`glob_files()\`
+5. Combine tools for large codebases: semantic_search to narrow, then read_file to confirm
 
 ### Logging & Context
 - \`get_system_logs(level?, category?, limit?)\` — View system logs (tool calls, command outputs, errors)
@@ -518,4 +541,56 @@ This is the user's currently selected project. Prefer working within this path.`
 - Use bold for important items, inline code for paths/functions`);
 
     return parts.join('\n');
+}
+
+// ══════════════════════════════════════════
+//  System Prompt Cache
+// ══════════════════════════════════════════
+
+interface PromptCache {
+    prompt: string;
+    hash: string;
+    timestamp: number;
+}
+
+let _promptCache: PromptCache | null = null;
+const CACHE_TTL = 60000; // 1 minute
+
+function hashContext(ctx: AIContext): string {
+    // Hash the parts that change: project, memories, hooks, docs
+    const key = JSON.stringify({
+        project: ctx.activeProjectName,
+        projectPath: ctx.activeProjectPath,
+        memoryKeys: ctx.memories ? Object.keys(ctx.memories).sort() : [],
+        memoryLengths: ctx.memories ? Object.values(ctx.memories).map(v => typeof v === 'string' ? v.length : 0) : [],
+        hooksCount: ctx.hooksSummary?.length || 0,
+        docsCount: ctx.projectDocs?.length || 0,
+        customPrompt: ctx.customSystemPrompt?.length || 0,
+        agentsMd: ctx.agentsMd?.length || 0,
+        customCommandsSummary: ctx.customCommandsSummary?.length || 0,
+    });
+    // Simple hash
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) {
+        hash = ((hash << 5) - hash) + key.charCodeAt(i);
+        hash |= 0;
+    }
+    return hash.toString(36);
+}
+
+export function buildSystemPromptCached(context: AIContext): string {
+    const now = Date.now();
+    const hash = hashContext(context);
+
+    if (_promptCache && _promptCache.hash === hash && (now - _promptCache.timestamp) < CACHE_TTL) {
+        return _promptCache.prompt;
+    }
+
+    const prompt = buildSystemPrompt(context);
+    _promptCache = { prompt, hash, timestamp: now };
+    return prompt;
+}
+
+export function invalidatePromptCache(): void {
+    _promptCache = null;
 }

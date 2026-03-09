@@ -251,6 +251,20 @@ contextBridge.exposeInMainWorld('onicode', {
     compactMessages: (messages) => ipcRenderer.invoke('compact-messages', messages),
     estimateTokens: (messages) => ipcRenderer.invoke('estimate-tokens', messages),
 
+    // ── Code Intelligence (LSP) ──
+    lspSymbols: (projectPath, filePath) => ipcRenderer.invoke('lsp-symbols', projectPath, filePath),
+    lspDefinition: (projectPath, filePath, line, column) => ipcRenderer.invoke('lsp-definition', projectPath, filePath, line, column),
+    lspReferences: (projectPath, filePath, symbolName) => ipcRenderer.invoke('lsp-references', projectPath, filePath, symbolName),
+    lspHover: (projectPath, filePath, line, column) => ipcRenderer.invoke('lsp-hover', projectPath, filePath, line, column),
+    lspProjectSymbols: (projectPath) => ipcRenderer.invoke('lsp-project-symbols', projectPath),
+    lspInvalidate: () => ipcRenderer.invoke('lsp-invalidate'),
+
+    // ── Code Index (Semantic Search) ──
+    codeIndexBuild: (projectPath) => ipcRenderer.invoke('code-index-build', projectPath),
+    codeIndexSearch: (query, maxResults) => ipcRenderer.invoke('code-index-search', query, maxResults),
+    codeIndexStats: () => ipcRenderer.invoke('code-index-stats'),
+    codeIndexUpdate: () => ipcRenderer.invoke('code-index-update'),
+
     // Platform
     platform: process.platform,
 });

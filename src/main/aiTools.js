@@ -89,6 +89,92 @@ function isPathSafe(filePath) {
 }
 
 // ══════════════════════════════════════════
+//  Fuzzy Text Matching
+// ══════════════════════════════════════════
+
+/**
+ * Fuzzy find a text block in content using line-by-line similarity.
+ * Uses Levenshtein distance normalized by line length.
+ * Returns { start, end, similarity, matchedText } or null.
+ */
+function fuzzyFindBlock(content, searchBlock) {
+    const contentLines = content.split('\n');
+    const searchLines = searchBlock.split('\n').map(l => l.trim());
+    const searchLen = searchLines.length;
+
+    if (searchLen === 0 || contentLines.length === 0) return null;
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    // Sliding window over content lines
+    for (let i = 0; i <= contentLines.length - searchLen; i++) {
+        let totalSim = 0;
+        for (let j = 0; j < searchLen; j++) {
+            const contentLine = contentLines[i + j].trim();
+            const searchLine = searchLines[j];
+            totalSim += lineSimilarity(contentLine, searchLine);
+        }
+        const avgSim = totalSim / searchLen;
+
+        if (avgSim > bestScore) {
+            bestScore = avgSim;
+            // Calculate character positions
+            const startCharPos = contentLines.slice(0, i).join('\n').length + (i > 0 ? 1 : 0);
+            const matchedText = contentLines.slice(i, i + searchLen).join('\n');
+            const endCharPos = startCharPos + matchedText.length;
+            bestMatch = { start: startCharPos, end: endCharPos, similarity: avgSim, matchedText };
+        }
+    }
+
+    return bestMatch;
+}
+
+/**
+ * Line similarity using normalized Levenshtein distance (0-1).
+ * Optimized: skip full calculation for very different length strings.
+ */
+function lineSimilarity(a, b) {
+    if (a === b) return 1.0;
+    if (a.length === 0 || b.length === 0) return 0;
+
+    const maxLen = Math.max(a.length, b.length);
+    // Quick reject if lengths are too different
+    if (Math.abs(a.length - b.length) / maxLen > 0.4) return 0.3;
+
+    // Levenshtein with early termination
+    const dist = levenshtein(a, b, Math.floor(maxLen * 0.3)); // terminate if dist > 30%
+    if (dist === -1) return 0.3; // exceeded threshold
+    return 1.0 - dist / maxLen;
+}
+
+/**
+ * Levenshtein distance with early termination.
+ * Returns -1 if distance exceeds maxDist (optimization for large strings).
+ */
+function levenshtein(a, b, maxDist = Infinity) {
+    const m = a.length, n = b.length;
+    if (Math.abs(m - n) > maxDist) return -1;
+
+    // Use single-row optimization
+    let prev = Array.from({ length: n + 1 }, (_, i) => i);
+    let curr = new Array(n + 1);
+
+    for (let i = 1; i <= m; i++) {
+        curr[0] = i;
+        let rowMin = i;
+        for (let j = 1; j <= n; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+            rowMin = Math.min(rowMin, curr[j]);
+        }
+        if (rowMin > maxDist) return -1; // Early termination
+        [prev, curr] = [curr, prev];
+    }
+    return prev[n];
+}
+
+// ══════════════════════════════════════════
 //  Session Tracking
 // ══════════════════════════════════════════
 
@@ -1001,6 +1087,7 @@ const TOOL_DEFINITIONS = [
                         description: 'Array of edit operations to apply sequentially',
                     },
                     description: { type: 'string', description: 'Brief description of the changes' },
+                    dry_run: { type: 'boolean', description: 'If true, preview all edits without writing to disk. Returns what would change.' },
                 },
                 required: ['file_path', 'edits'],
             },
@@ -1595,7 +1682,34 @@ async function executeTool(name, args) {
                 const content = fs.readFileSync(file_path, 'utf-8');
                 const occurrences = content.split(old_string).length - 1;
                 if (occurrences === 0) {
-                    return { error: `old_string not found in ${file_path}. Make sure it matches exactly including whitespace.` };
+                    // Try fuzzy match — find the closest matching block in the file
+                    const fuzzyResult = fuzzyFindBlock(content, old_string);
+                    if (fuzzyResult && fuzzyResult.similarity >= 0.85) {
+                        // Found a close match — use it but warn
+                        logger.info('edit', `Fuzzy match used for ${file_path} (${Math.round(fuzzyResult.similarity * 100)}% similar)`);
+                        const newContent = content.slice(0, fuzzyResult.start) + new_string + content.slice(fuzzyResult.end);
+                        fs.writeFileSync(file_path, newContent);
+
+                        // Track the edit
+                        fileContext.trackEdit(file_path, old_string, new_string);
+
+                        // Notify renderer
+                        const fLinesRemoved = old_string.split('\n').length;
+                        const fLinesAdded = new_string.split('\n').length;
+                        sendToRenderer('ai-file-changed', { action: 'edited', path: file_path, linesAdded: fLinesAdded, linesRemoved: fLinesRemoved });
+
+                        return {
+                            success: true,
+                            file_path,
+                            fuzzy_match: true,
+                            similarity: Math.round(fuzzyResult.similarity * 100),
+                            lines_removed: fLinesRemoved,
+                            lines_added: fLinesAdded,
+                            warning: `Used fuzzy match (${Math.round(fuzzyResult.similarity * 100)}% similar). Original text had minor differences.`
+                        };
+                    }
+
+                    return { error: `old_string not found in ${path.basename(file_path)}. ${fuzzyResult ? `Best match was ${Math.round(fuzzyResult.similarity * 100)}% similar (needs ≥85%).` : 'No similar text found.'} Ensure it matches the file content exactly, including whitespace and indentation. Use read_file to check the current content.` };
                 }
                 if (occurrences > 1) {
                     return { error: `old_string found ${occurrences} times in ${file_path}. It must be unique. Include more surrounding context.` };
@@ -1743,8 +1857,15 @@ async function executeTool(name, args) {
                         return true;
                     });
 
-                    const limited = uniqueMatches.slice(0, max_results);
-                    const overflow = uniqueMatches.length > max_results ? uniqueMatches.length - max_results : 0;
+                    // Re-rank results by semantic relevance if code index is available
+                    let ranked = uniqueMatches;
+                    try {
+                        const { rankSearchResults } = require('./codeIndex');
+                        ranked = rankSearchResults(uniqueMatches, query);
+                    } catch {}
+
+                    const limited = ranked.slice(0, max_results);
+                    const overflow = ranked.length > max_results ? ranked.length - max_results : 0;
                     const result = { query, matches: limited, total: limited.length };
                     if (overflow > 0) {
                         result.overflow = `... and ${overflow} more matches (use more specific query to narrow)`;
@@ -2181,29 +2302,31 @@ async function executeTool(name, args) {
             }
 
             case 'multi_edit': {
-                const { file_path, edits, description } = args;
+                const { file_path, edits, description, dry_run } = args;
                 if (!fs.existsSync(file_path)) {
                     return { error: `File not found: ${file_path}` };
                 }
 
-                // Auto-backup before edit
-                const meBackupDir = path.join(os.homedir(), '.onicode', 'auto-backups');
-                if (!fs.existsSync(meBackupDir)) fs.mkdirSync(meBackupDir, { recursive: true });
-                const meBackupName = path.basename(file_path) + '.' + Date.now() + '.bak';
-                try {
-                    if (fs.existsSync(file_path)) {
-                        fs.copyFileSync(file_path, path.join(meBackupDir, meBackupName));
+                // Auto-backup before edit (skip for dry run)
+                if (!dry_run) {
+                    const meBackupDir = path.join(os.homedir(), '.onicode', 'auto-backups');
+                    if (!fs.existsSync(meBackupDir)) fs.mkdirSync(meBackupDir, { recursive: true });
+                    const meBackupName = path.basename(file_path) + '.' + Date.now() + '.bak';
+                    try {
+                        if (fs.existsSync(file_path)) {
+                            fs.copyFileSync(file_path, path.join(meBackupDir, meBackupName));
+                        }
+                    } catch (e) {
+                        logger.warn('backup', `Auto-backup failed for ${file_path}: ${e.message}`);
                     }
-                } catch (e) {
-                    logger.warn('backup', `Auto-backup failed for ${file_path}: ${e.message}`);
+                    // Cleanup old backups (keep last 100)
+                    try {
+                        const meBackups = fs.readdirSync(meBackupDir).filter(f => f.endsWith('.bak')).sort();
+                        while (meBackups.length > 100) {
+                            fs.unlinkSync(path.join(meBackupDir, meBackups.shift()));
+                        }
+                    } catch {}
                 }
-                // Cleanup old backups (keep last 100)
-                try {
-                    const meBackups = fs.readdirSync(meBackupDir).filter(f => f.endsWith('.bak')).sort();
-                    while (meBackups.length > 100) {
-                        fs.unlinkSync(path.join(meBackupDir, meBackups.shift()));
-                    }
-                } catch {}
 
                 let content = fs.readFileSync(file_path, 'utf-8');
                 const results = [];
@@ -2212,18 +2335,65 @@ async function executeTool(name, args) {
                     const { old_string, new_string } = edits[i];
                     const occurrences = content.split(old_string).length - 1;
                     if (occurrences === 0) {
-                        return { error: `Edit ${i + 1}: old_string not found. Previous edits may have changed the file content.` };
+                        // Try fuzzy match fallback
+                        const fuzzyResult = fuzzyFindBlock(content, old_string);
+                        if (fuzzyResult && fuzzyResult.similarity >= 0.85) {
+                            logger.info('multi_edit', `Edit ${i + 1}: fuzzy match used (${Math.round(fuzzyResult.similarity * 100)}% similar)`);
+                            content = content.slice(0, fuzzyResult.start) + new_string + content.slice(fuzzyResult.end);
+                            results.push({
+                                index: i,
+                                success: true,
+                                fuzzy_match: true,
+                                similarity: Math.round(fuzzyResult.similarity * 100),
+                            });
+                            continue;
+                        }
+                        // Build error with context about which edits succeeded
+                        const appliedSummary = results.length > 0
+                            ? ` Edits 1-${results.length} matched successfully (not written to disk).`
+                            : '';
+                        const fuzzyHint = fuzzyResult
+                            ? ` Best match was ${Math.round(fuzzyResult.similarity * 100)}% similar (needs >=85%).`
+                            : ' No similar text found.';
+                        return { error: `Edit ${i + 1}/${edits.length}: old_string not found.${fuzzyHint}${appliedSummary} No changes were written. Use read_file to check current content.` };
                     }
                     if (occurrences > 1) {
-                        return { error: `Edit ${i + 1}: old_string found ${occurrences} times. Must be unique.` };
+                        const appliedSummary = results.length > 0
+                            ? ` Edits 1-${results.length} matched successfully (not written to disk).`
+                            : '';
+                        return { error: `Edit ${i + 1}/${edits.length}: old_string found ${occurrences} times. Must be unique. Include more context.${appliedSummary} No changes were written.` };
                     }
                     content = content.replace(old_string, new_string);
                     results.push({ index: i, success: true });
                 }
 
+                // Dry run — return preview without writing
+                if (dry_run) {
+                    const fuzzyCount = results.filter(r => r.fuzzy_match).length;
+                    return {
+                        success: true,
+                        dry_run: true,
+                        file_path,
+                        edits_applied: results.length,
+                        fuzzy_matches: fuzzyCount,
+                        results,
+                        description,
+                        message: `Dry run complete: all ${results.length} edits would apply successfully${fuzzyCount > 0 ? ` (${fuzzyCount} via fuzzy match)` : ''}. Run again without dry_run to write changes.`,
+                    };
+                }
+
                 fs.writeFileSync(file_path, content);
                 fileContext.trackEdit(file_path, `[multi_edit: ${edits.length} edits]`, description || '');
-                return { success: true, file_path, edits_applied: results.length, description };
+
+                const fuzzyCount = results.filter(r => r.fuzzy_match).length;
+                return {
+                    success: true,
+                    file_path,
+                    edits_applied: results.length,
+                    fuzzy_matches: fuzzyCount,
+                    results,
+                    description,
+                };
             }
 
             case 'init_project': {

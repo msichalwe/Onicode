@@ -280,6 +280,20 @@ interface OnicodeAPI {
     compactMessages: (messages: Array<{ role: string; content: string; toolSteps?: unknown[] }>) => Promise<{ messages: Array<{ role: string; content: string }>; compacted: boolean; summary?: string }>;
     estimateTokens: (messages: Array<{ role: string; content: string }>) => Promise<{ tokens: number; messageCount: number }>;
 
+    // Code Intelligence (LSP)
+    lspSymbols: (projectPath: string, filePath: string) => Promise<Array<{ name: string; kind: string; line: number; exported: boolean; signature?: string }>>;
+    lspDefinition: (projectPath: string, filePath: string, line: number, column: number) => Promise<{ file: string; line: number; column: number; name: string; kind: string; preview: string } | null>;
+    lspReferences: (projectPath: string, filePath: string, symbolName: string) => Promise<Array<{ file: string; line: number; column: number; preview: string }>>;
+    lspHover: (projectPath: string, filePath: string, line: number, column: number) => Promise<{ type: string; documentation?: string; signature?: string } | null>;
+    lspProjectSymbols: (projectPath: string) => Promise<Record<string, Array<{ name: string; kind: string; line: number; exported: boolean }>>>;
+    lspInvalidate: () => Promise<void>;
+
+    // Code Index (Semantic Search)
+    codeIndexBuild: (projectPath: string) => Promise<{ files: number; uniqueTokens: number; projectPath: string }>;
+    codeIndexSearch: (query: string, maxResults?: number) => Promise<Array<{ file: string; score: number; matchedTokens: string[]; preview: string }>>;
+    codeIndexStats: () => Promise<{ files: number; uniqueTokens: number; projectPath: string | null }>;
+    codeIndexUpdate: () => Promise<{ updated: number; removed: number; added: number }>;
+
     platform: string;
 }
 

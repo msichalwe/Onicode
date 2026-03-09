@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { marked } from 'marked';
 import { SLASH_COMMANDS } from '../commands/registry';
 import { executeCommand } from '../commands/executor';
-import { buildSystemPrompt } from '../ai/systemPrompt';
+import { buildSystemPromptCached } from '../ai/systemPrompt';
 import QuestionDialog, { parseQuestions, isQuestionMessage } from './QuestionDialog';
 import type { ChatScope } from '../App';
 import type { ActiveProject } from './ProjectModeBar';
@@ -695,7 +695,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         // Build context-aware system prompt
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
-        const systemContent = buildSystemPrompt({
+        const systemContent = buildSystemPromptCached({
             activeProjectName: activeProject?.name,
             activeProjectPath: activeProject?.path,
             projectDocs,

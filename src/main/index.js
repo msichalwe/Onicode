@@ -12,11 +12,38 @@ const { logger, registerLoggerIPC } = require('./logger');
 const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
-const { registerCompactorIPC } = require('./compactor');
+const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
 const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses } = require('./aiTools');
 const { conversationStorage, closeDB } = require('./storage');
+const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
+const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
 
 let mainWindow = null;
+
+// Combine all tool definitions from all modules
+function getAllToolDefinitions() {
+    return [
+        ...TOOL_DEFINITIONS,
+        ...getLSPToolDefinitions(),
+        ...getCodeIndexToolDefinitions(),
+    ];
+}
+
+// Route tool calls to the right executor
+async function executeAnyTool(name, args) {
+    // LSP tools
+    if (['find_symbol', 'find_references', 'list_symbols', 'get_type_info'].includes(name)) {
+        return executeLSPTool(name, args, _currentProjectPath);
+    }
+    // Code index tools
+    if (['semantic_search', 'index_codebase'].includes(name)) {
+        return executeCodeIndexTool(name, args, _currentProjectPath);
+    }
+    // Default: aiTools executor
+    return executeTool(name, args);
+}
+
+let _currentProjectPath = null;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -409,6 +436,7 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
     }
 
     // Reload hooks for current project (ensures project-level hooks are fresh)
+    _currentProjectPath = projectPath;
     if (projectPath) loadHooks(projectPath);
 
     // Auto-generate session title from first user message (fire-and-forget)
@@ -450,7 +478,7 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
     };
 
     if (includeTools && !isOModel) {
-        bodyObj.tools = toResponsesAPITools(TOOL_DEFINITIONS);
+        bodyObj.tools = toResponsesAPITools(getAllToolDefinitions());
         if (forceToolChoice) {
             bodyObj.tool_choice = 'required';
         }
@@ -764,7 +792,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 });
 
                 logger.toolCall(fn.name, args, round);
-                const toolResult = await executeTool(fn.name, args);
+                const toolResult = await executeAnyTool(fn.name, args);
                 logger.toolResult(fn.name, toolResult, round);
 
                 mainWindow?.webContents.send('ai-tool-result', {
@@ -831,7 +859,7 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
 
     // Add tools for function calling (skip for o-models which may not support tools well)
     if (includeTools && !isOModel) {
-        bodyObj.tools = TOOL_DEFINITIONS;
+        bodyObj.tools = getAllToolDefinitions();
         bodyObj.tool_choice = forceToolChoice ? 'required' : 'auto';
     }
 
@@ -1036,6 +1064,9 @@ function makeSubAgentAICall(messages, providerConfig, toolOverrides) {
 // Wire sub-agent AI call function
 setAICallFunction(makeSubAgentAICall);
 
+// Wire AI call function to compactor for semantic compaction
+setCompactorAICall(makeSubAgentAICall);
+
 /**
  * Context compaction — summarize old messages when conversation gets too long.
  * Keeps the system prompt and last N messages, replaces the middle with a summary.
@@ -1239,8 +1270,13 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         round++;
 
         // Auto-compact conversation if it's getting too long
+        // Prefer semantic (AI-powered) compaction, fall back to mechanical
         if (round > 3) {
-            conversationMessages = compactConversation(conversationMessages);
+            try {
+                conversationMessages = await semanticCompact(conversationMessages);
+            } catch {
+                conversationMessages = compactConversation(conversationMessages);
+            }
         }
 
         // Notify renderer of agentic step
@@ -1334,7 +1370,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
 
             // Execute the tool
             logger.toolCall(tc.name, args, round);
-            const toolResult = await executeTool(tc.name, args);
+            const toolResult = await executeAnyTool(tc.name, args);
             logger.toolResult(tc.name, toolResult, round);
 
             // Notify renderer: tool result
@@ -1663,6 +1699,14 @@ const DEFAULT_PERMISSIONS = {
     git_checkout: 'allow',
     git_stash: 'allow',
     git_pull: 'allow',
+    // LSP tools
+    find_symbol: 'allow',
+    find_references: 'allow',
+    list_symbols: 'allow',
+    get_type_info: 'allow',
+    // Code index tools
+    semantic_search: 'allow',
+    index_codebase: 'allow',
 };
 
 let activePermissions = { ...DEFAULT_PERMISSIONS };
@@ -1763,6 +1807,8 @@ registerBrowserIPC();
 registerHooksIPC(ipcMain);
 registerCommandsIPC(ipcMain);
 registerCompactorIPC(ipcMain);
+registerLSPIPC(ipcMain);
+registerCodeIndexIPC(ipcMain);
 
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {

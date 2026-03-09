@@ -9,6 +9,14 @@
 const DEFAULT_TOKEN_THRESHOLD = 60000;
 const DEFAULT_KEEP_LAST = 10;
 
+let _aiCallFunction = null;
+
+/**
+ * Set the AI call function reference for semantic compaction.
+ * @param {Function} fn — async function(messages, options) => string
+ */
+function setAICallFunction(fn) { _aiCallFunction = fn; }
+
 // ─── Token Estimation ────────────────────────────────────────────────────────
 
 /**
@@ -410,6 +418,78 @@ function dropOrphanedToolResults(messages) {
     return messages.slice(startIndex);
 }
 
+// ─── Semantic Compaction ─────────────────────────────────────────────────────
+
+/**
+ * Semantic compaction — uses the AI to create an intelligent summary
+ * Falls back to mechanical compaction if AI is unavailable
+ */
+async function semanticCompact(messages, keepRecent = DEFAULT_KEEP_LAST) {
+    const splitIndex = messages.length - keepRecent;
+    if (splitIndex <= 1) return messages; // Nothing to compact
+
+    const oldMessages = messages.slice(0, splitIndex);
+    const recentMessages = messages.slice(splitIndex);
+
+    // Try AI-powered summarization
+    try {
+        const aiCall = _aiCallFunction;
+        if (aiCall) {
+            const summaryPrompt = [
+                {
+                    role: 'system',
+                    content: `You are a conversation summarizer for an AI coding assistant. Create a concise but comprehensive summary of the conversation below. Focus on:
+1. What files were created, modified, or deleted (with paths)
+2. Key decisions made and why
+3. Current state of the project/task
+4. Any errors encountered and how they were resolved
+5. What the user was trying to accomplish
+6. Any important context the AI needs to continue the work
+
+Format as structured markdown. Be thorough but concise. Include exact file paths and line numbers where relevant.`
+                },
+                {
+                    role: 'user',
+                    content: `Summarize this conversation:\n\n${oldMessages.map(m => `[${m.role}]: ${typeof m.content === 'string' ? m.content.slice(0, 2000) : JSON.stringify(m.content).slice(0, 2000)}`).join('\n\n')}`
+                }
+            ];
+
+            // Use a compact model call (no streaming, short response)
+            const summary = await aiCall(summaryPrompt, { maxTokens: 2000, noStream: true });
+
+            if (summary && summary.length > 50) {
+                try {
+                    const { logger } = require('./logger');
+                    logger.info('compactor', `Semantic compaction: ${oldMessages.length} messages → AI summary (${summary.length} chars)`);
+                } catch {}
+
+                // Save to memory
+                try {
+                    const { saveCompactionToMemory } = require('./memory');
+                    saveCompactionToMemory(summary, splitIndex);
+                } catch {}
+
+                return [
+                    messages[0], // Keep system message
+                    {
+                        role: 'assistant',
+                        content: `[CONTEXT COMPACTION — AI Summary of ${oldMessages.length - 1} messages]\n\n${summary}\n\n[End of summary — continue from where you left off]`
+                    },
+                    ...recentMessages
+                ];
+            }
+        }
+    } catch (err) {
+        try {
+            const { logger } = require('./logger');
+            logger.warn('compactor', `Semantic compaction failed, falling back to mechanical: ${err.message}`);
+        } catch {}
+    }
+
+    // Fallback to mechanical compaction
+    return compactMessages(messages, keepRecent).messages;
+}
+
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
 /**
@@ -500,5 +580,7 @@ module.exports = {
     estimateTokens,
     shouldCompact,
     compactMessages,
+    semanticCompact,
+    setAICallFunction: setAICallFunction,
     registerCompactorIPC,
 };
