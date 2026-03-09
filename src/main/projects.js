@@ -147,7 +147,9 @@ function registerProjectIPC(ipcMain, getWindow) {
         if (!name || !projectPath) return { error: 'Project name and path are required' };
 
         try {
-            const fullPath = path.resolve(projectPath, name.replace(/\s+/g, '-').toLowerCase());
+            // Expand ~ to home directory (renderer can't access os.homedir)
+            const expandedPath = projectPath.replace(/^~/, os.homedir());
+            const fullPath = path.resolve(expandedPath, name.replace(/\s+/g, '-').toLowerCase());
 
             // Create project directory
             ensureDir(fullPath);
@@ -209,10 +211,96 @@ function registerProjectIPC(ipcMain, getWindow) {
                     path: path.join(onidocsPath, f),
                     content: fs.readFileSync(path.join(onidocsPath, f), 'utf-8'),
                 }));
-            } catch {}
+            } catch { }
         }
 
         return { project, docs };
+    });
+
+    // Scan and import an existing project folder
+    ipcMain.handle('project-scan', async (_event, folderPath) => {
+        try {
+            const expandedPath = folderPath.replace(/^~/, os.homedir());
+            const fullPath = path.resolve(expandedPath);
+
+            if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isDirectory()) {
+                return { error: `Directory not found: ${fullPath}` };
+            }
+
+            const projectName = path.basename(fullPath);
+            const scanResult = { name: projectName, path: fullPath };
+
+            // Detect git
+            const gitDir = path.join(fullPath, '.git');
+            scanResult.hasGit = fs.existsSync(gitDir);
+            if (scanResult.hasGit) {
+                try {
+                    const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: fullPath, timeout: 3000 }).toString().trim();
+                    scanResult.gitBranch = branch;
+                } catch { scanResult.gitBranch = 'unknown'; }
+            }
+
+            // Detect existing onidocs
+            const onidocsPath = path.join(fullPath, 'onidocs');
+            const dotOnidocsPath = path.join(fullPath, '.onidocs');
+            scanResult.hasOnidocs = fs.existsSync(onidocsPath) || fs.existsSync(dotOnidocsPath);
+
+            // Create .onidocs if missing
+            if (!scanResult.hasOnidocs) {
+                const docsPath = path.join(fullPath, '.onidocs');
+                ensureDir(docsPath);
+                fs.writeFileSync(path.join(docsPath, 'project.md'), `# ${projectName}\n\n## Overview\nImported existing project.\n\n## Tech Stack\n*(auto-detected — update this)*\n\n## Architecture\n*(describe here)*\n`);
+                fs.writeFileSync(path.join(docsPath, 'tasks.md'), `# ${projectName} — Tasks\n\n## TODO\n- [ ] Review codebase\n- [ ] Update documentation\n\n## IN PROGRESS\n\n## DONE\n- [x] Project imported into Onicode\n`);
+                fs.writeFileSync(path.join(docsPath, 'changelog.md'), `# ${projectName} — Changelog\n\n## [Imported] — ${new Date().toISOString().split('T')[0]}\n- Imported existing project into Onicode\n`);
+                scanResult.createdOnidocs = true;
+            }
+
+            // Quick directory scan for tech detection
+            const files = fs.readdirSync(fullPath);
+            const techSignals = [];
+            if (files.includes('package.json')) techSignals.push('Node.js');
+            if (files.includes('tsconfig.json')) techSignals.push('TypeScript');
+            if (files.includes('next.config.js') || files.includes('next.config.mjs') || files.includes('next.config.ts')) techSignals.push('Next.js');
+            if (files.includes('vite.config.ts') || files.includes('vite.config.js')) techSignals.push('Vite');
+            if (files.includes('Cargo.toml')) techSignals.push('Rust');
+            if (files.includes('go.mod')) techSignals.push('Go');
+            if (files.includes('requirements.txt') || files.includes('pyproject.toml')) techSignals.push('Python');
+            if (files.includes('Gemfile')) techSignals.push('Ruby');
+            if (files.includes('docker-compose.yml') || files.includes('Dockerfile')) techSignals.push('Docker');
+            scanResult.detectedTech = techSignals;
+
+            // Count files (top-level)
+            const topLevel = files.filter(f => !f.startsWith('.') && f !== 'node_modules');
+            scanResult.fileCount = topLevel.length;
+            scanResult.topLevelFiles = topLevel.slice(0, 20);
+
+            // Check if already registered
+            const projects = loadProjects();
+            const existing = projects.find(p => p.path === fullPath);
+            if (existing) {
+                scanResult.alreadyRegistered = true;
+                scanResult.projectId = existing.id;
+            } else {
+                // Register as project
+                const project = {
+                    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                    name: projectName,
+                    path: fullPath,
+                    description: `Imported project (${techSignals.join(', ') || 'unknown stack'})`,
+                    techStack: techSignals.join(', '),
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                };
+                projects.unshift(project);
+                saveProjects(projects);
+                scanResult.projectId = project.id;
+                scanResult.registered = true;
+            }
+
+            return { success: true, scan: scanResult };
+        } catch (err) {
+            return { error: err.message };
+        }
     });
 
     // Delete project entry (does not delete files)

@@ -45,6 +45,24 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('ai-agent-step', handler);
     },
 
+    onPanelOpen: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-panel-open', handler);
+        return () => ipcRenderer.removeListener('ai-panel-open', handler);
+    },
+
+    onTerminalSession: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-terminal-session', handler);
+        return () => ipcRenderer.removeListener('ai-terminal-session', handler);
+    },
+
+    onAITerminalOutput: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-terminal-output', handler);
+        return () => ipcRenderer.removeListener('ai-terminal-output', handler);
+    },
+
     // Codex OAuth — PKCE in main, paste-redirect flow
     codexOAuthGetAuthUrl: () => ipcRenderer.invoke('codex-oauth-get-auth-url'),
     codexOAuthExchange: (redirectUrl) => ipcRenderer.invoke('codex-oauth-exchange', redirectUrl),
@@ -75,6 +93,7 @@ contextBridge.exposeInMainWorld('onicode', {
 
     // ── Projects ──
     initProject: (opts) => ipcRenderer.invoke('project-init', opts),
+    scanProject: (folderPath) => ipcRenderer.invoke('project-scan', folderPath),
     listProjects: () => ipcRenderer.invoke('project-list'),
     getProject: (projectId) => ipcRenderer.invoke('project-get', projectId),
     deleteProject: (projectId) => ipcRenderer.invoke('project-delete', projectId),

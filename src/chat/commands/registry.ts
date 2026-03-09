@@ -25,6 +25,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
     // ── Project ──
     { name: '/init', description: 'Create a new project with onidocs', usage: '/init <name> [path]', category: 'project' },
+    { name: '/openproject', description: 'Open and scan an existing project folder (creates onidocs if missing, detects git)', usage: '/openproject <path>', category: 'project' },
     { name: '/projects', description: 'List all projects', usage: '/projects', category: 'project' },
     { name: '/open', description: 'Open project in external editor', usage: '/open <editor>', category: 'project' },
     { name: '/status', description: 'Show project and system status', usage: '/status', category: 'project' },

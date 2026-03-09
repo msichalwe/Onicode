@@ -45,6 +45,23 @@ interface OnicodeAPI {
     onToolCall: (callback: (data: { id: string; name: string; args: Record<string, unknown>; round: number }) => void) => () => void;
     onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;
     onAgentStep: (callback: (data: { round: number; status: string }) => void) => () => void;
+    onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
+    onTerminalSession: (callback: (data: {
+        id: string;
+        command: string;
+        cwd: string;
+        startedAt: number;
+        status: 'running' | 'done' | 'error';
+        exitCode?: number;
+        finishedAt?: number;
+        duration?: number;
+    }) => void) => () => void;
+    onAITerminalOutput: (callback: (data: {
+        sessionId: string;
+        type: 'prompt' | 'stdout' | 'stderr' | 'exit';
+        data: string;
+        cwd?: string;
+    }) => void) => () => void;
 
     // Codex OAuth
     codexOAuthGetAuthUrl: () => Promise<{ success?: boolean; error?: string; authUrl?: string }>;
@@ -96,6 +113,24 @@ interface OnicodeAPI {
         techStack?: string;
         scope?: string;
     }) => Promise<{ success?: boolean; project?: ProjectMeta; error?: string }>;
+    scanProject: (folderPath: string) => Promise<{
+        success?: boolean;
+        error?: string;
+        scan?: {
+            name: string;
+            path: string;
+            hasGit: boolean;
+            gitBranch?: string;
+            hasOnidocs: boolean;
+            createdOnidocs?: boolean;
+            detectedTech: string[];
+            fileCount: number;
+            topLevelFiles: string[];
+            alreadyRegistered?: boolean;
+            registered?: boolean;
+            projectId: string;
+        };
+    }>;
     listProjects: () => Promise<{ projects: ProjectMeta[] }>;
     getProject: (projectId: string) => Promise<{ project?: ProjectMeta; docs?: ProjectDoc[]; error?: string }>;
     deleteProject: (projectId: string) => Promise<{ success: boolean }>;

@@ -4,6 +4,111 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.0] — 2025-03-09
+
+### Project Mode, Question Dialog, Scrollbar Theming, Panel Overhaul
+
+#### Added
+
+- **Project Mode Bar** — Top bar appears when a project is active (via `/init` or `/openproject`), showing project name, git branch, Open/Hand off/Commit actions, and diff stats. Inspired by Cursor/Windsurf project bars. Persisted via `localStorage`.
+- **AI Question Dialog** — AI discovery questions now render as an interactive form in the chat with selectable option pills per question, custom text input, and a "Let AI Decide" button. No more plain-text questions.
+- **`QuestionDialog` component** (`src/chat/components/QuestionDialog.tsx`) — Parses numbered AI questions with parenthetical options, renders structured form UI.
+- **`ProjectModeBar` component** (`src/chat/components/ProjectModeBar.tsx`) — Top bar with project name, branch, Open/Hand off/Commit buttons, diff stats.
+- **Project Widget in side panel** — New "Project" tab in the right panel showing active project details (name, path, tech stack, git branch, docs list).
+- **Global scrollbar theming** — All scrollbars (sidebar, chat, panels) now use theme CSS variables (`--border`, `--text-tertiary`) via `*::-webkit-scrollbar` rules.
+- **`onicode-project-activate` custom event** — Fired by `/init` and `/openproject` to activate project mode across the app.
+
+#### Changed
+
+- **Side panel hidden by default** — Panel starts closed (`widget: null`), only opens when user clicks an icon or AI triggers it. Removed `panelHidden` state and localStorage mode logic.
+- **App layout** — `.app` is now `flex-direction: column` to accommodate the project mode bar above the sidebar+content row. New `.app-body` wrapper for the horizontal layout.
+- **Widget list** — Added `project` widget type to `WidgetType` union and `WIDGETS` array in `RightPanel.tsx`.
+- **System prompt Phase 2** — Now explicitly instructs AI to register the project in Onicode first before coding, to activate project mode.
+
+#### Fixed
+
+- **Scrollbars ignored theme** — Sidebar and main content scrollbars used browser defaults. Now all scrollbars match the active theme.
+- **Side panel open by default** — Was always showing terminal on load. Now starts hidden, only opens on demand.
+
+---
+
+## [0.3.3] — 2025-03-09
+
+### AI Question Generator, /openproject, Attachment Overhaul
+
+#### Added
+
+- **`/openproject <path>` command** — Scans an existing project folder, auto-detects tech stack and git, creates `.onidocs/` if missing, registers in project list.
+- **AI Question Generator** — System prompt instructs AI to ask up to 5 discovery questions before project creation. Skippable.
+- **"ACT, DON'T TALK" enforcement** — System prompt rewritten with explicit forbidden/required patterns.
+- **File attachment content reading** — Attached text/code files read via FileReader, content sent to AI in code blocks.
+
+#### Changed
+
+- `sendToAI` accepts `currentAttachments` parameter for rich attachment context.
+- Attachment context format: filenames → full file content in fenced code blocks.
+
+#### Fixed
+
+- Attachment handling only sent filenames to AI, not content.
+
+---
+
+## [0.3.2] — 2025-03-09
+
+### Real-Time Terminal Output, Panel Collapse, Project System Integration
+
+#### Fixed
+
+- **AI commands invisible in terminal** — Rewrote `run_command` from `exec()` to `spawn()`, streaming stdout/stderr to the terminal widget in real-time via new `ai-terminal-output` IPC event
+- **Side panel missing collapse/retract button** — Added collapse/expand toggle with chevron icon; collapsed state shows only icon tabs in a narrow 48px sidebar
+- **AI not using project system** — When asked to "create an app", AI would create files in the IDE source tree instead of using Onicode's project system (onidocs, kanban, etc.)
+- **Sidebar View type mismatch** — Added `'todo'` to Sidebar's `View` type to match App.tsx
+
+#### Added
+
+- **`ai-terminal-output` IPC event** — Streams real-time command output (prompt, stdout, stderr, exit status) from `spawn()` to the terminal widget
+- **Project Creation Protocol in system prompt** — AI now MUST create projects under `~/Documents/OniProjects/` with `.onidocs/` (project.md, tasks.md, changelog.md), git init, and proper config files
+- **Panel collapse/retract** — `right-panel-collapsed` CSS class with vertical tab layout
+- **ANSI strip helper** — `stripAnsi()` in RightPanel.tsx for clean terminal output display
+
+#### Changed
+
+- Default `/init` project directory: `~/Projects` → `~/Documents/OniProjects`
+- `run_command` tool: `exec()` → `spawn()` with real-time output streaming + timeout handling
+- Terminal widget shows command prompts (`❯ command`), live output, and exit status (`✓ exit 0` / `✗ exit N`)
+
+---
+
+## [0.3.1] — 2025-03-10
+
+### Bugfixes: /init, AI Tool Usage, Terminal Auto-Open & Session Tracking
+
+#### Fixed
+
+- **`/init` command broken** — `process.env.HOME` is undefined in sandboxed renderer; moved `~` path expansion to main process (`projects.js`) where `os.homedir()` works
+- **AI not using tools** — `streamChatGPTBackend` (Codex OAuth / Responses API) had zero tool support; rewrote with full agentic tool-calling loop (`streamChatGPTSingle` + agentic wrapper) supporting all 14 tools
+- **Tool definitions format** — Added `toResponsesAPITools()` converter to flatten Chat Completions tool format to Responses API format
+
+#### Added
+
+- **Terminal auto-open** — When AI calls `run_command`, the terminal panel auto-opens via `ai-panel-open` IPC event
+- **Terminal session tracking** — Cascade-like AI command history in terminal panel:
+  - Shows command, status (spinner/✓/✗), duration, exit code
+  - Collapsible session list with live "Running" indicator
+  - Sessions tracked in `aiTools.js` and streamed to renderer via `ai-terminal-session` IPC event
+- **New IPC events**: `ai-panel-open`, `ai-terminal-session`
+- **`setMainWindow()`** in `aiTools.js` — allows tool executor to send IPC events to renderer
+- **`getTerminalSessions()`** — retrieve AI command history
+
+#### Changed
+
+- `streamChatGPTBackend` → full agentic loop (was text-only streaming)
+- `TerminalWidget` wrapped in `widget-terminal-container` with session tracking panel
+- Terminal input now has `title` and `placeholder` attributes (accessibility)
+
+---
+
 ## [0.3.0] — 2025-03-10
 
 ### Phase 2: Cascade-Like Agentic AI Engine

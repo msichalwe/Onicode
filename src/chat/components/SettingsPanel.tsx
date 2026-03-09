@@ -108,6 +108,13 @@ export default function SettingsPanel() {
         setGmail({ connected: false });
     }, []);
 
+    const [panelMode, setPanelMode] = useState(() => localStorage.getItem('onicode-panel-mode') || 'always');
+
+    const changePanelMode = useCallback((mode: string) => {
+        setPanelMode(mode);
+        window.dispatchEvent(new CustomEvent('onicode-panel-mode', { detail: mode }));
+    }, []);
+
     return (
         <div className="settings-panel">
             <h2>Settings</h2>
@@ -125,6 +132,28 @@ export default function SettingsPanel() {
                             <div className="theme-card-name">{t.name}</div>
                         </div>
                     ))}
+                </div>
+            </div>
+
+            <div className="settings-section">
+                <h3>Side Panel</h3>
+                <div className="setting-row">
+                    <div className="setting-label">
+                        <span className="setting-name">Panel Visibility</span>
+                        <span className="setting-desc">Controls whether the right panel (terminal, files, browser) is always shown or hidden by default</span>
+                    </div>
+                    <div className="setting-toggle-group">
+                        <button
+                            className={`setting-toggle-btn ${panelMode === 'always' ? 'active' : ''}`}
+                            onClick={() => changePanelMode('always')}
+                            title="Always show side panel"
+                        >Always Shown</button>
+                        <button
+                            className={`setting-toggle-btn ${panelMode === 'hidden' ? 'active' : ''}`}
+                            onClick={() => changePanelMode('hidden')}
+                            title="Hide side panel by default"
+                        >Hidden</button>
+                    </div>
                 </div>
             </div>
 

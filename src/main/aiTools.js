@@ -7,7 +7,24 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync, exec } = require('child_process');
+const os = require('os');
+const { execSync, spawn } = require('child_process');
+
+// ══════════════════════════════════════════
+//  Main Window Reference (for IPC events)
+// ══════════════════════════════════════════
+
+let _mainWindow = null;
+
+function setMainWindow(win) {
+    _mainWindow = win;
+}
+
+function sendToRenderer(channel, data) {
+    if (_mainWindow?.webContents) {
+        _mainWindow.webContents.send(channel, data);
+    }
+}
 
 // ══════════════════════════════════════════
 //  File Context Tracker
@@ -73,11 +90,21 @@ class FileContextTracker {
 const fileContext = new FileContextTracker();
 
 // ══════════════════════════════════════════
+//  Terminal Session Tracking
+// ══════════════════════════════════════════
+
+const terminalSessions = [];
+
+function getTerminalSessions() {
+    return terminalSessions.slice(-50); // Last 50 sessions
+}
+
+// ══════════════════════════════════════════
 //  Restore Points
 // ══════════════════════════════════════════
 
 const RESTORE_DIR = path.join(
-    process.env.HOME || process.env.USERPROFILE || '/tmp',
+    os.homedir(),
     '.onicode', 'restore-points'
 );
 
@@ -552,7 +579,7 @@ async function executeTool(name, args) {
                         if (!isDir) {
                             try {
                                 item.size = fs.statSync(fullPath).size;
-                            } catch {}
+                            } catch { }
                         }
                         result.push(item);
                         if (isDir && depth < maxD) {
@@ -595,16 +622,124 @@ async function executeTool(name, args) {
 
             case 'run_command': {
                 const { command, cwd, timeout = 30000 } = args;
+                const execCwd = cwd || os.homedir();
+
+                // Auto-open terminal panel in renderer
+                sendToRenderer('ai-panel-open', { type: 'terminal' });
+
+                // Track in terminal session history
+                const sessionEntry = {
+                    id: Date.now().toString(36),
+                    command,
+                    cwd: execCwd,
+                    startedAt: Date.now(),
+                    status: 'running',
+                };
+                terminalSessions.push(sessionEntry);
+                sendToRenderer('ai-terminal-session', sessionEntry);
+
+                // Show the command prompt in terminal
+                sendToRenderer('ai-terminal-output', {
+                    sessionId: sessionEntry.id,
+                    type: 'prompt',
+                    data: `\x1b[36m❯ ${command}\x1b[0m\n`,
+                    cwd: execCwd,
+                });
+
                 return new Promise((resolve) => {
-                    const execCwd = cwd || process.env.HOME || '/';
-                    exec(command, { cwd: execCwd, timeout, maxBuffer: 1024 * 1024, encoding: 'utf-8' }, (err, stdout, stderr) => {
+                    let stdout = '';
+                    let stderr = '';
+
+                    const child = spawn('sh', ['-c', command], {
+                        cwd: execCwd,
+                        env: { ...process.env },
+                        stdio: ['ignore', 'pipe', 'pipe'],
+                    });
+
+                    // Timeout handling
+                    const timer = setTimeout(() => {
+                        child.kill('SIGTERM');
+                        sendToRenderer('ai-terminal-output', {
+                            sessionId: sessionEntry.id,
+                            type: 'stderr',
+                            data: '\n\x1b[31m[Timed out]\x1b[0m\n',
+                        });
+                    }, timeout);
+
+                    // Stream stdout to terminal in real-time
+                    child.stdout.on('data', (chunk) => {
+                        const text = chunk.toString();
+                        stdout += text;
+                        sendToRenderer('ai-terminal-output', {
+                            sessionId: sessionEntry.id,
+                            type: 'stdout',
+                            data: text,
+                        });
+                    });
+
+                    // Stream stderr to terminal in real-time
+                    child.stderr.on('data', (chunk) => {
+                        const text = chunk.toString();
+                        stderr += text;
+                        sendToRenderer('ai-terminal-output', {
+                            sessionId: sessionEntry.id,
+                            type: 'stderr',
+                            data: `\x1b[31m${text}\x1b[0m`,
+                        });
+                    });
+
+                    child.on('close', (code) => {
+                        clearTimeout(timer);
+                        const exitCode = code ?? 1;
+                        const success = exitCode === 0;
+
+                        // Show exit status in terminal
+                        sendToRenderer('ai-terminal-output', {
+                            sessionId: sessionEntry.id,
+                            type: 'exit',
+                            data: success
+                                ? `\x1b[32m✓ exit 0\x1b[0m\n\n`
+                                : `\x1b[31m✗ exit ${exitCode}\x1b[0m\n\n`,
+                        });
+
+                        // Update session tracking
+                        sessionEntry.status = success ? 'done' : 'error';
+                        sessionEntry.exitCode = exitCode;
+                        sessionEntry.finishedAt = Date.now();
+                        sessionEntry.duration = sessionEntry.finishedAt - sessionEntry.startedAt;
+                        sendToRenderer('ai-terminal-session', sessionEntry);
+
                         resolve({
                             command,
                             cwd: execCwd,
-                            exitCode: err ? err.code || 1 : 0,
-                            stdout: (stdout || '').slice(0, 8000),
-                            stderr: (stderr || '').slice(0, 4000),
-                            success: !err,
+                            exitCode,
+                            stdout: stdout.slice(0, 8000),
+                            stderr: stderr.slice(0, 4000),
+                            success,
+                        });
+                    });
+
+                    child.on('error', (err) => {
+                        clearTimeout(timer);
+                        sendToRenderer('ai-terminal-output', {
+                            sessionId: sessionEntry.id,
+                            type: 'stderr',
+                            data: `\x1b[31mError: ${err.message}\x1b[0m\n`,
+                        });
+
+                        sessionEntry.status = 'error';
+                        sessionEntry.exitCode = 1;
+                        sessionEntry.finishedAt = Date.now();
+                        sessionEntry.duration = sessionEntry.finishedAt - sessionEntry.startedAt;
+                        sendToRenderer('ai-terminal-session', sessionEntry);
+
+                        resolve({
+                            command,
+                            cwd: execCwd,
+                            exitCode: 1,
+                            stdout: stdout.slice(0, 8000),
+                            stderr: err.message,
+                            success: false,
                         });
                     });
                 });
@@ -709,4 +844,6 @@ module.exports = {
     updateAgent,
     getAgentStatus,
     listAgents,
+    setMainWindow,
+    getTerminalSessions,
 };

@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SLASH_COMMANDS } from '../commands/registry';
 import { executeCommand } from '../commands/executor';
 import { buildSystemPrompt } from '../ai/systemPrompt';
+import QuestionDialog, { parseQuestions, isQuestionMessage } from './QuestionDialog';
 
 // ══════════════════════════════════════════
 //  Types
@@ -31,6 +32,7 @@ export interface Attachment {
     url?: string;
     size?: number;
     mimeType?: string;
+    content?: string;
 }
 
 export interface Conversation {
@@ -220,6 +222,15 @@ export default function ChatView() {
         cmd.name.toLowerCase().includes('/' + slashFilter)
     );
 
+    // ── Auto-open panels when AI requests (e.g. terminal on run_command) ──
+    useEffect(() => {
+        if (!window.onicode?.onPanelOpen) return;
+        const unsub = window.onicode.onPanelOpen((data) => {
+            requestPanel(data.type);
+        });
+        return unsub;
+    }, []);
+
     // ── Send via Electron IPC (with agentic tool-call support) ──
     const toolStepsRef = useRef<ToolStep[]>([]);
 
@@ -405,7 +416,7 @@ export default function ChatView() {
     }, []);
 
     // ── Main send handler ──
-    const sendToAI = useCallback(async (userMessage: string, allMessages: Message[]) => {
+    const sendToAI = useCallback(async (userMessage: string, allMessages: Message[], currentAttachments?: Attachment[]) => {
         // Guard against React StrictMode double-invoke
         if (sendingRef.current) return;
         sendingRef.current = true;
@@ -426,13 +437,20 @@ export default function ChatView() {
             return;
         }
 
-        // Build attachment context
+        // Build attachment context — include actual file contents for code/text files
         let attachmentContext = '';
-        const lastUserMsg = allMessages.filter((m) => m.role === 'user').slice(-1)[0];
-        if (lastUserMsg?.attachments?.length) {
-            attachmentContext = '\n\n[Attached: ' + lastUserMsg.attachments.map((a) =>
-                a.type === 'link' ? a.url : `${a.name} (${a.type})`
-            ).join(', ') + ']';
+        if (currentAttachments && currentAttachments.length > 0) {
+            const parts: string[] = ['\n\n---\n**Attached files:**'];
+            for (const att of currentAttachments) {
+                if (att.type === 'link') {
+                    parts.push(`\n**Link:** ${att.url}`);
+                } else if (att.content) {
+                    parts.push(`\n**File: \`${att.name}\`** (${att.size ? Math.round(att.size / 1024) + 'KB' : 'unknown size'})\n\`\`\`\n${att.content}\n\`\`\``);
+                } else {
+                    parts.push(`\n**File: \`${att.name}\`** (${att.type}, ${att.size ? Math.round(att.size / 1024) + 'KB' : 'binary'}) — content not readable`);
+                }
+            }
+            attachmentContext = parts.join('');
         }
 
         // Build context-aware system prompt
@@ -494,13 +512,30 @@ export default function ChatView() {
     const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const files = e.target.files;
         if (!files) return;
-        const newAttachments: Attachment[] = Array.from(files).map((f) => ({
-            type: f.type.startsWith('image/') ? 'image' as const : 'file' as const,
-            name: f.name,
-            size: f.size,
-            mimeType: f.type,
-        }));
-        setAttachments((prev) => [...prev, ...newAttachments]);
+
+        Array.from(files).forEach((f) => {
+            const att: Attachment = {
+                type: f.type.startsWith('image/') ? 'image' as const : 'file' as const,
+                name: f.name,
+                size: f.size,
+                mimeType: f.type,
+            };
+
+            // Read text content for code/text files (up to 100KB)
+            const isText = f.type.startsWith('text/') ||
+                /\.(ts|tsx|js|jsx|json|md|css|html|py|rb|go|rs|java|c|cpp|h|yml|yaml|toml|env|sh|sql|xml|csv|txt|log|cfg|ini)$/i.test(f.name);
+
+            if (isText && f.size < 100_000) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    att.content = (reader.result as string).slice(0, 50_000);
+                    setAttachments((prev) => [...prev, att]);
+                };
+                reader.readAsText(f);
+            } else {
+                setAttachments((prev) => [...prev, att]);
+            }
+        });
         e.target.value = '';
     }, []);
 
@@ -580,7 +615,7 @@ export default function ChatView() {
 
         setMessages((prev) => {
             const updated = [...prev, userMessage];
-            sendToAI(text, prev);
+            sendToAI(text, prev, userMessage.attachments);
             return updated;
         });
     }, [input, attachments, handleCommand, sendToAI]);
@@ -847,7 +882,28 @@ export default function ChatView() {
                                 </div>
                                 <div className="message-content-wrapper">
                                     {message.toolSteps && message.toolSteps.length > 0 && renderToolSteps(message.toolSteps)}
-                                    <div className="message-bubble">{renderMessageContent(message.content)}</div>
+                                    {message.role === 'ai' && isQuestionMessage(message.content) ? (
+                                        <div className="message-bubble">
+                                            <QuestionDialog
+                                                questions={parseQuestions(message.content)!}
+                                                onSubmit={(answersText) => {
+                                                    const userMsg: Message = {
+                                                        id: generateId(),
+                                                        role: 'user',
+                                                        content: answersText,
+                                                        timestamp: Date.now(),
+                                                    };
+                                                    setMessages((prev) => {
+                                                        const updated = [...prev, userMsg];
+                                                        sendToAI(answersText, prev);
+                                                        return updated;
+                                                    });
+                                                }}
+                                            />
+                                        </div>
+                                    ) : (
+                                        <div className="message-bubble">{renderMessageContent(message.content)}</div>
+                                    )}
                                     {message.attachments && message.attachments.length > 0 && (
                                         <div className="message-attachments">
                                             {message.attachments.map((att, i) => (

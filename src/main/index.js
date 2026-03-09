@@ -7,7 +7,7 @@ const { registerTerminalIPC, killAllSessions } = require('./terminal');
 const { registerProjectIPC } = require('./projects');
 const { registerGitIPC } = require('./git');
 const { registerConnectorIPC } = require('./connectors');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents } = require('./aiTools');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions } = require('./aiTools');
 
 let mainWindow = null;
 
@@ -55,6 +55,9 @@ function createWindow() {
 
     mainWindow.once('ready-to-show', () => mainWindow.show());
     mainWindow.on('closed', () => { mainWindow = null; });
+
+    // Give aiTools access to mainWindow for IPC events
+    setAIToolsWindow(mainWindow);
 }
 
 // ══════════════════════════════════════════
@@ -389,7 +392,130 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
     }
 });
 
-/** Stream chat via ChatGPT backend API using the Responses API (for OAuth tokens) */
+/** Convert Chat Completions tool defs to Responses API format */
+function toResponsesAPITools(toolDefs) {
+    return toolDefs.map(t => ({
+        type: 'function',
+        name: t.function.name,
+        description: t.function.description,
+        parameters: t.function.parameters,
+    }));
+}
+
+/** Single streaming Responses API call — returns { content, functionCalls } */
+async function streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools = true) {
+    const isOModel = model.startsWith('o');
+
+    const bodyObj = {
+        model,
+        instructions,
+        input: inputItems,
+        stream: true,
+        store: false,
+    };
+
+    if (includeTools && !isOModel) {
+        bodyObj.tools = toResponsesAPITools(TOOL_DEFINITIONS);
+    }
+
+    const abortController = new AbortController();
+    currentAIRequest = abortController;
+
+    const response = await net.fetch('https://chatgpt.com/backend-api/codex/responses', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+            'chatgpt-account-id': accountId,
+            'OpenAI-Beta': 'responses=experimental',
+            'originator': 'codex_cli_rs',
+            'accept': 'text/event-stream',
+        },
+        body: JSON.stringify(bodyObj),
+        signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        currentAIRequest = null;
+        let errorMsg = `ChatGPT backend returned HTTP ${response.status}`;
+        try { const errJson = JSON.parse(errText); errorMsg = errJson.error?.message || errJson.detail || errorMsg; } catch { }
+        if (response.status === 401) errorMsg = 'OAuth token expired. Go to Settings and sign in again.';
+        if (response.status === 403) errorMsg = 'Access denied. Your ChatGPT subscription may not include this model.';
+        console.error('[AI] ChatGPT backend error:', response.status, errText.slice(0, 500));
+        throw new Error(errorMsg);
+    }
+
+    // Parse SSE stream — accumulate text + function calls
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let textContent = '';
+    const functionCalls = new Map(); // item_id -> { call_id, name, arguments }
+    let currentFnItemId = null;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            const dataStr = trimmed.slice(6);
+            if (dataStr === '[DONE]') continue;
+            try {
+                const json = JSON.parse(dataStr);
+
+                // Text delta
+                if (json.type === 'response.output_text.delta' && json.delta) {
+                    textContent += json.delta;
+                    mainWindow?.webContents.send('ai-stream-chunk', json.delta);
+                }
+
+                // Function call started
+                if (json.type === 'response.output_item.added' && json.item?.type === 'function_call') {
+                    const item = json.item;
+                    currentFnItemId = item.id || json.output_index;
+                    functionCalls.set(currentFnItemId, {
+                        call_id: item.call_id,
+                        name: item.name,
+                        arguments: '',
+                    });
+                }
+
+                // Function call arguments delta
+                if (json.type === 'response.function_call_arguments.delta' && json.delta) {
+                    const itemId = json.item_id || currentFnItemId;
+                    const fn = functionCalls.get(itemId);
+                    if (fn) fn.arguments += json.delta;
+                }
+
+                // Function call arguments done
+                if (json.type === 'response.function_call_arguments.done') {
+                    const itemId = json.item_id || currentFnItemId;
+                    const fn = functionCalls.get(itemId);
+                    if (fn && json.arguments) fn.arguments = json.arguments;
+                }
+
+                // Chat Completions fallback (some endpoints return this format)
+                if (json.choices?.[0]?.delta?.content) {
+                    const chunk = json.choices[0].delta.content;
+                    textContent += chunk;
+                    mainWindow?.webContents.send('ai-stream-chunk', chunk);
+                }
+            } catch { }
+        }
+    }
+
+    currentAIRequest = null;
+    return { content: textContent, functionCalls: [...functionCalls.values()] };
+}
+
+/** Stream chat via ChatGPT backend API with agentic tool-calling loop */
 async function streamChatGPTBackend(messages, accessToken, selectedModel) {
     const accountId = getAccountId(accessToken);
     if (!accountId) {
@@ -398,113 +524,71 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
     }
 
     const model = selectedModel || 'gpt-4o';
+    const MAX_ROUNDS = 25;
 
     // Separate system/developer instructions from user/assistant messages
     const systemMessages = messages.filter((m) => m.role === 'system');
     const chatMessages = messages.filter((m) => m.role !== 'system');
 
-    // Build instructions string from system messages
     const instructions = systemMessages.map((m) => m.content).join('\n\n')
-        || 'You are Onicode AI, an intelligent development companion. You help with code generation, code explanation, debugging, brainstorming, and general conversation. Be concise and helpful.';
+        || 'You are Onicode AI, an intelligent development companion.';
 
     // Convert to Responses API input format
-    const input = chatMessages.map((m) => ({
+    const inputItems = chatMessages.map((m) => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: m.content,
     }));
 
-    // Responses API body — matches Codex CLI format
-    const bodyObj = {
-        model,
-        instructions,
-        input,
-        stream: true,
-        store: false,
-    };
-
-    const bodyStr = JSON.stringify(bodyObj);
-    const url = 'https://chatgpt.com/backend-api/codex/responses';
-
-    // Use fetch (via Electron's net-aware Node) to avoid TLS/socket issues with raw https
-    const abortController = new AbortController();
-    currentAIRequest = abortController;
-
     try {
-        const response = await net.fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`,
-                'chatgpt-account-id': accountId,
-                'OpenAI-Beta': 'responses=experimental',
-                'originator': 'codex_cli_rs',
-                'accept': 'text/event-stream',
-            },
-            body: bodyStr,
-            signal: abortController.signal,
-        });
+        for (let round = 0; round < MAX_ROUNDS; round++) {
+            mainWindow?.webContents.send('ai-agent-step', { round, status: 'streaming' });
 
-        if (!response.ok) {
-            const errText = await response.text().catch(() => '');
-            currentAIRequest = null;
-            let errorMsg = `ChatGPT backend returned HTTP ${response.status}`;
-            try {
-                const errJson = JSON.parse(errText);
-                errorMsg = errJson.error?.message || errJson.detail || errorMsg;
-            } catch { }
-            if (response.status === 401) errorMsg = 'OAuth token expired. Go to Settings and sign in again.';
-            if (response.status === 403) errorMsg = 'Access denied. Your ChatGPT subscription may not include this model.';
-            console.error('[AI] ChatGPT backend error:', response.status, errText.slice(0, 500));
-            mainWindow?.webContents.send('ai-stream-done', errorMsg);
-            return { error: errorMsg };
-        }
+            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model);
 
-        // Read SSE stream
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+            // No function calls → we're done
+            if (!result.functionCalls || result.functionCalls.length === 0) {
+                mainWindow?.webContents.send('ai-stream-done', null);
+                return { success: true };
+            }
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+            // Execute each function call
+            for (const fn of result.functionCalls) {
+                let args = {};
+                try { args = JSON.parse(fn.arguments); } catch { }
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
+                mainWindow?.webContents.send('ai-tool-call', {
+                    id: fn.call_id,
+                    name: fn.name,
+                    args,
+                    round,
+                });
 
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || !trimmed.startsWith('data: ')) continue;
-                const dataStr = trimmed.slice(6);
-                if (dataStr === '[DONE]') continue;
-                try {
-                    const json = JSON.parse(dataStr);
-                    // Responses API: response.output_text.delta has the text
-                    if (json.type === 'response.output_text.delta' && json.delta) {
-                        mainWindow?.webContents.send('ai-stream-chunk', json.delta);
-                    }
-                    // Chat Completions fallback
-                    else if (json.choices?.[0]?.delta?.content) {
-                        mainWindow?.webContents.send('ai-stream-chunk', json.choices[0].delta.content);
-                    }
-                } catch { }
+                console.log(`[AI] Tool call (round ${round}): ${fn.name}`, Object.keys(args));
+                const toolResult = await executeTool(fn.name, args);
+
+                mainWindow?.webContents.send('ai-tool-result', {
+                    id: fn.call_id,
+                    name: fn.name,
+                    result: toolResult,
+                    round,
+                });
+
+                // Add function call + result to input for next round
+                inputItems.push({
+                    type: 'function_call',
+                    call_id: fn.call_id,
+                    name: fn.name,
+                    arguments: fn.arguments,
+                });
+                inputItems.push({
+                    type: 'function_call_output',
+                    call_id: fn.call_id,
+                    output: JSON.stringify(toolResult).slice(0, 16000),
+                });
             }
         }
 
-        // Process remaining buffer
-        if (buffer.trim() && buffer.trim().startsWith('data: ')) {
-            const dataStr = buffer.trim().slice(6);
-            if (dataStr !== '[DONE]') {
-                try {
-                    const json = JSON.parse(dataStr);
-                    if (json.type === 'response.output_text.delta' && json.delta) {
-                        mainWindow?.webContents.send('ai-stream-chunk', json.delta);
-                    }
-                } catch { }
-            }
-        }
-
-        currentAIRequest = null;
+        // Hit max rounds
         mainWindow?.webContents.send('ai-stream-done', null);
         return { success: true };
 

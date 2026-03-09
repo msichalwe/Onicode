@@ -164,14 +164,13 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
 
             const initParts = args.split(/\s+/);
             const projectName = initParts[0];
-            const projectPath = initParts[1] || '~/Projects';
-            const expandedPath = projectPath.replace(/^~/, process.env?.HOME || '/Users');
+            const projectPath = initParts[1] || '~/Documents/OniProjects';
 
             if (isElectron) {
                 addAIMessage(ctx, `Creating project **${projectName}**...`);
                 const result = await window.onicode!.initProject({
                     name: projectName,
-                    projectPath: expandedPath,
+                    projectPath,  // ~ expansion handled in main process
                 });
 
                 if (result.success && result.project) {
@@ -187,11 +186,79 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
                         '',
                         'View it in the **Projects** tab or use `/open vscode` to open in VS Code.',
                     ].join('\n'));
+
+                    // Activate project mode
+                    window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                        detail: {
+                            id: result.project.id,
+                            name: result.project.name,
+                            path: result.project.path,
+                        }
+                    }));
                 } else {
                     addAIMessage(ctx, `Failed to create project: ${result.error}`);
                 }
             } else {
                 addAIMessage(ctx, 'Project creation requires the Electron desktop app.');
+            }
+            return { handled: true };
+        }
+
+        case '/openproject': {
+            if (!args) {
+                addAIMessage(ctx, 'Usage: `/openproject <path>`\n\nExample: `/openproject ~/Documents/OniProjects/my-app`\n\nScans the folder, detects tech stack & git, creates `.onidocs/` if missing, and registers it as an Onicode project.');
+                return { handled: true };
+            }
+
+            if (isElectron) {
+                addAIMessage(ctx, `Scanning **${args}**...`);
+                const result = await window.onicode!.scanProject(args);
+
+                if (result.success && result.scan) {
+                    const s = result.scan;
+                    const lines: string[] = [];
+                    lines.push(`## Project Scanned: **${s.name}**\n`);
+                    lines.push(`**Path:** \`${s.path}\``);
+                    lines.push(`**Files:** ${s.fileCount} top-level items`);
+
+                    if (s.detectedTech.length > 0) {
+                        lines.push(`**Tech Stack:** ${s.detectedTech.join(', ')}`);
+                    }
+
+                    if (s.hasGit) {
+                        lines.push(`**Git:** Active (branch: \`${s.gitBranch}\`)`);
+                    } else {
+                        lines.push(`**Git:** Not initialized`);
+                    }
+
+                    if (s.createdOnidocs) {
+                        lines.push(`\n**Created \`.onidocs/\`** with project.md, tasks.md, changelog.md`);
+                    } else if (s.hasOnidocs) {
+                        lines.push(`**Onidocs:** Already present`);
+                    }
+
+                    if (s.alreadyRegistered) {
+                        lines.push(`\n*Project was already registered in Onicode.*`);
+                    } else if (s.registered) {
+                        lines.push(`\n**Registered** as Onicode project. View it in the **Projects** tab.`);
+                    }
+
+                    addAIMessage(ctx, lines.join('\n'));
+
+                    // Activate project mode
+                    window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                        detail: {
+                            id: s.projectId,
+                            name: s.name,
+                            path: s.path,
+                            gitBranch: s.hasGit ? s.gitBranch : undefined,
+                        }
+                    }));
+                } else {
+                    addAIMessage(ctx, `Failed to scan project: ${result.error}`);
+                }
+            } else {
+                addAIMessage(ctx, 'Project scanning requires the Electron desktop app.');
             }
             return { handled: true };
         }

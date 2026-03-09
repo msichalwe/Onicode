@@ -1,6 +1,6 @@
 import React from 'react';
 
-type View = 'chat' | 'projects' | 'documents' | 'settings';
+type View = 'chat' | 'projects' | 'documents' | 'settings' | 'todo';
 
 interface SidebarProps {
     currentView: View;
