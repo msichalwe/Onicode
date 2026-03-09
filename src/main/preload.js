@@ -119,6 +119,17 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('connector-google-result', handler);
     },
 
+    // ── Memory ──
+    memoryLoadCore: () => ipcRenderer.invoke('memory-load-core'),
+    memoryEnsureDefaults: () => ipcRenderer.invoke('memory-ensure-defaults'),
+    memorySaveOnboarding: (answers) => ipcRenderer.invoke('memory-save-onboarding', answers),
+    memoryRead: (filename) => ipcRenderer.invoke('memory-read', filename),
+    memoryWrite: (filename, content) => ipcRenderer.invoke('memory-write', filename, content),
+    memoryAppend: (filename, content) => ipcRenderer.invoke('memory-append', filename, content),
+    memoryList: () => ipcRenderer.invoke('memory-list'),
+    memoryDelete: (filename) => ipcRenderer.invoke('memory-delete', filename),
+    memoryCompact: (messages, keepRecent) => ipcRenderer.invoke('memory-compact', messages, keepRecent),
+
     // ── Git ──
     gitIsRepo: (repoPath) => ipcRenderer.invoke('git-is-repo', repoPath),
     gitInit: (repoPath) => ipcRenderer.invoke('git-init', repoPath),

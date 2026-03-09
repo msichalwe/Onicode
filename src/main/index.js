@@ -7,6 +7,7 @@ const { registerTerminalIPC, killAllSessions } = require('./terminal');
 const { registerProjectIPC } = require('./projects');
 const { registerGitIPC } = require('./git');
 const { registerConnectorIPC } = require('./connectors');
+const { registerMemoryIPC } = require('./memory');
 const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions } = require('./aiTools');
 
 let mainWindow = null;
@@ -855,6 +856,7 @@ registerTerminalIPC(ipcMain, () => mainWindow);
 registerProjectIPC(ipcMain, () => mainWindow);
 registerGitIPC(ipcMain);
 registerConnectorIPC(ipcMain, () => mainWindow);
+registerMemoryIPC();
 
 // ══════════════════════════════════════════
 //  App Lifecycle

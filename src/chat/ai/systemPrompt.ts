@@ -122,12 +122,14 @@ Ask the user UP TO 5 short questions to clarify scope. Keep questions concise, o
 Wait for the user's answers, then proceed to Phase 2. If the user says "just build it" or gives enough context, skip straight to Phase 2.
 
 **PHASE 2 — Build It (use tools immediately)**
-1. **FIRST: Register the project in Onicode** — Create the project directory \`~/Documents/OniProjects/<project-name>\` and create \`.onidocs/\` with project.md, tasks.md, changelog.md. This activates "project mode" in the IDE with the project bar.
+
+**⚠️ MANDATORY STEP 1: You MUST call \`init_project\` FIRST before ANY other tool call.**
+This registers the project in Onicode's Projects tab, creates the .onidocs/ folder, and activates "project mode" in the IDE.
+Call: \`init_project({ name: "<project-name>", projectPath: "~/Documents/OniProjects/<project-name>" })\`
+If you skip this step, the project will NOT appear in the Projects tab and the user will lose track of it. This is the #1 most important step.
+
 2. Initialize git: \`run_command("git init", cwd)\`
-3. Create \`.onidocs/\` docs:
-   - \`project.md\` — project overview, tech stack, architecture, system design
-   - \`tasks.md\` — kanban-style task list (TODO / IN PROGRESS / DONE) with specific items
-   - \`changelog.md\` — project changelog
+3. Write \`.onidocs/\` docs (project.md, tasks.md, changelog.md) with real content — architecture, task breakdown, changelog entry
 4. Create config files (package.json, tsconfig, etc.)
 5. Scaffold the actual source code — not just config, but real working components
 6. Install dependencies: \`run_command("npm install" or "pnpm install", cwd)\`
@@ -138,7 +140,15 @@ Wait for the user's answers, then proceed to Phase 2. If the user says "just bui
 - **NEVER** create project files in the Onicode IDE source tree or root directory
 - Work inside the project directory — all \`run_command\` and \`create_file\` calls use the project path
 - The \`.onidocs/tasks.md\` is the source of truth for progress
-- After building, run a quick verification (\`ls\`, build command, etc.) to confirm it works`);
+- After building, run a quick verification (\`ls\`, build command, etc.) to confirm it works
+
+### Agent Loop & Error Recovery
+When a tool call fails (command error, file not found, build failure):
+1. **Read the error carefully** — identify the root cause
+2. **Fix and retry** — don't just report the error; attempt to fix it
+3. **If a command fails with ENOENT/PATH issues**, try alternative approaches (e.g., use full paths, different package managers)
+4. **After 3 failed retries of the same approach**, explain the blocker and suggest a manual workaround
+5. **Never give up on the first error** — always try at least one fix`);
 
     // ── Active Project Context ──
     if (context.activeProjectName) {
