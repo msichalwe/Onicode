@@ -12,7 +12,7 @@ function stripAnsi(str: string): string {
 //  Widget Types (kernel layer)
 // ══════════════════════════════════════════
 
-export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks' | 'git';
+export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks' | 'git' | 'browser';
 
 export interface PanelState {
     widget: WidgetType | null;
@@ -32,6 +32,7 @@ const WIDGETS: WidgetDef[] = [
     { id: 'agents', label: 'Agents', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg> },
     { id: 'tasks', label: 'Tasks', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg> },
     { id: 'git', label: 'Git', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg> },
+    { id: 'browser', label: 'Browser', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" /></svg> },
 ];
 
 // ══════════════════════════════════════════
@@ -1151,6 +1152,177 @@ function GitWidget() {
 }
 
 // ══════════════════════════════════════════
+//  Browser Widget (Puppeteer preview)
+// ══════════════════════════════════════════
+
+function BrowserWidget() {
+    const [url, setUrl] = useState('');
+    const [currentUrl, setCurrentUrl] = useState('');
+    const [pageTitle, setPageTitle] = useState('');
+    const [screenshotSrc, setScreenshotSrc] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [launched, setLaunched] = useState(false);
+
+    const handleNavigate = async () => {
+        if (!url.trim() || !isElectron) return;
+        setLoading(true);
+        setError(null);
+        try {
+            // Launch browser if not yet launched
+            if (!launched) {
+                await window.onicode!.browserLaunch({ headless: true });
+                setLaunched(true);
+            }
+            const nav = await window.onicode!.browserNavigate(url.trim());
+            if (nav.success) {
+                setCurrentUrl(nav.url || url.trim());
+                setPageTitle(nav.title || '');
+                // Take a screenshot for preview
+                const shot = await window.onicode!.browserScreenshot({ name: 'preview' });
+                if (shot.success && shot.path) {
+                    // Use file:// protocol to display the screenshot
+                    setScreenshotSrc(`file://${shot.path}?t=${Date.now()}`);
+                }
+            } else {
+                setError(nav.error || 'Navigation failed');
+            }
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : 'Browser error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleNavigate();
+        }
+    };
+
+    const handleRefreshScreenshot = async () => {
+        if (!isElectron || !launched) return;
+        try {
+            const shot = await window.onicode!.browserScreenshot({ name: 'preview' });
+            if (shot.success && shot.path) {
+                setScreenshotSrc(`file://${shot.path}?t=${Date.now()}`);
+            }
+        } catch { /* ignore */ }
+    };
+
+    return (
+        <div className="widget-browser" style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '8px', padding: '12px' }}>
+            {/* URL bar */}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <input
+                    type="text"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Enter URL..."
+                    style={{
+                        flex: 1,
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--border)',
+                        background: 'var(--bg-secondary)',
+                        color: 'var(--text-primary)',
+                        fontSize: '12px',
+                        fontFamily: 'JetBrains Mono, monospace',
+                        outline: 'none',
+                    }}
+                />
+                <button
+                    onClick={handleNavigate}
+                    disabled={loading || !url.trim()}
+                    style={{
+                        padding: '6px 12px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--border)',
+                        background: 'var(--accent)',
+                        color: 'var(--bg-primary)',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        cursor: loading ? 'wait' : 'pointer',
+                        opacity: loading || !url.trim() ? 0.5 : 1,
+                    }}
+                >
+                    {loading ? 'Loading...' : 'Go'}
+                </button>
+            </div>
+
+            {/* Page title */}
+            {pageTitle && (
+                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {pageTitle} — <span style={{ opacity: 0.6 }}>{currentUrl}</span>
+                </div>
+            )}
+
+            {/* Error */}
+            {error && (
+                <div style={{ fontSize: '11px', color: 'var(--error, #e55)', padding: '4px 8px', background: 'var(--bg-tertiary)', borderRadius: '4px' }}>
+                    {error}
+                </div>
+            )}
+
+            {/* Preview area */}
+            <div style={{
+                flex: 1,
+                borderRadius: '8px',
+                border: '1px solid var(--border)',
+                background: 'var(--bg-secondary)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden',
+                position: 'relative',
+                minHeight: '200px',
+            }}>
+                {screenshotSrc ? (
+                    <>
+                        <img
+                            src={screenshotSrc}
+                            alt="Browser preview"
+                            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        />
+                        <button
+                            onClick={handleRefreshScreenshot}
+                            title="Refresh screenshot"
+                            style={{
+                                position: 'absolute',
+                                top: '8px',
+                                right: '8px',
+                                padding: '4px 8px',
+                                borderRadius: '4px',
+                                border: '1px solid var(--border)',
+                                background: 'var(--bg-primary)',
+                                color: 'var(--text-secondary)',
+                                fontSize: '10px',
+                                cursor: 'pointer',
+                                opacity: 0.7,
+                            }}
+                        >
+                            Refresh
+                        </button>
+                    </>
+                ) : (
+                    <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px' }}>
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: '8px' }}>
+                            <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+                        </svg>
+                        <div style={{ fontSize: '12px', fontWeight: 500 }}>Browser Preview</div>
+                        <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.6 }}>
+                            Enter a URL above, or launch via <code style={{ fontSize: '10px' }}>/browser</code> or AI tool
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════
 //  Right Panel
 // ══════════════════════════════════════════
 
@@ -1188,6 +1360,7 @@ export default function RightPanel({ panel, onClose, onChangeWidget }: RightPane
             case 'agents': return <AgentsWidget />;
             case 'tasks': return <TasksWidget />;
             case 'git': return <GitWidget />;
+            case 'browser': return <BrowserWidget />;
             default: return null;
         }
     };

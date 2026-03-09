@@ -2,7 +2,7 @@
 
 > AI-powered development environment: a premium chat that expands into a full VS Code IDE on demand.
 >
-> **Last updated:** 2025-03-09
+> **Last updated:** 2026-03-09
 
 ## Project Overview
 
@@ -35,7 +35,9 @@ src/
     terminal.js             # Shell session management (spawn, stdin/stdout, exec)
     projects.js             # Project CRUD, onidocs templates, filesystem ops
     git.js                  # Git operations via IPC (15 handlers, fully wired)
-    aiTools.js              # AI tool definitions (30+ tools), executor, task manager, file context tracker
+    aiTools.js              # AI tool definitions (45 tools), executor, task manager, file context tracker
+    lsp.js                  # Code intelligence via TypeScript compiler API
+    codeIndex.js            # TF-IDF semantic search indexer
     storage.js              # SQLite persistence layer (tasks, conversations, sessions)
     hooks.js                # Pre/post tool lifecycle hooks
     commands.js             # Custom slash commands (user-defined)
@@ -53,7 +55,7 @@ src/
       Sidebar.tsx            # Left nav (Chat, Projects, Docs, Settings, Memories)
       SettingsPanel.tsx      # Theme picker, providers, skills, connectors, hooks
       ProviderSettings.tsx   # AI provider config, Codex OAuth PKCE, test connection
-      RightPanel.tsx         # Widget panel: terminal, files, agents, tasks, git
+      RightPanel.tsx         # Widget panel: terminal, files, agents, tasks, git, browser
       ProjectsView.tsx       # Project list, detail, file tree, docs, "Open in"
       ProjectModeBar.tsx     # Project mode header bar
       MemoriesView.tsx       # Memory file viewer/editor
@@ -156,7 +158,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 
 ### Hooks System
 
-- 10 hook types: PreToolUse, PostToolUse, Stop, SubagentStop, UserPromptSubmit, Notification, PreCompact, SessionStart, ToolError, AIResponse
+- 19 hook types: PreToolUse, PostToolUse, ToolError, PreEdit, PostEdit, PreCommand, PostCommand, OnDangerousCommand, PreCommit, PostCommit, OnTestFailure, OnTaskComplete, SessionStart, AIResponse, PreCompact, Stop, SubagentStop, UserPromptSubmit, Notification
 - Global config: `~/.onicode/hooks.json`, project config: `.onicode/hooks.json`
 - Shell command execution with env vars (`$TOOL_NAME`, `$FILE_PATH`, etc.)
 - Matcher regex for filtering specific tools
@@ -171,6 +173,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 
 - Auto-summarize old messages when tokens exceed 60k threshold
 - Mechanical summary extraction preserving key decisions and code changes
+- Semantic compaction (AI-powered conversation summarization)
 - Token estimation via word-based heuristic
 
 ### Agent System
@@ -199,13 +202,13 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Documents view (aggregated from all projects)
 - [x] Conversation history (localStorage + SQLite)
 - [x] File/URL attachments
-- [x] Right panel (Terminal, Project, Files, Agents, Tasks, Git)
+- [x] Right panel (Terminal, Project, Files, Agents, Tasks, Git, Browser)
+- [x] Git integration (15 IPC handlers + 9 AI tools)
 - [x] Git panel (branch, stage, commit, push, pull, branch switching)
-- [x] Git AI tools (git_status, git_commit, git_push for auto-commit/push)
 - [x] SQLite persistence (tasks, conversations, sessions)
 - [x] Permission enforcement (tool-level allow/ask/deny)
 - [x] Sub-agent execution (real AI calls, read-only tools)
-- [x] Hooks system (10 types, global + project config)
+- [x] Hooks system (19 types, global + project config, wired into tool pipeline)
 - [x] Custom commands (.onicode/commands/*.md)
 - [x] Context compaction (auto-summarize at token limit)
 - [x] Memory system (soul.md, user.md, daily logs)
@@ -218,6 +221,16 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Floating editor (syntax highlighting via highlight.js, draggable/resizable/snappable)
 - [x] Project mode (auto-detect, /switch command, "Work on Project" button)
 - [x] Conversation continuation (loads previous session context from SQLite)
+- [x] Code Intelligence (LSP via TypeScript compiler API)
+- [x] Semantic Search (TF-IDF code indexer)
+- [x] Unified Memory System (global + project + daily + cross-session)
+- [x] Permission System (3 modes: auto-allow, ask-destructive, plan-only)
+- [x] Fuzzy edit matching (Levenshtein-based fallback)
+- [x] Auto-backup before edits (restore points)
+- [x] System prompt caching
+- [x] Semantic compaction (AI-powered conversation summarization)
+- [x] Browser widget (Puppeteer preview with URL navigation + screenshots)
+- [x] 45 AI tools total
 
 ## What's Missing
 
@@ -228,7 +241,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [ ] **Editor Shell** — VS Code workbench (lazy-loaded)
 - [ ] **MCP client** — extensible tool system for external integrations
 - [ ] **Auto-update** — electron-updater for seamless updates
-- [ ] **RAG/Embeddings** — semantic search over project files (currently simple indexer)
+- [ ] **SQLite conversation migration** — full migration from localStorage
 - [ ] **Mobile companion** — React Native app
 
 ## Coding Conventions
@@ -245,9 +258,8 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 ## Next Steps
 
 1. **Connectors** — GitHub OAuth, Gmail OAuth (no manual API key generation)
-2. **API Key Store** — AES-256 encrypted vault with OS keychain
-3. **Anthropic provider** — Claude API support
-4. **MCP client** — Extensible tool system for external integrations
-5. **RAG / Embeddings** — Semantic search over project files for better context
+3. **API Key Store** — AES-256 encrypted vault with OS keychain
+4. **Anthropic provider** — Claude API support
+5. **MCP client** — Extensible tool system for external integrations
 6. **Editor Shell** — VS Code workbench (lazy-loaded)
 7. **Auto-update** — electron-updater for seamless updates

@@ -29,6 +29,7 @@ export interface AIContext {
         dailyYesterday?: string | null;
         projectMemory?: string | null;
     };
+    autoCommitEnabled?: boolean;
 }
 
 export function buildSystemPrompt(context: AIContext): string {
@@ -304,7 +305,7 @@ Every new project created with \`init_project\` automatically gets:
 - \`git_commit(message, cwd?, files?)\` — stage and commit changes with a conventional commit message
 - \`git_push(cwd?, set_upstream?)\` — push to remote
 
-**Auto-Commit Protocol (MANDATORY):**
+${context.autoCommitEnabled !== false ? `**Auto-Commit Protocol (MANDATORY):**
 1. After completing each major task or milestone → \`git_commit({ message: "feat: ..." })\`
 2. After a successful build passes → \`git_commit({ message: "build: verified build" })\`
 3. After fixing a critical bug → \`git_commit({ message: "fix: ..." })\`
@@ -319,7 +320,9 @@ Every new project created with \`init_project\` automatically gets:
 **Auto-Push Protocol:**
 - After 3+ commits accumulate, push to remote
 - At the end of a session, always push
-- Before switching to a different task/branch, push current work
+- Before switching to a different task/branch, push current work` : `**Note:** Auto-commit is disabled. Only commit when the user explicitly asks you to.
+
+**Commit Message Format:** Use conventional commits (feat:, fix:, refactor:, docs:, chore:, build:, test:)`}
 
 **Branching Protocol:**
 1. \`git_branches()\` → Check what exists
@@ -568,6 +571,7 @@ function hashContext(ctx: AIContext): string {
         customPrompt: ctx.customSystemPrompt?.length || 0,
         agentsMd: ctx.agentsMd?.length || 0,
         customCommandsSummary: ctx.customCommandsSummary?.length || 0,
+        autoCommitEnabled: ctx.autoCommitEnabled,
     });
     // Simple hash
     let hash = 0;

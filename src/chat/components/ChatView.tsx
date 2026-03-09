@@ -704,6 +704,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             agentsMd,
             hooksSummary,
             customCommandsSummary,
+            autoCommitEnabled: localStorage.getItem('onicode-auto-commit') !== 'false',
         });
 
         // Auto-compact if context is getting large
@@ -1028,6 +1029,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 memory_append: 'Memory', webfetch: 'Fetched', websearch: 'Searched',
                 get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
                 git_commit: 'Committed', git_push: 'Pushed', git_status: 'Git Status',
+                find_symbol: 'Def', find_references: 'Refs', list_symbols: 'Symbols',
+                get_type_info: 'Type', semantic_search: 'Search', index_codebase: 'Index',
+                git_diff: 'Diff', git_log: 'Log', git_branches: 'Branch',
+                git_checkout: 'Checkout', git_stash: 'Stash', git_pull: 'Pull',
             };
             return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
@@ -1100,6 +1105,60 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const files = (r as Record<string, unknown>)?.files;
                     return Array.isArray(files) ? `${files.length} changed` : '';
                 }
+                case 'find_symbol': {
+                    const sym = String(a.symbol || a.name || '');
+                    const loc = r?.file ? String(r.file).split('/').pop() : '';
+                    return loc ? `${sym} → ${loc}` : sym;
+                }
+                case 'find_references': {
+                    const sym = String(a.symbol || a.name || '');
+                    const refs = Array.isArray(r?.references) ? (r.references as unknown[]).length : r?.count ?? '?';
+                    return `${sym} (${refs} refs)`;
+                }
+                case 'list_symbols': {
+                    const fname = String(a.file_path || a.file || '').split('/').pop() || '';
+                    const count = Array.isArray(r?.symbols) ? (r.symbols as unknown[]).length : r?.count ?? '?';
+                    return `${fname} (${count} symbols)`;
+                }
+                case 'get_type_info': {
+                    const typeStr = String(r?.type || r?.type_string || a.symbol || '');
+                    return typeStr.slice(0, 80);
+                }
+                case 'semantic_search': {
+                    const query = String(a.query || '').slice(0, 40);
+                    const count = Array.isArray(r?.results) ? (r.results as unknown[]).length : r?.count ?? '?';
+                    return `"${query}" (${count} results)`;
+                }
+                case 'index_codebase': {
+                    const indexed = r?.files_indexed ?? r?.count ?? '?';
+                    return `${indexed} files indexed`;
+                }
+                case 'git_diff': {
+                    const files = Array.isArray(r?.files) ? (r.files as unknown[]).length : r?.file_count;
+                    return files ? `${files} files changed` : r?.summary ? String(r.summary).slice(0, 60) : 'no changes';
+                }
+                case 'git_log': {
+                    const commits = Array.isArray(r?.commits) ? (r.commits as unknown[]).length : r?.count ?? '?';
+                    return `${commits} commits`;
+                }
+                case 'git_branches': {
+                    const current = r?.current || r?.current_branch || '';
+                    return current ? `on ${current}` : '';
+                }
+                case 'git_checkout': {
+                    const branch = String(a.branch || r?.branch || '');
+                    const created = r?.created ? ' (new)' : '';
+                    return `${branch}${created}`;
+                }
+                case 'git_stash': {
+                    const action = String(a.action || a.command || 'push');
+                    return action;
+                }
+                case 'git_pull': {
+                    const ok = r?.success;
+                    const summary = r?.summary || r?.output;
+                    return ok ? (summary ? String(summary).slice(0, 60) : 'success') : 'failed';
+                }
                 default:
                     return '';
             }
@@ -1115,6 +1174,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'create_file': return true;
                 case 'search_files': return !!(r.matches && Array.isArray(r.matches) && (r.matches as unknown[]).length > 0);
                 case 'git_status': return !!(r.files && Array.isArray(r.files) && (r.files as unknown[]).length > 0);
+                case 'find_references': return !!(r.references && Array.isArray(r.references) && (r.references as unknown[]).length > 0);
+                case 'list_symbols': return !!(r.symbols && Array.isArray(r.symbols) && (r.symbols as unknown[]).length > 0);
+                case 'semantic_search': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
+                case 'git_diff': return !!(r.diff || r.output);
+                case 'git_log': return !!(r.commits && Array.isArray(r.commits) && (r.commits as unknown[]).length > 0);
+                case 'git_branches': return !!(r.branches && Array.isArray(r.branches) && (r.branches as unknown[]).length > 0);
                 default: return false;
             }
         };
@@ -1243,13 +1308,119 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </div>
                     );
                 }
+                case 'find_references': {
+                    const refs = r.references as Array<{ file?: string; line?: number; content?: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-search-results">
+                                {refs.slice(0, 10).map((ref, i) => (
+                                    <div key={i} className="search-result-line">
+                                        <span className="search-result-file">{String(ref.file || '').split('/').pop()}</span>
+                                        {ref.line && <span className="search-result-lineno">:{ref.line}</span>}
+                                        {ref.content && <span className="search-result-content">{String(ref.content).slice(0, 80)}</span>}
+                                    </div>
+                                ))}
+                                {refs.length > 10 && <div className="diff-line diff-truncated">... +{refs.length - 10} more references</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'list_symbols': {
+                    const symbols = r.symbols as Array<{ name?: string; kind?: string; line?: number }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-search-results">
+                                {symbols.slice(0, 15).map((sym, i) => (
+                                    <div key={i} className="search-result-line">
+                                        <span className="search-result-file">{sym.kind || 'symbol'}</span>
+                                        <span className="search-result-content">{sym.name}</span>
+                                        {sym.line && <span className="search-result-lineno">:{sym.line}</span>}
+                                    </div>
+                                ))}
+                                {symbols.length > 15 && <div className="diff-line diff-truncated">... +{symbols.length - 15} more symbols</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'semantic_search': {
+                    const results = r.results as Array<{ file?: string; score?: number; snippet?: string; content?: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-search-results">
+                                {results.slice(0, 8).map((res, i) => (
+                                    <div key={i} className="search-result-line">
+                                        <span className="search-result-file">{String(res.file || '').split('/').pop()}</span>
+                                        {res.score != null && <span className="search-result-lineno"> ({(res.score as number).toFixed(2)})</span>}
+                                        <span className="search-result-content">{String(res.snippet || res.content || '').slice(0, 80)}</span>
+                                    </div>
+                                ))}
+                                {results.length > 8 && <div className="diff-line diff-truncated">... +{results.length - 8} more results</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_diff': {
+                    const diffText = String(r.diff || r.output || '');
+                    const diffLines = diffText.split('\n');
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <pre className="tool-step-stdout">
+                                    {diffLines.slice(0, 30).map((line, i) => (
+                                        <div key={i} className={line.startsWith('+') ? 'diff-line diff-line-added' : line.startsWith('-') ? 'diff-line diff-line-removed' : line.startsWith('@@') ? 'diff-line diff-hunk' : ''}>
+                                            {line}
+                                        </div>
+                                    ))}
+                                    {diffLines.length > 30 && <div className="diff-line diff-truncated">{`... +${diffLines.length - 30} more lines`}</div>}
+                                </pre>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_log': {
+                    const commits = r.commits as Array<{ hash?: string; message?: string; author?: string; date?: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-git-status">
+                                {commits.slice(0, 10).map((c, i) => (
+                                    <div key={i} className="git-status-file">
+                                        <span className="git-status-indicator">{String(c.hash || '').slice(0, 7)}</span>
+                                        <span>{String(c.message || '').slice(0, 60)}</span>
+                                    </div>
+                                ))}
+                                {commits.length > 10 && <div className="diff-line diff-truncated">... +{commits.length - 10} more commits</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_branches': {
+                    const branches = r.branches as Array<{ name?: string; current?: boolean } | string>;
+                    const currentBranch = r.current || r.current_branch || '';
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-git-status">
+                                {branches.slice(0, 15).map((b, i) => {
+                                    const name = typeof b === 'string' ? b : (b.name || '');
+                                    const isCurrent = typeof b === 'string' ? b === currentBranch : !!b.current;
+                                    return (
+                                        <div key={i} className={`git-status-file${isCurrent ? ' git-status-modified' : ''}`}>
+                                            <span className="git-status-indicator">{isCurrent ? '*' : ' '}</span>
+                                            <span>{name}</span>
+                                        </div>
+                                    );
+                                })}
+                                {branches.length > 15 && <div className="diff-line diff-truncated">... +{branches.length - 15} more branches</div>}
+                            </div>
+                        </div>
+                    );
+                }
                 default:
                     return null;
             }
         };
 
         // Group consecutive same-name tool calls (except important ones that always show individually)
-        const alwaysExpand = new Set(['run_command', 'create_file', 'edit_file', 'multi_edit', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status']);
+        const alwaysExpand = new Set(['run_command', 'create_file', 'edit_file', 'multi_edit', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'index_codebase']);
         interface GroupedStep { name: string; steps: ToolStep[]; count: number; allDone: boolean; anyRunning: boolean; anyError: boolean; }
         const grouped: GroupedStep[] = [];
         for (const step of steps) {
