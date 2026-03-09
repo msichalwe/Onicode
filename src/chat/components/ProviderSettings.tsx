@@ -1,0 +1,674 @@
+import React, { useState, useCallback } from 'react';
+
+interface ProviderConfig {
+    id: string;
+    name: string;
+    initials: string;
+    description: string;
+    enabled: boolean;
+    connected: boolean;
+    authType: 'api-key' | 'url-key';
+    apiKey?: string;
+    baseUrl?: string;
+    selectedModel?: string;
+    models?: string[];
+    testStatus?: 'idle' | 'testing' | 'success' | 'error';
+    testMessage?: string;
+}
+
+const CODEX_MODELS = [
+    'gpt-5.3-codex',
+    'gpt-5.3-codex-spark',
+    'gpt-5.2-codex',
+    'gpt-5.1-codex-max',
+    'gpt-5.1-codex-mini',
+    'gpt-5.1',
+    'codex-mini-latest',
+    'gpt-4o',
+    'gpt-4o-mini',
+    'o4-mini',
+    'o3-pro',
+];
+
+const DEFAULT_PROVIDERS: ProviderConfig[] = [
+    {
+        id: 'codex',
+        name: 'OpenAI Codex',
+        initials: 'Cx',
+        description: 'GPT-5 Codex, GPT-4o, o4-mini — API key or ChatGPT sign-in',
+        enabled: false,
+        connected: false,
+        authType: 'api-key',
+        apiKey: '',
+        selectedModel: 'gpt-4o',
+        models: CODEX_MODELS,
+    },
+    {
+        id: 'onigateway',
+        name: 'OniAI Gateway',
+        initials: 'Oni',
+        description: 'Your self-hosted AI gateway — connect with URL',
+        enabled: false,
+        connected: false,
+        authType: 'url-key',
+        baseUrl: '',
+        apiKey: '',
+        selectedModel: 'default',
+        models: ['default'],
+    },
+    {
+        id: 'openclaw',
+        name: 'OpenClaw Gateway',
+        initials: 'OC',
+        description: 'OpenClaw multi-model gateway — connect with URL and key',
+        enabled: false,
+        connected: false,
+        authType: 'url-key',
+        baseUrl: '',
+        apiKey: '',
+        selectedModel: 'default',
+        models: ['default'],
+    },
+];
+
+// Check if we're running inside Electron (preload script available)
+const isElectron = typeof window !== 'undefined' && !!window.onicode;
+
+// ══════════════════════════════════════════
+//  Fallback: renderer-side PKCE for non-Electron (Vite dev in browser)
+// ══════════════════════════════════════════
+
+const CODEX_OAUTH = {
+    clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
+    authorizeEndpoint: 'https://auth.openai.com/oauth/authorize',
+    tokenEndpoint: 'https://auth.openai.com/oauth/token',
+    redirectUri: 'http://localhost:1455/auth/callback',
+    scope: 'openid profile email offline_access',
+    audience: 'https://api.openai.com/v1',
+};
+
+function fallbackRandomString(length: number): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const array = new Uint8Array(length);
+    crypto.getRandomValues(array);
+    return Array.from(array, (b) => chars[b % chars.length]).join('');
+}
+
+async function fallbackGeneratePKCE() {
+    const verifier = fallbackRandomString(64);
+    const encoded = new TextEncoder().encode(verifier);
+    const hash = await crypto.subtle.digest('SHA-256', encoded);
+    const bytes = new Uint8Array(hash);
+    let binary = '';
+    bytes.forEach((b) => (binary += String.fromCharCode(b)));
+    const challenge = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return { verifier, challenge };
+}
+
+export default function ProviderSettings() {
+    const [providers, setProviders] = useState<ProviderConfig[]>(() => {
+        const saved = localStorage.getItem('onicode-providers');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved) as ProviderConfig[];
+                return DEFAULT_PROVIDERS.map((def) => {
+                    const existing = parsed.find((p) => p.id === def.id);
+                    if (existing) {
+                        return {
+                            ...def,
+                            apiKey: existing.apiKey,
+                            baseUrl: existing.baseUrl,
+                            selectedModel: def.models?.includes(existing.selectedModel || '')
+                                ? existing.selectedModel
+                                : def.selectedModel,
+                            enabled: existing.enabled,
+                            connected: existing.connected,
+                        };
+                    }
+                    return def;
+                });
+            } catch {
+                return DEFAULT_PROVIDERS;
+            }
+        }
+        return DEFAULT_PROVIDERS;
+    });
+
+    const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
+    const [authState, setAuthState] = useState<'idle' | 'waiting-for-redirect' | 'exchanging'>('idle');
+    const [redirectUrl, setRedirectUrl] = useState('');
+
+    // Fallback PKCE verifier for browser-only mode
+    const [fallbackVerifier, setFallbackVerifier] = useState<string | null>(null);
+
+    const updateProvider = useCallback((id: string, updates: Partial<ProviderConfig>) => {
+        setProviders((prev) => {
+            const next = prev.map((p) => (p.id === id ? { ...p, ...updates } : p));
+            localStorage.setItem('onicode-providers', JSON.stringify(next));
+            return next;
+        });
+    }, []);
+
+    // ── Step 1: Open browser for ChatGPT sign-in ──
+    const startChatGPTSignIn = useCallback(async () => {
+        setAuthState('waiting-for-redirect');
+        updateProvider('codex', {
+            testStatus: 'testing',
+            testMessage: 'Opening browser for sign-in\u2026',
+        });
+
+        if (isElectron) {
+            // Electron: main process generates PKCE + opens browser
+            const result = await window.onicode!.codexOAuthGetAuthUrl();
+            if (result.error) {
+                setAuthState('idle');
+                updateProvider('codex', { testStatus: 'error', testMessage: result.error });
+            }
+        } else {
+            // Browser fallback: generate PKCE in renderer + open in new tab
+            const pkce = await fallbackGeneratePKCE();
+            setFallbackVerifier(pkce.verifier);
+
+            const state = fallbackRandomString(32);
+            localStorage.setItem('onicode-oauth-state', state);
+
+            const params = new URLSearchParams({
+                response_type: 'code',
+                client_id: CODEX_OAUTH.clientId,
+                redirect_uri: CODEX_OAUTH.redirectUri,
+                scope: CODEX_OAUTH.scope,
+                audience: CODEX_OAUTH.audience,
+                code_challenge: pkce.challenge,
+                code_challenge_method: 'S256',
+                state,
+                id_token_add_organizations: 'true',
+                codex_cli_simplified_flow: 'true',
+                originator: 'codex_cli_rs',
+            });
+
+            window.open(`${CODEX_OAUTH.authorizeEndpoint}?${params.toString()}`, '_blank');
+        }
+    }, [updateProvider]);
+
+    // ── Step 2: User pastes the redirect URL ──
+    const handleRedirectSubmit = useCallback(async () => {
+        const url = redirectUrl.trim();
+        if (!url) return;
+
+        setAuthState('exchanging');
+        updateProvider('codex', { testStatus: 'testing', testMessage: 'Exchanging authorization code\u2026' });
+
+        if (isElectron) {
+            // Electron: main process does the token exchange (no CORS)
+            const result = await window.onicode!.codexOAuthExchange(url);
+
+            if (result.success && result.accessToken) {
+                updateProvider('codex', {
+                    apiKey: result.accessToken,
+                    connected: true,
+                    enabled: true,
+                    testStatus: 'success',
+                    testMessage: 'Signed in with ChatGPT successfully',
+                });
+                localStorage.setItem('onicode-codex-tokens', JSON.stringify({
+                    access_token: result.accessToken,
+                    refresh_token: result.refreshToken,
+                    expires_in: result.expiresIn,
+                    obtained_at: Date.now(),
+                }));
+            } else {
+                updateProvider('codex', {
+                    testStatus: 'error',
+                    testMessage: result.error || 'Token exchange failed',
+                });
+            }
+        } else {
+            // Browser fallback: attempt token exchange from renderer
+            // NOTE: This will likely fail due to CORS on auth.openai.com
+            try {
+                const parsedUrl = new URL(url);
+                const code = parsedUrl.searchParams.get('code');
+                if (!code) {
+                    updateProvider('codex', { testStatus: 'error', testMessage: 'No code found in URL' });
+                    setAuthState('idle');
+                    setRedirectUrl('');
+                    return;
+                }
+
+                const verifier = fallbackVerifier;
+                if (!verifier) {
+                    updateProvider('codex', { testStatus: 'error', testMessage: 'PKCE verifier lost. Try signing in again.' });
+                    setAuthState('idle');
+                    setRedirectUrl('');
+                    return;
+                }
+
+                const res = await fetch(CODEX_OAUTH.tokenEndpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        grant_type: 'authorization_code',
+                        client_id: CODEX_OAUTH.clientId,
+                        code,
+                        redirect_uri: CODEX_OAUTH.redirectUri,
+                        code_verifier: verifier,
+                    }),
+                });
+
+                if (res.ok) {
+                    const json = await res.json();
+                    if (json.access_token) {
+                        updateProvider('codex', {
+                            apiKey: json.access_token,
+                            connected: true,
+                            enabled: true,
+                            testStatus: 'success',
+                            testMessage: 'Signed in with ChatGPT successfully',
+                        });
+                        localStorage.setItem('onicode-codex-tokens', JSON.stringify({
+                            access_token: json.access_token,
+                            refresh_token: json.refresh_token,
+                            expires_in: json.expires_in,
+                            obtained_at: Date.now(),
+                        }));
+                    } else {
+                        updateProvider('codex', { testStatus: 'error', testMessage: json.error_description || json.error || 'No token received' });
+                    }
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    updateProvider('codex', {
+                        testStatus: 'error',
+                        testMessage: err.error_description || err.error || `HTTP ${res.status} — CORS may block this in browser. Run with Electron.`,
+                    });
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : 'Unknown error';
+                updateProvider('codex', { testStatus: 'error', testMessage: `Token exchange failed: ${msg}` });
+            }
+        }
+
+        setAuthState('idle');
+        setRedirectUrl('');
+        setFallbackVerifier(null);
+    }, [redirectUrl, fallbackVerifier, updateProvider]);
+
+    const cancelOAuth = useCallback(async () => {
+        if (isElectron) await window.onicode!.codexOAuthCancel();
+        setAuthState('idle');
+        setRedirectUrl('');
+        setFallbackVerifier(null);
+        updateProvider('codex', { testStatus: 'idle', testMessage: '' });
+    }, [updateProvider]);
+
+    // ── Test connection ──
+    const testConnection = useCallback(async (provider: ProviderConfig) => {
+        updateProvider(provider.id, { testStatus: 'testing', testMessage: '' });
+
+        if (isElectron) {
+            const result = await window.onicode!.testProvider({
+                id: provider.id,
+                apiKey: provider.apiKey,
+                baseUrl: provider.baseUrl,
+            });
+
+            if (result.success) {
+                updateProvider(provider.id, {
+                    testStatus: 'success',
+                    testMessage: result.modelCount ? `Connected \u2014 ${result.modelCount} models available` : 'Connected',
+                    connected: true,
+                    enabled: true,
+                    models: result.models || provider.models,
+                });
+            } else {
+                updateProvider(provider.id, {
+                    testStatus: 'error',
+                    testMessage: result.error || 'Connection failed',
+                    connected: false,
+                });
+            }
+        } else {
+            // Browser fallback: test with a minimal chat completion instead of /v1/models
+            // because /v1/models returns 403 from browser origins for many tokens
+            try {
+                if (provider.id === 'codex') {
+                    if (!provider.apiKey?.trim()) {
+                        updateProvider(provider.id, { testStatus: 'error', testMessage: 'API key is required' });
+                        return;
+                    }
+
+                    // Try /v1/models first
+                    let modelsWorked = false;
+                    try {
+                        const modelsRes = await fetch('https://api.openai.com/v1/models', {
+                            headers: { Authorization: `Bearer ${provider.apiKey}` },
+                        });
+                        if (modelsRes.ok) {
+                            const data = await modelsRes.json();
+                            const allModels = data.data?.map((m: { id: string }) => m.id).sort() || [];
+                            const relevant = allModels.filter((m: string) =>
+                                m.includes('gpt-5') || m.includes('gpt-4') || m.includes('o3') || m.includes('o4') || m.includes('codex')
+                            );
+                            updateProvider(provider.id, {
+                                testStatus: 'success',
+                                testMessage: `Connected \u2014 ${data.data?.length || 0} models available`,
+                                connected: true, enabled: true,
+                                models: relevant.length > 0 ? relevant : provider.models,
+                            });
+                            modelsWorked = true;
+                        }
+                    } catch { /* CORS or network error, try fallback */ }
+
+                    if (!modelsWorked) {
+                        // Fallback: send a tiny non-streaming request to verify the key works
+                        const testRes = await fetch('https://api.openai.com/v1/chat/completions', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                Authorization: `Bearer ${provider.apiKey}`,
+                            },
+                            body: JSON.stringify({
+                                model: provider.selectedModel || 'gpt-4o',
+                                messages: [{ role: 'user', content: 'Hi' }],
+                                max_tokens: 1,
+                            }),
+                        });
+
+                        if (testRes.ok || testRes.status === 200) {
+                            updateProvider(provider.id, {
+                                testStatus: 'success',
+                                testMessage: 'Connected \u2014 API key verified',
+                                connected: true, enabled: true,
+                            });
+                        } else if (testRes.status === 401) {
+                            updateProvider(provider.id, {
+                                testStatus: 'error',
+                                testMessage: 'Authentication failed (401). Check your API key.',
+                                connected: false,
+                            });
+                        } else if (testRes.status === 403) {
+                            // 403 on chat completions usually means the token doesn't have model.request scope
+                            // But the key IS valid — mark as connected, user can try different models
+                            const errBody = await testRes.json().catch(() => ({}));
+                            const errMsg = errBody.error?.message || '';
+                            if (errMsg.includes('model') || errMsg.includes('permission')) {
+                                updateProvider(provider.id, {
+                                    testStatus: 'success',
+                                    testMessage: `Connected \u2014 key valid, but "${provider.selectedModel || 'gpt-4o'}" may need different permissions. Try another model.`,
+                                    connected: true, enabled: true,
+                                });
+                            } else {
+                                updateProvider(provider.id, {
+                                    testStatus: 'error',
+                                    testMessage: errMsg || `Access denied (403)`,
+                                    connected: false,
+                                });
+                            }
+                        } else {
+                            const errBody = await testRes.json().catch(() => ({}));
+                            updateProvider(provider.id, {
+                                testStatus: 'error',
+                                testMessage: errBody.error?.message || `HTTP ${testRes.status}`,
+                                connected: false,
+                            });
+                        }
+                    }
+                } else {
+                    // Gateway test
+                    if (!provider.baseUrl?.trim()) {
+                        updateProvider(provider.id, { testStatus: 'error', testMessage: 'Gateway URL is required' });
+                        return;
+                    }
+                    const headers: Record<string, string> = {};
+                    if (provider.apiKey?.trim()) headers['Authorization'] = `Bearer ${provider.apiKey}`;
+                    const url = `${provider.baseUrl.replace(/\/$/, '')}/v1/models`;
+
+                    const res = await fetch(url, { headers });
+                    if (res.ok) {
+                        let modelCount = 0;
+                        let models: string[] | undefined;
+                        try {
+                            const data = await res.json();
+                            if (data.data) {
+                                modelCount = data.data.length;
+                                models = data.data.map((m: { id: string }) => m.id).sort();
+                            }
+                        } catch {}
+                        updateProvider(provider.id, {
+                            testStatus: 'success',
+                            testMessage: modelCount > 0 ? `Connected \u2014 ${modelCount} models` : 'Connected',
+                            connected: true, enabled: true,
+                            models: models && models.length > 0 ? models : provider.models,
+                        });
+                    } else {
+                        updateProvider(provider.id, {
+                            testStatus: 'error',
+                            testMessage: `HTTP ${res.status} \u2014 check URL and credentials`,
+                            connected: false,
+                        });
+                    }
+                }
+            } catch (err) {
+                updateProvider(provider.id, {
+                    testStatus: 'error',
+                    testMessage: err instanceof Error ? err.message : 'Connection failed',
+                    connected: false,
+                });
+            }
+        }
+    }, [updateProvider]);
+
+    const toggleExpanded = (id: string) => {
+        setExpandedProvider((prev) => (prev === id ? null : id));
+    };
+
+    return (
+        <div className="provider-settings">
+            {providers.map((provider) => (
+                <div
+                    key={provider.id}
+                    className={`provider-card ${expandedProvider === provider.id ? 'expanded' : ''}`}
+                >
+                    <div className="provider-card-header" onClick={() => toggleExpanded(provider.id)}>
+                        <div className="provider-icon">{provider.initials}</div>
+                        <div className="provider-info">
+                            <div className="provider-name">
+                                {provider.name}
+                                {provider.connected && <span className="connection-badge connected">Connected</span>}
+                                {!provider.connected && provider.testStatus === 'error' && <span className="connection-badge error">Error</span>}
+                            </div>
+                            <div className="provider-status">{provider.description}</div>
+                        </div>
+                        <svg
+                            className={`expand-chevron ${expandedProvider === provider.id ? 'open' : ''}`}
+                            width="18" height="18" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                        >
+                            <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                    </div>
+
+                    {expandedProvider === provider.id && (
+                        <div className="provider-card-body">
+                            {/* URL + API Key fields */}
+                            <div className="field-group">
+                                {provider.authType === 'url-key' && (
+                                    <>
+                                        <label className="field-label">Gateway URL</label>
+                                        <input
+                                            className="field-input" type="url"
+                                            placeholder={provider.id === 'onigateway' ? 'https://your-oni-gateway.com' : 'https://gateway.openclaw.io'}
+                                            value={provider.baseUrl || ''}
+                                            onChange={(e) => updateProvider(provider.id, { baseUrl: e.target.value })}
+                                            spellCheck={false}
+                                        />
+                                    </>
+                                )}
+                                <label className="field-label">
+                                    {provider.id === 'codex' ? 'OpenAI API Key' : 'API Key'}
+                                    {provider.id === 'codex' && (
+                                        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
+                                    )}
+                                </label>
+                                <input
+                                    className="field-input" type="password"
+                                    placeholder={provider.id === 'codex' ? 'sk-...' : 'Enter API key (optional)'}
+                                    value={provider.apiKey || ''}
+                                    onChange={(e) => updateProvider(provider.id, { apiKey: e.target.value })}
+                                    spellCheck={false}
+                                />
+                                {provider.id === 'codex' && (
+                                    <div className="field-hint">
+                                        Paste a standard API key from platform.openai.com, or use ChatGPT sign-in below.
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Codex ChatGPT OAuth sign-in (paste redirect URL flow) */}
+                            {provider.id === 'codex' && (
+                                <div className="field-group">
+                                    <div className="auth-divider"><span>or sign in with ChatGPT</span></div>
+
+                                    {authState === 'idle' && (
+                                        <button className="auth-btn" onClick={startChatGPTSignIn}>
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                <path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4" />
+                                                <polyline points="10 17 15 12 10 7" />
+                                                <line x1="15" y1="12" x2="3" y2="12" />
+                                            </svg>
+                                            Sign in with ChatGPT
+                                        </button>
+                                    )}
+
+                                    {authState === 'waiting-for-redirect' && (
+                                        <div className="oauth-redirect-flow">
+                                            <div className="oauth-steps">
+                                                <div className="oauth-step">
+                                                    <span className="oauth-step-num">1</span>
+                                                    Sign in with your ChatGPT account in the browser window
+                                                </div>
+                                                <div className="oauth-step">
+                                                    <span className="oauth-step-num">2</span>
+                                                    After sign-in, your browser will redirect to a localhost URL that won't load
+                                                </div>
+                                                <div className="oauth-step">
+                                                    <span className="oauth-step-num">3</span>
+                                                    Copy the <strong>full URL</strong> from your browser's address bar and paste it below
+                                                </div>
+                                            </div>
+                                            <div className="oauth-url-input-group">
+                                                <input
+                                                    className="field-input"
+                                                    type="text"
+                                                    placeholder="http://localhost:1455/auth/callback?code=..."
+                                                    value={redirectUrl}
+                                                    onChange={(e) => setRedirectUrl(e.target.value)}
+                                                    spellCheck={false}
+                                                    autoFocus
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') handleRedirectSubmit();
+                                                    }}
+                                                />
+                                                <div className="oauth-actions">
+                                                    <button
+                                                        className="test-btn"
+                                                        onClick={handleRedirectSubmit}
+                                                        disabled={!redirectUrl.trim()}
+                                                    >
+                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                            <polyline points="20 6 9 17 4 12" />
+                                                        </svg>
+                                                        Submit
+                                                    </button>
+                                                    <button className="disconnect-btn" onClick={cancelOAuth}>
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {authState === 'exchanging' && (
+                                        <div className="test-result testing">
+                                            <span className="test-spinner" />
+                                            Exchanging authorization code for token...
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Model selection */}
+                            {provider.models && provider.models.length > 0 && (
+                                <div className="field-group">
+                                    <label className="field-label">Model</label>
+                                    <select
+                                        className="field-select"
+                                        value={provider.selectedModel || ''}
+                                        onChange={(e) => updateProvider(provider.id, { selectedModel: e.target.value })}
+                                    >
+                                        {provider.models.map((model) => (
+                                            <option key={model} value={model}>{model}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            {/* Test connection */}
+                            <div className="field-group">
+                                <button
+                                    className={`test-btn ${provider.testStatus || ''}`}
+                                    onClick={() => testConnection(provider)}
+                                    disabled={provider.testStatus === 'testing'}
+                                >
+                                    {provider.testStatus === 'testing' ? (
+                                        <><span className="test-spinner" /> Testing...</>
+                                    ) : (
+                                        <>
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M22 11.08V12a10 10 0 11-5.93-9.14" />
+                                                <polyline points="22 4 12 14.01 9 11.01" />
+                                            </svg>
+                                            Test Connection
+                                        </>
+                                    )}
+                                </button>
+                                {provider.testMessage && (
+                                    <div className={`test-result ${provider.testStatus}`}>
+                                        {provider.testStatus === 'success' && (
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                <polyline points="20 6 9 17 4 12" />
+                                            </svg>
+                                        )}
+                                        {provider.testStatus === 'error' && (
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                <circle cx="12" cy="12" r="10" />
+                                                <line x1="15" y1="9" x2="9" y2="15" />
+                                                <line x1="9" y1="9" x2="15" y2="15" />
+                                            </svg>
+                                        )}
+                                        {provider.testMessage}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Disconnect */}
+                            {provider.connected && (
+                                <button
+                                    className="disconnect-btn"
+                                    onClick={() => {
+                                        updateProvider(provider.id, {
+                                            connected: false, enabled: false,
+                                            testStatus: 'idle', testMessage: '', apiKey: '',
+                                        });
+                                        localStorage.removeItem('onicode-codex-tokens');
+                                    }}
+                                >
+                                    Disconnect
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
+            ))}
+        </div>
+    );
+}

@@ -1,0 +1,56 @@
+{
+  "name": "onicode",
+  "version": "0.1.0",
+  "description": "Onicode — AI-Powered Development Environment",
+  "main": "src/main/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:chat\" \"npm run dev:electron\"",
+    "dev:chat": "vite",
+    "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "build:chat": "tsc && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:chat && npm run build:electron",
+    "start": "electron .",
+    "package": "electron-builder"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "electron-store": "^10.0.0",
+    "marked": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.1.0",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.oni.onicode",
+    "productName": "Onicode",
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "resources/icon.icns"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "resources/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "resources/icon.png"
+    }
+  }
+}

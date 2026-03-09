@@ -1,0 +1,662 @@
+const { app, BrowserWindow, ipcMain, shell, net } = require('electron');
+const path = require('path');
+const http = require('http');
+const https = require('https');
+const crypto = require('crypto');
+const { registerTerminalIPC, killAllSessions } = require('./terminal');
+const { registerProjectIPC } = require('./projects');
+
+let mainWindow = null;
+
+function createWindow() {
+    mainWindow = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        minWidth: 480,
+        minHeight: 600,
+        titleBarStyle: 'hiddenInset',
+        trafficLightPosition: { x: 16, y: 16 },
+        backgroundColor: '#F5EDE0',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: path.join(__dirname, '../../resources/icon.png'),
+        title: 'Onicode',
+        show: false,
+    });
+
+    const isDev = process.env.NODE_ENV !== 'production' || !app.isPackaged;
+
+    if (isDev) {
+        // Vite may pick a different port if 5173 is busy — try common ports
+        const devPort = process.env.VITE_DEV_PORT || '5173';
+        const devUrl = `http://localhost:${devPort}`;
+        mainWindow.loadURL(devUrl);
+        mainWindow.webContents.openDevTools({ mode: 'detach' });
+
+        // If load fails (port mismatch), try the next port
+        mainWindow.webContents.on('did-fail-load', async (_event, _code, _desc, url) => {
+            if (!url.includes('localhost')) return;
+            const currentPort = parseInt(new URL(url).port, 10);
+            const nextPort = currentPort + 1;
+            if (nextPort <= 5180) {
+                console.log(`[Onicode] Port ${currentPort} failed, trying ${nextPort}...`);
+                mainWindow.loadURL(`http://localhost:${nextPort}`);
+            }
+        });
+    } else {
+        mainWindow.loadFile(path.join(__dirname, '../chat/index.html'));
+    }
+
+    mainWindow.once('ready-to-show', () => mainWindow.show());
+    mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// ══════════════════════════════════════════
+//  IPC: App Info & Theme
+// ══════════════════════════════════════════
+
+ipcMain.handle('get-app-info', () => ({
+    name: 'Onicode',
+    version: app.getVersion(),
+    platform: process.platform,
+}));
+
+ipcMain.handle('get-theme', async () => ({ theme: 'sand' }));
+ipcMain.handle('set-theme', async (_event, theme) => ({ success: true, theme }));
+
+// ══════════════════════════════════════════
+//  JWT + Token Helpers
+// ══════════════════════════════════════════
+
+/** Detect if a token is a ChatGPT OAuth JWT vs a standard sk-... API key */
+function isOAuthToken(apiKey) {
+    if (!apiKey) return false;
+    // Standard OpenAI API keys start with sk-
+    if (apiKey.startsWith('sk-')) return false;
+    // JWTs have 3 dot-separated base64 segments
+    const parts = apiKey.split('.');
+    return parts.length === 3;
+}
+
+/** Decode JWT payload to extract chatgpt_account_id */
+function decodeJWT(token) {
+    try {
+        const parts = token.split('.');
+        if (parts.length !== 3) return null;
+        const payload = Buffer.from(parts[1], 'base64').toString('utf-8');
+        return JSON.parse(payload);
+    } catch {
+        return null;
+    }
+}
+
+/** Extract ChatGPT account ID from OAuth JWT */
+function getAccountId(token) {
+    const payload = decodeJWT(token);
+    if (!payload) return null;
+    // The account ID is nested under the auth claim
+    const authClaim = payload['https://api.openai.com/auth'];
+    return authClaim?.chatgpt_account_id || null;
+}
+
+// ══════════════════════════════════════════
+//  PKCE Helpers
+// ══════════════════════════════════════════
+
+function generateRandomString(length) {
+    return crypto.randomBytes(length).toString('hex').slice(0, length);
+}
+
+function generatePKCE() {
+    const verifier = generateRandomString(64);
+    const hash = crypto.createHash('sha256').update(verifier).digest();
+    const challenge = hash
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    return { verifier, challenge };
+}
+
+// ══════════════════════════════════════════
+//  Codex OAuth Config (matches Codex CLI)
+// ══════════════════════════════════════════
+
+const CODEX_OAUTH = {
+    clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
+    authorizeEndpoint: 'https://auth.openai.com/oauth/authorize',
+    tokenEndpoint: 'https://auth.openai.com/oauth/token',
+    redirectUri: 'http://localhost:1455/auth/callback',
+    scope: 'openid profile email offline_access',
+    audience: 'https://api.openai.com/v1',
+};
+
+// ══════════════════════════════════════════
+//  IPC: Codex OAuth — generate PKCE + auth URL
+// ══════════════════════════════════════════
+
+let pendingOAuth = null;
+
+ipcMain.handle('codex-oauth-get-auth-url', async () => {
+    const pkce = generatePKCE();
+    const state = generateRandomString(32);
+    pendingOAuth = { verifier: pkce.verifier, state };
+
+    const params = new URLSearchParams({
+        response_type: 'code',
+        client_id: CODEX_OAUTH.clientId,
+        redirect_uri: CODEX_OAUTH.redirectUri,
+        scope: CODEX_OAUTH.scope,
+        audience: CODEX_OAUTH.audience,
+        code_challenge: pkce.challenge,
+        code_challenge_method: 'S256',
+        state,
+        id_token_add_organizations: 'true',
+        codex_cli_simplified_flow: 'true',
+        originator: 'codex_cli_rs',
+    });
+
+    const authUrl = `${CODEX_OAUTH.authorizeEndpoint}?${params.toString()}`;
+    shell.openExternal(authUrl);
+    return { success: true, authUrl };
+});
+
+// ══════════════════════════════════════════
+//  IPC: Codex OAuth — exchange redirect URL for token
+// ══════════════════════════════════════════
+
+ipcMain.handle('codex-oauth-exchange', async (_event, redirectUrl) => {
+    if (!pendingOAuth) return { error: 'No pending OAuth flow. Click "Sign in" first.' };
+
+    try {
+        const url = new URL(redirectUrl.trim());
+        const code = url.searchParams.get('code');
+        const error = url.searchParams.get('error');
+        const errorDesc = url.searchParams.get('error_description');
+
+        if (error) { pendingOAuth = null; return { error: errorDesc || error }; }
+        if (!code) return { error: 'No authorization code in URL. Copy the full URL.' };
+
+        const tokenData = await exchangeCodeForToken(code, pendingOAuth.verifier);
+        pendingOAuth = null;
+        return tokenData;
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        if (msg.includes('Invalid URL')) return { error: 'Invalid URL. Paste the full redirect URL.' };
+        return { error: `Token exchange failed: ${msg}` };
+    }
+});
+
+ipcMain.handle('codex-oauth-cancel', async () => { pendingOAuth = null; return { success: true }; });
+
+function exchangeCodeForToken(code, verifier) {
+    return new Promise((resolve, reject) => {
+        const body = new URLSearchParams({
+            grant_type: 'authorization_code',
+            client_id: CODEX_OAUTH.clientId,
+            code,
+            redirect_uri: CODEX_OAUTH.redirectUri,
+            code_verifier: verifier,
+        }).toString();
+
+        const url = new URL(CODEX_OAUTH.tokenEndpoint);
+        const req = https.request({
+            hostname: url.hostname,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(body),
+            },
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    if (json.access_token) {
+                        resolve({
+                            success: true,
+                            accessToken: json.access_token,
+                            refreshToken: json.refresh_token,
+                            expiresIn: json.expires_in,
+                        });
+                    } else {
+                        resolve({ error: json.error_description || json.error || 'No access token' });
+                    }
+                } catch {
+                    resolve({ error: `Invalid JSON from token endpoint (HTTP ${res.statusCode})` });
+                }
+            });
+        });
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+    });
+}
+
+// ══════════════════════════════════════════
+//  IPC: Test Provider Connection
+// ══════════════════════════════════════════
+
+ipcMain.handle('test-provider', async (_event, providerConfig) => {
+    if (!providerConfig) return { error: 'No provider config' };
+
+    try {
+        if (providerConfig.id === 'codex') {
+            if (!providerConfig.apiKey?.trim()) return { error: 'API key is required' };
+
+            if (isOAuthToken(providerConfig.apiKey)) {
+                // ChatGPT OAuth: test against chatgpt.com backend
+                return await testChatGPTBackend(providerConfig.apiKey);
+            } else {
+                // Standard API key: test against api.openai.com
+                return await testOpenAI(providerConfig.apiKey);
+            }
+        } else {
+            if (!providerConfig.baseUrl?.trim()) return { error: 'Gateway URL is required' };
+            return await testGateway(providerConfig.baseUrl, providerConfig.apiKey);
+        }
+    } catch (err) {
+        return { error: err.message || 'Connection failed' };
+    }
+});
+
+/** Test ChatGPT OAuth token by validating the JWT structure */
+function testChatGPTBackend(accessToken) {
+    const accountId = getAccountId(accessToken);
+    if (!accountId) {
+        return Promise.resolve({ error: 'Could not extract account ID from token. Token may be invalid or expired.' });
+    }
+
+    // Check if the token is expired
+    const payload = decodeJWT(accessToken);
+    if (payload?.exp && payload.exp * 1000 < Date.now()) {
+        return Promise.resolve({ error: 'Token is expired. Sign in again.' });
+    }
+
+    // Token structure is valid — account ID extracted successfully
+    return Promise.resolve({ success: true, modelCount: 0 });
+}
+
+/** Test standard API key against api.openai.com */
+function testOpenAI(apiKey) {
+    return new Promise((resolve) => {
+        const req = https.request({
+            hostname: 'api.openai.com',
+            path: '/v1/models',
+            method: 'GET',
+            headers: { Authorization: `Bearer ${apiKey}` },
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        const json = JSON.parse(data);
+                        const allModels = json.data?.map((m) => m.id).sort() || [];
+                        const relevant = allModels.filter((m) =>
+                            m.includes('gpt-5') || m.includes('gpt-4') ||
+                            m.includes('o3') || m.includes('o4') || m.includes('codex')
+                        );
+                        resolve({
+                            success: true,
+                            models: relevant.length > 0 ? relevant : undefined,
+                            modelCount: json.data?.length || 0,
+                        });
+                    } catch {
+                        resolve({ success: true, modelCount: 0 });
+                    }
+                } else if (res.statusCode === 401) {
+                    resolve({ error: 'Authentication failed (401). Check your API key.' });
+                } else {
+                    let msg = `HTTP ${res.statusCode}`;
+                    try { msg = JSON.parse(data).error?.message || msg; } catch {}
+                    resolve({ error: msg });
+                }
+            });
+        });
+        req.on('error', (err) => resolve({ error: err.message }));
+        req.end();
+    });
+}
+
+function testGateway(baseUrl, apiKey) {
+    const base = baseUrl.replace(/\/$/, '');
+    return new Promise((resolve) => {
+        const url = new URL(`${base}/v1/models`);
+        const mod = url.protocol === 'https:' ? https : http;
+        const headers = {};
+        if (apiKey?.trim()) headers['Authorization'] = `Bearer ${apiKey}`;
+
+        const req = mod.request({
+            hostname: url.hostname,
+            port: url.port || undefined,
+            path: url.pathname + url.search,
+            method: 'GET',
+            headers,
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    let models, modelCount = 0;
+                    try {
+                        const json = JSON.parse(data);
+                        if (json.data) { modelCount = json.data.length; models = json.data.map((m) => m.id).sort(); }
+                    } catch {}
+                    resolve({ success: true, models: models?.length > 0 ? models : undefined, modelCount });
+                } else {
+                    resolve({ error: `HTTP ${res.statusCode} — check URL and credentials` });
+                }
+            });
+        });
+        req.on('error', () => resolve({ error: 'Cannot reach gateway — check URL' }));
+        req.end();
+    });
+}
+
+// ══════════════════════════════════════════
+//  IPC: AI Chat (Streaming via main process)
+//  Supports both api.openai.com (API key) and
+//  chatgpt.com/backend-api (OAuth token)
+// ══════════════════════════════════════════
+
+let currentAIRequest = null;
+
+ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
+    if (!providerConfig?.apiKey) return { error: 'No API key configured' };
+
+    // Abort any in-flight request
+    if (currentAIRequest) {
+        try { currentAIRequest.destroy(); } catch {}
+        currentAIRequest = null;
+    }
+
+    const apiKey = providerConfig.apiKey;
+
+    // Route based on token type
+    if (providerConfig.id === 'codex' && isOAuthToken(apiKey)) {
+        return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel);
+    } else {
+        return streamOpenAI(messages, providerConfig);
+    }
+});
+
+/** Stream chat via ChatGPT backend API using the Responses API (for OAuth tokens) */
+async function streamChatGPTBackend(messages, accessToken, selectedModel) {
+    const accountId = getAccountId(accessToken);
+    if (!accountId) {
+        mainWindow?.webContents.send('ai-stream-done', 'Cannot extract account ID from token. Sign in again.');
+        return { error: 'Invalid token' };
+    }
+
+    const model = selectedModel || 'gpt-4o';
+
+    // Separate system/developer instructions from user/assistant messages
+    const systemMessages = messages.filter((m) => m.role === 'system');
+    const chatMessages = messages.filter((m) => m.role !== 'system');
+
+    // Build instructions string from system messages
+    const instructions = systemMessages.map((m) => m.content).join('\n\n')
+        || 'You are Onicode AI, an intelligent development companion. You help with code generation, code explanation, debugging, brainstorming, and general conversation. Be concise and helpful.';
+
+    // Convert to Responses API input format
+    const input = chatMessages.map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content,
+    }));
+
+    // Responses API body — matches Codex CLI format
+    const bodyObj = {
+        model,
+        instructions,
+        input,
+        stream: true,
+        store: false,
+    };
+
+    const bodyStr = JSON.stringify(bodyObj);
+    const url = 'https://chatgpt.com/backend-api/codex/responses';
+
+    // Use fetch (via Electron's net-aware Node) to avoid TLS/socket issues with raw https
+    const abortController = new AbortController();
+    currentAIRequest = abortController;
+
+    try {
+        const response = await net.fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`,
+                'chatgpt-account-id': accountId,
+                'OpenAI-Beta': 'responses=experimental',
+                'originator': 'codex_cli_rs',
+                'accept': 'text/event-stream',
+            },
+            body: bodyStr,
+            signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+            const errText = await response.text().catch(() => '');
+            currentAIRequest = null;
+            let errorMsg = `ChatGPT backend returned HTTP ${response.status}`;
+            try {
+                const errJson = JSON.parse(errText);
+                errorMsg = errJson.error?.message || errJson.detail || errorMsg;
+            } catch {}
+            if (response.status === 401) errorMsg = 'OAuth token expired. Go to Settings and sign in again.';
+            if (response.status === 403) errorMsg = 'Access denied. Your ChatGPT subscription may not include this model.';
+            console.error('[AI] ChatGPT backend error:', response.status, errText.slice(0, 500));
+            mainWindow?.webContents.send('ai-stream-done', errorMsg);
+            return { error: errorMsg };
+        }
+
+        // Read SSE stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || !trimmed.startsWith('data: ')) continue;
+                const dataStr = trimmed.slice(6);
+                if (dataStr === '[DONE]') continue;
+                try {
+                    const json = JSON.parse(dataStr);
+                    // Responses API: response.output_text.delta has the text
+                    if (json.type === 'response.output_text.delta' && json.delta) {
+                        mainWindow?.webContents.send('ai-stream-chunk', json.delta);
+                    }
+                    // Chat Completions fallback
+                    else if (json.choices?.[0]?.delta?.content) {
+                        mainWindow?.webContents.send('ai-stream-chunk', json.choices[0].delta.content);
+                    }
+                } catch {}
+            }
+        }
+
+        // Process remaining buffer
+        if (buffer.trim() && buffer.trim().startsWith('data: ')) {
+            const dataStr = buffer.trim().slice(6);
+            if (dataStr !== '[DONE]') {
+                try {
+                    const json = JSON.parse(dataStr);
+                    if (json.type === 'response.output_text.delta' && json.delta) {
+                        mainWindow?.webContents.send('ai-stream-chunk', json.delta);
+                    }
+                } catch {}
+            }
+        }
+
+        currentAIRequest = null;
+        mainWindow?.webContents.send('ai-stream-done', null);
+        return { success: true };
+
+    } catch (err) {
+        currentAIRequest = null;
+        if (err.name === 'AbortError') {
+            mainWindow?.webContents.send('ai-stream-done', null);
+            return { success: true };
+        }
+        console.error('[AI] ChatGPT backend request error:', err.message);
+        mainWindow?.webContents.send('ai-stream-done', err.message);
+        return { error: err.message };
+    }
+}
+
+/** Stream chat via standard OpenAI API (for sk-... keys and gateways) */
+function streamOpenAI(messages, providerConfig) {
+    let endpoint;
+    if (providerConfig.id === 'codex') {
+        endpoint = 'https://api.openai.com/v1/chat/completions';
+    } else {
+        const base = (providerConfig.baseUrl || '').replace(/\/$/, '');
+        endpoint = `${base}/v1/chat/completions`;
+    }
+
+    const model = providerConfig.selectedModel || 'gpt-4o-mini';
+    const isOModel = model.startsWith('o');
+
+    const bodyObj = {
+        model,
+        messages: isOModel ? messages.filter((m) => m.role !== 'system') : messages,
+        stream: true,
+    };
+    if (isOModel) bodyObj.max_completion_tokens = 4096;
+    else bodyObj.max_tokens = 4096;
+
+    const bodyStr = JSON.stringify(bodyObj);
+
+    try {
+        const url = new URL(endpoint);
+        const mod = url.protocol === 'https:' ? https : http;
+
+        return new Promise((resolve) => {
+            const req = mod.request({
+                hostname: url.hostname,
+                port: url.port || undefined,
+                path: url.pathname + url.search,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${providerConfig.apiKey}`,
+                    'Content-Length': Buffer.byteLength(bodyStr),
+                },
+            }, (res) => {
+                if (res.statusCode !== 200) {
+                    let data = '';
+                    res.on('data', (c) => { data += c; });
+                    res.on('end', () => {
+                        currentAIRequest = null;
+                        let errorMsg = `HTTP ${res.statusCode}`;
+                        try { errorMsg = JSON.parse(data).error?.message || errorMsg; } catch {}
+                        if (res.statusCode === 401) errorMsg = 'Authentication failed (401). Check your API key.';
+                        if (res.statusCode === 403) errorMsg = `Access denied for model "${model}". Try a different model.`;
+                        console.error('[AI] OpenAI API error:', res.statusCode, data.slice(0, 200));
+                        mainWindow?.webContents.send('ai-stream-done', errorMsg);
+                        resolve({ error: errorMsg });
+                    });
+                    return;
+                }
+
+                let buffer = '';
+                res.on('data', (chunk) => {
+                    buffer += chunk.toString();
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed || trimmed === 'data: [DONE]') continue;
+                        if (!trimmed.startsWith('data: ')) continue;
+                        try {
+                            const json = JSON.parse(trimmed.slice(6));
+                            const delta = json.choices?.[0]?.delta?.content;
+                            if (delta) mainWindow?.webContents.send('ai-stream-chunk', delta);
+                        } catch {}
+                    }
+                });
+
+                res.on('end', () => {
+                    currentAIRequest = null;
+                    if (buffer.trim() && buffer.trim().startsWith('data: ') && buffer.trim() !== 'data: [DONE]') {
+                        try {
+                            const json = JSON.parse(buffer.trim().slice(6));
+                            const delta = json.choices?.[0]?.delta?.content;
+                            if (delta) mainWindow?.webContents.send('ai-stream-chunk', delta);
+                        } catch {}
+                    }
+                    mainWindow?.webContents.send('ai-stream-done', null);
+                    resolve({ success: true });
+                });
+
+                res.on('error', (err) => {
+                    currentAIRequest = null;
+                    mainWindow?.webContents.send('ai-stream-done', err.message);
+                    resolve({ error: err.message });
+                });
+            });
+
+            currentAIRequest = req;
+            req.on('error', (err) => {
+                currentAIRequest = null;
+                mainWindow?.webContents.send('ai-stream-done', err.message);
+                resolve({ error: err.message });
+            });
+            req.write(bodyStr);
+            req.end();
+        });
+    } catch (err) {
+        return { error: err.message || 'Unknown error' };
+    }
+}
+
+ipcMain.handle('ai-abort', () => {
+    if (currentAIRequest) {
+        try {
+            // AbortController (fetch-based) or raw request (https-based)
+            if (typeof currentAIRequest.abort === 'function') currentAIRequest.abort();
+            else if (typeof currentAIRequest.destroy === 'function') currentAIRequest.destroy();
+        } catch {}
+        currentAIRequest = null;
+    }
+    return { success: true };
+});
+
+// ══════════════════════════════════════════
+//  Register Terminal & Project IPC
+// ══════════════════════════════════════════
+
+registerTerminalIPC(ipcMain, () => mainWindow);
+registerProjectIPC(ipcMain, () => mainWindow);
+
+// ══════════════════════════════════════════
+//  App Lifecycle
+// ══════════════════════════════════════════
+
+app.whenReady().then(() => {
+    createWindow();
+    app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+});
+
+app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+    killAllSessions();
+});
