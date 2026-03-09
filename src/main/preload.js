@@ -133,7 +133,7 @@ contextBridge.exposeInMainWorld('onicode', {
     },
 
     // ── Memory ──
-    memoryLoadCore: () => ipcRenderer.invoke('memory-load-core'),
+    memoryLoadCore: (projectId) => ipcRenderer.invoke('memory-load-core', projectId),
     memoryEnsureDefaults: () => ipcRenderer.invoke('memory-ensure-defaults'),
     memorySaveOnboarding: (answers) => ipcRenderer.invoke('memory-save-onboarding', answers),
     memoryRead: (filename) => ipcRenderer.invoke('memory-read', filename),
@@ -142,6 +142,18 @@ contextBridge.exposeInMainWorld('onicode', {
     memoryList: () => ipcRenderer.invoke('memory-list'),
     memoryDelete: (filename) => ipcRenderer.invoke('memory-delete', filename),
     memoryCompact: (messages, keepRecent) => ipcRenderer.invoke('memory-compact', messages, keepRecent),
+
+    // Project-scoped memory
+    memoryProjectRead: (projectId) => ipcRenderer.invoke('memory-project-read', projectId),
+    memoryProjectWrite: (projectId, content) => ipcRenderer.invoke('memory-project-write', projectId, content),
+    memoryProjectAppend: (projectId, content) => ipcRenderer.invoke('memory-project-append', projectId, content),
+
+    // Memory change notifications (for UI sync)
+    onMemoryChanged: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('memory-changed', handler);
+        return () => ipcRenderer.removeListener('memory-changed', handler);
+    },
 
     // ── Browser / Puppeteer ──
     browserLaunch: (opts) => ipcRenderer.invoke('browser-launch', opts),
@@ -188,6 +200,8 @@ contextBridge.exposeInMainWorld('onicode', {
     // ── Agent Mode & Permissions ──
     agentSetMode: (mode) => ipcRenderer.invoke('agent-set-mode', mode),
     agentGetMode: () => ipcRenderer.invoke('agent-get-mode'),
+    setSetting: (key, value) => ipcRenderer.invoke('set-setting', key, value),
+    getSetting: (key) => ipcRenderer.invoke('get-setting', key),
     onAgentMode: (callback) => {
         const handler = (_event, mode) => callback(mode);
         ipcRenderer.on('ai-agent-mode', handler);
@@ -222,6 +236,11 @@ contextBridge.exposeInMainWorld('onicode', {
     hooksList: (projectPath) => ipcRenderer.invoke('hooks-list', projectPath),
     hooksSave: (hooks, scope, projectPath) => ipcRenderer.invoke('hooks-save', hooks, scope, projectPath),
     hooksTest: (hookType, context) => ipcRenderer.invoke('hooks-test', { hookType, context }),
+    onHookExecuted: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('hook-executed', handler);
+        return () => ipcRenderer.removeListener('hook-executed', handler);
+    },
 
     // ── Custom Commands ──
     customCommandsList: (projectPath) => ipcRenderer.invoke('custom-commands-list', projectPath),

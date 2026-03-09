@@ -1,11 +1,25 @@
 /**
- * Hooks System — extensible hook points for tool calls, sessions, and AI lifecycle.
+ * Hooks System — Lifecycle hooks for tool calls, commits, tests, sessions, and AI responses.
  *
- * Modeled after Claude Code's hooks. Hooks are loaded from:
+ * Hooks are shell commands that execute at specific lifecycle points.
+ * They can block operations (PreToolUse, PreCommit) or log/react (PostToolUse, OnTestFailure).
+ *
+ * Storage:
  *   - Global:  ~/.onicode/hooks.json
  *   - Project: <projectDir>/.onicode/hooks.json
+ *   - Project hooks merge over global hooks (run last, can override).
  *
- * Project-level hooks are merged over global hooks (per hook type).
+ * Environment variables available to all hooks:
+ *   ONICODE_HOOK_TYPE     — The hook type (e.g. PreToolUse)
+ *   ONICODE_PROJECT_DIR   — Active project directory
+ *   ONICODE_SESSION_ID    — Current session ID
+ *   ONICODE_TOOL_NAME     — Tool name (Pre/PostToolUse, ToolError, OnDangerousCommand)
+ *   ONICODE_TOOL_INPUT    — JSON-encoded tool arguments
+ *   ONICODE_TOOL_OUTPUT   — JSON-encoded tool result (PostToolUse only)
+ *   ONICODE_ERROR         — Error message (ToolError, OnTestFailure)
+ *   ONICODE_COMMIT_MSG    — Commit message (PreCommit, PostCommit)
+ *   ONICODE_FILE_PATH     — File path (PreEdit, PostEdit)
+ *   ONICODE_TASK_CONTENT  — Task content (OnTaskComplete)
  */
 
 const { execSync } = require('child_process');
@@ -13,32 +27,78 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-// ── Constants ──
+// ══════════════════════════════════════════
+//  Constants
+// ══════════════════════════════════════════
 
 const GLOBAL_HOOKS_FILE = path.join(os.homedir(), '.onicode', 'hooks.json');
 
 const HOOK_TYPES = [
-    'PreToolUse',
-    'PostToolUse',
-    'Stop',
-    'SubagentStop',
-    'UserPromptSubmit',
-    'Notification',
-    'PreCompact',
-    'SessionStart',
+    // Tool lifecycle
+    'PreToolUse',          // Before any tool call — can BLOCK (exit non-zero)
+    'PostToolUse',         // After any tool call completes
+    'ToolError',           // When a tool call fails/errors
+
+    // File operations
+    'PreEdit',             // Before editing a file — can BLOCK
+    'PostEdit',            // After a file is edited (run linter, tests, etc.)
+
+    // Command execution
+    'PreCommand',          // Before run_command — can BLOCK
+    'PostCommand',         // After run_command completes
+    'OnDangerousCommand',  // When a potentially destructive command is detected — can BLOCK
+
+    // Git / Version Control
+    'PreCommit',           // Before git commit — can BLOCK (run lint, typecheck, format)
+    'PostCommit',          // After git commit succeeds
+
+    // Testing
+    'OnTestFailure',       // When a test command fails (exit code != 0)
+
+    // Task management
+    'OnTaskComplete',      // When a task is marked as done
+
+    // AI lifecycle
+    'SessionStart',        // When a new AI session begins
+    'AIResponse',          // After the AI finishes responding
+    'PreCompact',          // Before context compaction
+
+    // Agent
+    'Stop',                // When the AI stops working
+    'SubagentStop',        // When a sub-agent completes
+
+    // User input
+    'UserPromptSubmit',    // When user submits a message (before AI sees it)
+    'Notification',        // When a notification is triggered
+];
+
+// Commands that are potentially dangerous — matched against run_command args
+const DANGEROUS_PATTERNS = [
+    /rm\s+(-rf?|--recursive)\s/,
+    /rm\s+-[a-zA-Z]*f/,
+    /rmdir\s/,
+    /git\s+(reset\s+--hard|clean\s+-f|push\s+--force|push\s+-f|checkout\s+--\s+\.|branch\s+-D)/,
+    /drop\s+(table|database)\s/i,
+    /truncate\s+table\s/i,
+    /DELETE\s+FROM\s+\w+\s*;?\s*$/i,
+    /:(){ :\|:& };:/,
+    /mkfs\./,
+    /dd\s+if=/,
+    /chmod\s+-R\s+777/,
+    /npm\s+unpublish/,
+    /curl\s+.*\|\s*(bash|sh|zsh)/,
 ];
 
 const DEFAULT_TIMEOUT = 10000; // 10 seconds
 
-// ── Helpers ──
+// ══════════════════════════════════════════
+//  Helpers
+// ══════════════════════════════════════════
 
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-/**
- * Read a hooks.json file and return its `hooks` object, or empty object on failure.
- */
 function readHooksFile(filePath) {
     try {
         if (!fs.existsSync(filePath)) return {};
@@ -50,27 +110,43 @@ function readHooksFile(filePath) {
     }
 }
 
-/**
- * Write a hooks config to a file.
- */
 function writeHooksFile(filePath, hooks) {
     ensureDir(path.dirname(filePath));
     fs.writeFileSync(filePath, JSON.stringify({ hooks }, null, 2));
 }
 
-// ── In-memory cache ──
+// ══════════════════════════════════════════
+//  In-memory cache
+// ══════════════════════════════════════════
 
 let _cachedHooks = {};
 let _lastProjectPath = null;
+let _mainWindow = null;
 
-// ── Core API ──
+function setMainWindow(win) {
+    _mainWindow = win;
+}
+
+function notifyHookExecution(hookType, result, context) {
+    if (_mainWindow?.webContents) {
+        _mainWindow.webContents.send('hook-executed', {
+            hookType,
+            allowed: result.allowed,
+            reason: result.reason,
+            outputs: result.outputs,
+            toolName: context?.toolName,
+            timestamp: Date.now(),
+        });
+    }
+}
+
+// ══════════════════════════════════════════
+//  Core API
+// ══════════════════════════════════════════
 
 /**
  * Load and merge global + project hooks.
- * Call this whenever the active project changes.
- *
- * @param {string} [projectPath] — active project directory (optional)
- * @returns {Object} merged hooks map  { HookType: [ ...entries ] }
+ * Call this on app start and whenever the active project changes.
  */
 function loadHooks(projectPath) {
     const globalHooks = readHooksFile(GLOBAL_HOOKS_FILE);
@@ -82,7 +158,6 @@ function loadHooks(projectPath) {
     }
 
     // Merge: for each hook type, concatenate global then project entries.
-    // Project entries come after global so they run last (and can override).
     const merged = {};
     for (const type of HOOK_TYPES) {
         const globalEntries = Array.isArray(globalHooks[type]) ? globalHooks[type] : [];
@@ -100,14 +175,11 @@ function loadHooks(projectPath) {
 /**
  * Execute all hooks for a given hook type.
  *
- * @param {string} hookType — one of HOOK_TYPES
- * @param {Object} context
- * @param {string} [context.projectDir]   — active project path
- * @param {string} [context.toolName]     — tool name (Pre/PostToolUse)
- * @param {Object} [context.toolInput]    — tool arguments (Pre/PostToolUse)
- * @param {Object} [context.toolOutput]   — tool result (PostToolUse only)
- * @param {string} [context.sessionId]    — current session ID
- * @returns {{ allowed: boolean, reason?: string, outputs: string[] }}
+ * For PreToolUse, PreEdit, PreCommand, OnDangerousCommand, PreCommit:
+ *   Non-zero exit = BLOCKS the operation. Returns { allowed: false, reason: "..." }
+ *
+ * For all other hooks:
+ *   Non-zero exit = logged but does not block. Returns { allowed: true }
  */
 function executeHook(hookType, context = {}) {
     if (!HOOK_TYPES.includes(hookType)) {
@@ -129,33 +201,40 @@ function executeHook(hookType, context = {}) {
         ONICODE_TOOL_INPUT: context.toolInput ? JSON.stringify(context.toolInput) : '',
     };
 
-    if (hookType === 'PostToolUse' && context.toolOutput !== undefined) {
-        env.ONICODE_TOOL_OUTPUT = JSON.stringify(context.toolOutput);
+    // Type-specific env vars
+    if (context.toolOutput !== undefined) {
+        const outputStr = typeof context.toolOutput === 'string' ? context.toolOutput : JSON.stringify(context.toolOutput);
+        env.ONICODE_TOOL_OUTPUT = outputStr.slice(0, 50000); // Cap at 50KB
     }
+    if (context.error) env.ONICODE_ERROR = context.error;
+    if (context.commitMsg) env.ONICODE_COMMIT_MSG = context.commitMsg;
+    if (context.filePath) env.ONICODE_FILE_PATH = context.filePath;
+    if (context.taskContent) env.ONICODE_TASK_CONTENT = context.taskContent;
+    if (context.command) env.ONICODE_COMMAND = context.command;
+    if (context.exitCode !== undefined) env.ONICODE_EXIT_CODE = String(context.exitCode);
 
     const outputs = [];
     let allowed = true;
     let reason = null;
 
+    // These hook types can BLOCK operations
+    const blockingHooks = ['PreToolUse', 'PreEdit', 'PreCommand', 'OnDangerousCommand', 'PreCommit', 'UserPromptSubmit'];
+
     for (const entry of entries) {
-        // Matcher check: if a matcher is specified, test it against the tool name.
-        // Only applies to Pre/PostToolUse hooks.
-        if (entry.matcher && (hookType === 'PreToolUse' || hookType === 'PostToolUse')) {
-            const toolName = context.toolName || '';
+        // Matcher check: if a matcher regex is specified, test against tool/command name
+        if (entry.matcher) {
+            const matchTarget = context.toolName || context.command || '';
             try {
                 const regex = new RegExp(entry.matcher);
-                if (!regex.test(toolName)) {
-                    continue; // skip this hook — tool doesn't match
+                if (!regex.test(matchTarget)) {
+                    continue; // skip — doesn't match
                 }
             } catch {
-                // Invalid regex — skip this entry
-                continue;
+                continue; // invalid regex — skip
             }
         }
 
-        if (!entry.command) {
-            continue;
-        }
+        if (!entry.command) continue;
 
         const timeout = entry.timeout || DEFAULT_TIMEOUT;
         const cwd = context.projectDir || os.homedir();
@@ -168,37 +247,52 @@ function executeHook(hookType, context = {}) {
                 stdio: ['pipe', 'pipe', 'pipe'],
                 encoding: 'utf-8',
                 shell: true,
-                maxBuffer: 1024 * 1024, // 1 MB
+                maxBuffer: 1024 * 1024,
             });
             outputs.push((stdout || '').trim());
         } catch (err) {
-            // Non-zero exit code
             const stderr = (err.stderr || '').trim();
             const stdout = (err.stdout || '').trim();
 
             if (stdout) outputs.push(stdout);
 
-            // For PreToolUse, a non-zero exit means BLOCK the tool call
-            if (hookType === 'PreToolUse') {
+            // For blocking hooks, non-zero exit = BLOCK
+            if (blockingHooks.includes(hookType)) {
                 allowed = false;
-                reason = stderr || `Hook command failed: ${entry.command}`;
-                break; // Stop processing further hooks — tool is blocked
+                reason = stderr || stdout || `Hook blocked: ${entry.command}`;
+                break;
             }
 
-            // For other hook types, record the error but continue
+            // For non-blocking hooks, record error and continue
             outputs.push(`[hook error] ${stderr || err.message}`);
         }
     }
 
     const result = { allowed, outputs };
     if (reason) result.reason = reason;
+
+    // Notify renderer about hook execution (for UI logging)
+    notifyHookExecution(hookType, result, context);
+
     return result;
 }
 
 /**
+ * Check if a command is dangerous (matches known destructive patterns).
+ * Returns the matched pattern description or null.
+ */
+function isDangerousCommand(command) {
+    if (!command || typeof command !== 'string') return null;
+    for (const pattern of DANGEROUS_PATTERNS) {
+        if (pattern.test(command)) {
+            return pattern.toString();
+        }
+    }
+    return null;
+}
+
+/**
  * Return a human-readable summary of configured hooks for the AI system prompt.
- *
- * @returns {string}
  */
 function getHooksSummary() {
     const lines = [];
@@ -209,7 +303,7 @@ function getHooksSummary() {
         if (entries.length > 0) {
             totalCount += entries.length;
             const descriptions = entries.map((e) => {
-                const matcher = e.matcher ? ` (matcher: ${e.matcher})` : '';
+                const matcher = e.matcher ? ` (match: /${e.matcher}/)` : '';
                 return `  - \`${e.command}\`${matcher}`;
             });
             lines.push(`**${type}** (${entries.length} hook${entries.length > 1 ? 's' : ''}):`);
@@ -218,26 +312,58 @@ function getHooksSummary() {
     }
 
     if (totalCount === 0) {
-        return 'No hooks configured.';
+        return '';
     }
 
     return `${totalCount} hook${totalCount > 1 ? 's' : ''} configured:\n${lines.join('\n')}`;
 }
 
-// ── IPC Registration ──
-
 /**
- * Register IPC handlers for hooks management.
- *
- * Channels:
- *   hooks-list    — returns { global, project, merged } hook configs
- *   hooks-save    — saves hooks to global or project file
- *   hooks-test    — runs a single hook command and returns output
- *
- * @param {Electron.IpcMain} ipcMain
+ * Get structured hook info for the settings UI.
  */
+function getHooksInfo() {
+    const info = {};
+    for (const type of HOOK_TYPES) {
+        info[type] = {
+            entries: _cachedHooks[type] || [],
+            blocking: ['PreToolUse', 'PreEdit', 'PreCommand', 'OnDangerousCommand', 'PreCommit', 'UserPromptSubmit'].includes(type),
+            description: HOOK_DESCRIPTIONS[type] || '',
+        };
+    }
+    return info;
+}
+
+// ══════════════════════════════════════════
+//  Hook Type Descriptions (for UI)
+// ══════════════════════════════════════════
+
+const HOOK_DESCRIPTIONS = {
+    PreToolUse:          'Runs before any AI tool call. Exit non-zero to BLOCK the tool.',
+    PostToolUse:         'Runs after any AI tool call completes successfully.',
+    ToolError:           'Runs when a tool call fails or errors.',
+    PreEdit:             'Runs before the AI edits a file. Exit non-zero to BLOCK. Use matcher for file patterns.',
+    PostEdit:            'Runs after a file is edited. Great for auto-linting, formatting, or running tests.',
+    PreCommand:          'Runs before the AI executes a shell command. Exit non-zero to BLOCK.',
+    PostCommand:         'Runs after a shell command completes. Check exit codes, run follow-up actions.',
+    OnDangerousCommand:  'Runs when a potentially destructive command is detected (rm -rf, git reset --hard, etc.). Exit non-zero to BLOCK.',
+    PreCommit:           'Runs before a git commit. Exit non-zero to BLOCK. Great for lint + typecheck + format.',
+    PostCommit:          'Runs after a git commit succeeds. Push notifications, CI triggers.',
+    OnTestFailure:       'Runs when a test command exits with a non-zero code.',
+    OnTaskComplete:      'Runs when the AI marks a task as done.',
+    SessionStart:        'Runs when a new AI coding session begins.',
+    AIResponse:          'Runs after the AI finishes a full response (all tool rounds complete).',
+    PreCompact:          'Runs before context compaction happens.',
+    Stop:                'Runs when the AI stops working on the current request.',
+    SubagentStop:        'Runs when a sub-agent completes its task.',
+    UserPromptSubmit:    'Runs when the user submits a message. Exit non-zero to BLOCK submission.',
+    Notification:        'Runs when a notification event is triggered.',
+};
+
+// ══════════════════════════════════════════
+//  IPC Registration
+// ══════════════════════════════════════════
+
 function registerHooksIPC(ipcMain) {
-    // ── hooks-list ──
     ipcMain.handle('hooks-list', (_event, projectPath) => {
         const globalHooks = readHooksFile(GLOBAL_HOOKS_FILE);
 
@@ -254,10 +380,10 @@ function registerHooksIPC(ipcMain) {
             project: projectHooks,
             merged,
             hookTypes: HOOK_TYPES,
+            descriptions: HOOK_DESCRIPTIONS,
         };
     });
 
-    // ── hooks-save ──
     ipcMain.handle('hooks-save', (_event, hooks, scope, projectPath) => {
         try {
             if (scope === 'project' && projectPath) {
@@ -275,7 +401,6 @@ function registerHooksIPC(ipcMain) {
         }
     });
 
-    // ── hooks-test ──
     ipcMain.handle('hooks-test', (_event, { hookType, context, command: cmdOverride }) => {
         const command = cmdOverride;
         const testContext = {
@@ -319,12 +444,18 @@ function registerHooksIPC(ipcMain) {
     });
 }
 
-// ── Exports ──
+// ══════════════════════════════════════════
+//  Exports
+// ══════════════════════════════════════════
 
 module.exports = {
     HOOK_TYPES,
+    HOOK_DESCRIPTIONS,
     loadHooks,
     executeHook,
+    isDangerousCommand,
     getHooksSummary,
+    getHooksInfo,
     registerHooksIPC,
+    setMainWindow: setMainWindow,
 };

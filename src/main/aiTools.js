@@ -40,9 +40,13 @@ function sendToRenderer(channel, data) {
 
 let _permissions = null; // Set from index.js
 let _agentMode = 'build'; // Set from index.js
+let _dangerousProtectionCheck = () => true; // Set from index.js
+let _autoCommitCheck = () => true; // Set from index.js
 
 function setPermissions(perms) { _permissions = perms; }
 function setAgentModeRef(mode) { _agentMode = mode; }
+function setDangerousProtectionCheck(fn) { _dangerousProtectionCheck = fn; }
+function setAutoCommitCheck(fn) { _autoCommitCheck = fn; }
 
 /**
  * Check if a tool is allowed to run given current permissions and agent mode.
@@ -1022,6 +1026,20 @@ const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'memory_read',
+            description: 'Read a memory file or list all memory files. Use to recall past decisions, user preferences, project context, or session history.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filename: { type: 'string', description: 'Memory filename to read (e.g. "MEMORY.md", "user.md", "soul.md", "2025-03-09.md"). Omit to list all files.' },
+                },
+                required: [],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'memory_write',
             description: 'Write or update a memory file. Use this to save durable facts, user preferences, project decisions, or session notes to persistent memory.',
             parameters: {
@@ -1351,6 +1369,93 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'git_diff',
+            description: 'View changes in working directory or staged files. Use to review what changed before committing.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                    file_path: { type: 'string', description: 'Specific file to diff (optional, defaults to all files)' },
+                    staged: { type: 'boolean', description: 'Show staged changes instead of unstaged (default false)' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_log',
+            description: 'View recent commit history. Use to understand what has been done recently or find a specific commit.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                    count: { type: 'number', description: 'Number of commits to show (default 20, max 50)' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_branches',
+            description: 'List all local and remote branches. Use to see available branches before switching.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_checkout',
+            description: 'Switch to a different branch or create a new branch. Use for branching workflows.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    branch: { type: 'string', description: 'Branch name to switch to or create' },
+                    create: { type: 'boolean', description: 'Create a new branch (default false)' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+                required: ['branch'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_stash',
+            description: 'Stash or restore uncommitted changes. Use to temporarily save work without committing.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    action: { type: 'string', enum: ['push', 'pop', 'list', 'drop'], description: 'Stash action: push (save), pop (restore), list (show all), drop (discard)' },
+                    message: { type: 'string', description: 'Stash message (only for push action)' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+                required: ['action'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_pull',
+            description: 'Pull latest changes from the remote repository. Use to sync with teammates\' changes.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+            },
+        },
+    },
 ];
 
 // ══════════════════════════════════════════
@@ -1358,6 +1463,8 @@ const TOOL_DEFINITIONS = [
 // ══════════════════════════════════════════
 
 async function executeTool(name, args) {
+    const { executeHook, isDangerousCommand } = require('./hooks');
+
     // ── Permission check ──
     const permCheck = checkToolPermission(name);
     if (!permCheck.allowed) {
@@ -1373,11 +1480,66 @@ async function executeTool(name, args) {
         }
     }
 
+    // ── Resolve project dir for hook context ──
+    const hookContext = {
+        toolName: name,
+        toolInput: args,
+        projectDir: args.cwd || args.file_path ? path.dirname(args.file_path || '') : '',
+        sessionId: _currentSessionId || '',
+    };
+
+    // ── PreToolUse hook — can BLOCK any tool ──
+    const preResult = executeHook('PreToolUse', hookContext);
+    if (!preResult.allowed) {
+        logger.warn('hooks', `PreToolUse blocked ${name}: ${preResult.reason}`);
+        return { error: `Hook blocked: ${preResult.reason}`, blocked_by_hook: true };
+    }
+
+    // ── PreEdit hook — can BLOCK file edits ──
+    const editTools = ['edit_file', 'multi_edit', 'create_file'];
+    if (editTools.includes(name) && args.file_path) {
+        const preEditResult = executeHook('PreEdit', { ...hookContext, filePath: args.file_path });
+        if (!preEditResult.allowed) {
+            logger.warn('hooks', `PreEdit blocked ${name} on ${args.file_path}: ${preEditResult.reason}`);
+            return { error: `PreEdit hook blocked: ${preEditResult.reason}`, blocked_by_hook: true };
+        }
+    }
+
+    // ── PreCommand hook — can BLOCK commands ──
+    if (name === 'run_command' && args.command) {
+        const preCommandResult = executeHook('PreCommand', { ...hookContext, command: args.command });
+        if (!preCommandResult.allowed) {
+            logger.warn('hooks', `PreCommand blocked: ${args.command} — ${preCommandResult.reason}`);
+            return { error: `PreCommand hook blocked: ${preCommandResult.reason}`, blocked_by_hook: true };
+        }
+
+        // ── OnDangerousCommand hook — auto-detect dangerous commands ──
+        if (_dangerousProtectionCheck()) {
+            const dangerousMatch = isDangerousCommand(args.command);
+            if (dangerousMatch) {
+                const dangerResult = executeHook('OnDangerousCommand', { ...hookContext, command: args.command });
+                if (!dangerResult.allowed) {
+                    logger.warn('hooks', `Dangerous command blocked: ${args.command}`);
+                    return { error: `Dangerous command blocked by hook: ${dangerResult.reason || args.command}`, blocked_by_hook: true };
+                }
+            }
+        }
+    }
+
+    // ── PreCommit hook — can BLOCK git commits ──
+    if (name === 'git_commit') {
+        const preCommitResult = executeHook('PreCommit', { ...hookContext, commitMsg: args.message || '' });
+        if (!preCommitResult.allowed) {
+            logger.warn('hooks', `PreCommit blocked: ${preCommitResult.reason}`);
+            return { error: `PreCommit hook blocked: ${preCommitResult.reason}`, blocked_by_hook: true };
+        }
+    }
+
     // ── Track session stats ──
     updateSessionStats(name);
 
     try {
-        switch (name) {
+        const toolResult = await (async () => { switch (name) {
             case 'read_file': {
                 const { file_path, start_line, end_line } = args;
                 if (!fs.existsSync(file_path)) {
@@ -1410,6 +1572,26 @@ async function executeTool(name, args) {
                 if (!fs.existsSync(file_path)) {
                     return { error: `File not found: ${file_path}` };
                 }
+
+                // Auto-backup before edit
+                const backupDir = path.join(os.homedir(), '.onicode', 'auto-backups');
+                if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+                const backupName = path.basename(file_path) + '.' + Date.now() + '.bak';
+                try {
+                    if (fs.existsSync(file_path)) {
+                        fs.copyFileSync(file_path, path.join(backupDir, backupName));
+                    }
+                } catch (e) {
+                    logger.warn('backup', `Auto-backup failed for ${file_path}: ${e.message}`);
+                }
+                // Cleanup old backups (keep last 100)
+                try {
+                    const backups = fs.readdirSync(backupDir).filter(f => f.endsWith('.bak')).sort();
+                    while (backups.length > 100) {
+                        fs.unlinkSync(path.join(backupDir, backups.shift()));
+                    }
+                } catch {}
+
                 const content = fs.readFileSync(file_path, 'utf-8');
                 const occurrences = content.split(old_string).length - 1;
                 if (occurrences === 0) {
@@ -1515,35 +1697,59 @@ async function executeTool(name, args) {
             }
 
             case 'search_files': {
-                const { query, search_path, file_pattern, case_sensitive = false, max_results = 50 } = args;
+                const { query, search_path, file_pattern, case_sensitive = false, max_results = 20 } = args;
                 if (!fs.existsSync(search_path)) {
                     return { error: `Path not found: ${search_path}` };
                 }
 
                 // Prefer ripgrep (rg) if available, falls back to grep. Both respect .gitignore.
+                // Fetch extra results to detect overflow, add -C 1 for context lines
                 let cmd;
+                let useRg = false;
                 try {
                     execSync('which rg', { encoding: 'utf-8', timeout: 2000 });
-                    // Use ripgrep — respects .gitignore by default
-                    cmd = `rg ${case_sensitive ? '' : '-i'} -n --max-count ${max_results} `;
+                    useRg = true;
+                    // Use ripgrep — respects .gitignore by default, -C 1 for 1 line context
+                    cmd = `rg ${case_sensitive ? '' : '-i'} -n -C 1 --max-count ${max_results + 1} `;
                     if (file_pattern) cmd += `-g ${JSON.stringify(file_pattern)} `;
                     cmd += `${JSON.stringify(query)} ${JSON.stringify(search_path)}`;
                 } catch {
-                    // Fallback to grep
-                    cmd = `grep -r${case_sensitive ? '' : 'i'}n --include="${file_pattern || '*'}" `;
+                    // Fallback to grep with -C 1 for context
+                    cmd = `grep -r${case_sensitive ? '' : 'i'}n -C 1 --include="${file_pattern || '*'}" `;
                     cmd += `--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=.next --exclude-dir=build --exclude-dir=coverage `;
-                    cmd += `-m ${max_results} `;
+                    cmd += `-m ${max_results + 1} `;
                     cmd += `${JSON.stringify(query)} ${JSON.stringify(search_path)}`;
                 }
 
                 try {
                     const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, maxBuffer: 1024 * 1024 });
-                    const matches = output.trim().split('\n').filter(Boolean).slice(0, max_results).map(line => {
-                        const match = line.match(/^(.+?):(\d+):(.*)$/);
-                        if (match) return { file: match[1], line: parseInt(match[2]), content: match[3].trim() };
-                        return { raw: line };
+                    // With -C 1, results are separated by -- lines; parse match groups
+                    const rawLines = output.trim().split('\n').filter(Boolean);
+                    const allMatches = [];
+                    for (const line of rawLines) {
+                        if (line === '--') continue; // context separator
+                        const match = line.match(/^(.+?)[:\-](\d+)[:\-](.*)$/);
+                        if (match) {
+                            allMatches.push({ file: match[1], line: parseInt(match[2]), content: match[3].trim() });
+                        }
+                    }
+
+                    // Deduplicate by file:line (context lines may overlap)
+                    const seen = new Set();
+                    const uniqueMatches = allMatches.filter(m => {
+                        const key = `${m.file}:${m.line}`;
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
                     });
-                    return { query, matches, total: matches.length };
+
+                    const limited = uniqueMatches.slice(0, max_results);
+                    const overflow = uniqueMatches.length > max_results ? uniqueMatches.length - max_results : 0;
+                    const result = { query, matches: limited, total: limited.length };
+                    if (overflow > 0) {
+                        result.overflow = `... and ${overflow} more matches (use more specific query to narrow)`;
+                    }
+                    return result;
                 } catch (err) {
                     if (err.status === 1) return { query, matches: [], total: 0, message: 'No matches found' };
                     return { error: err.message?.slice(0, 200) };
@@ -1979,6 +2185,26 @@ async function executeTool(name, args) {
                 if (!fs.existsSync(file_path)) {
                     return { error: `File not found: ${file_path}` };
                 }
+
+                // Auto-backup before edit
+                const meBackupDir = path.join(os.homedir(), '.onicode', 'auto-backups');
+                if (!fs.existsSync(meBackupDir)) fs.mkdirSync(meBackupDir, { recursive: true });
+                const meBackupName = path.basename(file_path) + '.' + Date.now() + '.bak';
+                try {
+                    if (fs.existsSync(file_path)) {
+                        fs.copyFileSync(file_path, path.join(meBackupDir, meBackupName));
+                    }
+                } catch (e) {
+                    logger.warn('backup', `Auto-backup failed for ${file_path}: ${e.message}`);
+                }
+                // Cleanup old backups (keep last 100)
+                try {
+                    const meBackups = fs.readdirSync(meBackupDir).filter(f => f.endsWith('.bak')).sort();
+                    while (meBackups.length > 100) {
+                        fs.unlinkSync(path.join(meBackupDir, meBackups.shift()));
+                    }
+                } catch {}
+
                 let content = fs.readFileSync(file_path, 'utf-8');
                 const results = [];
 
@@ -2145,22 +2371,36 @@ async function executeTool(name, args) {
                 };
             }
 
+            case 'memory_read': {
+                const { readMemory, listMemories, loadCoreMemories } = require('./memory');
+                if (args.filename) {
+                    const content = readMemory(args.filename);
+                    if (content === null) return { success: false, error: `Memory file "${args.filename}" not found.` };
+                    return { success: true, filename: args.filename, content, size: content.length };
+                }
+                // No filename = list all + load core summary
+                const files = listMemories();
+                const core = loadCoreMemories();
+                return {
+                    success: true,
+                    files: files.map(f => ({ name: f.name, size: f.size, modified: f.modified })),
+                    coreLoaded: { hasSoul: core.hasSoul, hasUser: core.hasUserProfile, hasLongTerm: !!core.longTerm },
+                };
+            }
+
             case 'memory_write': {
-                const { filename, content } = args;
-                const MEMORIES_DIR = path.join(os.homedir(), '.onicode', 'memories');
-                if (!fs.existsSync(MEMORIES_DIR)) fs.mkdirSync(MEMORIES_DIR, { recursive: true });
-                const filePath = path.join(MEMORIES_DIR, filename);
-                fs.writeFileSync(filePath, content, 'utf-8');
-                return { success: true, filename, size: content.length, message: `Memory "${filename}" saved.` };
+                const { writeMemory: memWrite } = require('./memory');
+                memWrite(args.filename, args.content);
+                // Notify renderer that memory changed
+                sendToRenderer('memory-changed', { filename: args.filename, action: 'write' });
+                return { success: true, filename: args.filename, size: args.content.length, message: `Memory "${args.filename}" saved.` };
             }
 
             case 'memory_append': {
-                const { filename, content } = args;
-                const MEMORIES_DIR2 = path.join(os.homedir(), '.onicode', 'memories');
-                if (!fs.existsSync(MEMORIES_DIR2)) fs.mkdirSync(MEMORIES_DIR2, { recursive: true });
-                const filePath2 = path.join(MEMORIES_DIR2, filename);
-                fs.appendFileSync(filePath2, '\n' + content, 'utf-8');
-                return { success: true, filename, appended: content.length, message: `Appended to memory "${filename}".` };
+                const { appendMemory: memAppend } = require('./memory');
+                memAppend(args.filename, args.content);
+                sendToRenderer('memory-changed', { filename: args.filename, action: 'append' });
+                return { success: true, filename: args.filename, appended: args.content.length, message: `Appended to memory "${args.filename}".` };
             }
 
             // ── Browser / Puppeteer Executors ──
@@ -2241,6 +2481,14 @@ async function executeTool(name, args) {
                 if (args.content) updates.content = args.content;
                 const task = taskManager.updateTask(args.id, updates);
                 if (task.error) return task;
+
+                // OnTaskComplete hook — fire when a task is marked done
+                if (args.status === 'done' && task.content) {
+                    try {
+                        executeHook('OnTaskComplete', { ...hookContext, taskContent: task.content });
+                    } catch { /* non-fatal */ }
+                }
+
                 return { success: true, task, summary: taskManager.getSummary() };
             }
 
@@ -2482,7 +2730,7 @@ async function executeTool(name, args) {
             // ── Project Indexer ──
 
             case 'index_project': {
-                const { project_path, file_types, max_files = 100 } = args;
+                const { project_path, file_types, max_files = 200 } = args;
                 const expandedPath = project_path.replace(/^~/, os.homedir());
                 if (!fs.existsSync(expandedPath)) {
                     return { error: `Project path not found: ${project_path}` };
@@ -2517,19 +2765,29 @@ async function executeTool(name, args) {
                                 // Extract key info based on file type
                                 const info = { path: relPath, lines: lines.length, size: stat.size };
 
-                                // Extract exports
+                                // Extract exports, imports, and functions/methods
                                 const exports = [];
                                 const imports = [];
-                                for (const line of lines.slice(0, 100)) {
+                                const functions = [];
+                                for (const line of lines.slice(0, 200)) {
                                     const exportMatch = line.match(/export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum)\s+(\w+)/);
                                     if (exportMatch) exports.push(exportMatch[1]);
                                     const importMatch = line.match(/(?:import|from)\s+['"](.+?)['"]/);
                                     if (importMatch) imports.push(importMatch[1]);
                                     const pyDef = line.match(/^(?:def|class)\s+(\w+)/);
                                     if (pyDef) exports.push(pyDef[1]);
+                                    // Detect function/method declarations
+                                    const funcMatch = line.match(/(?:async\s+)?function\s+(\w+)|(\w+)\s*(?:=\s*)?(?:\(|=>)/);
+                                    if (funcMatch) {
+                                        const fname = funcMatch[1] || funcMatch[2];
+                                        if (fname && !['if', 'else', 'for', 'while', 'switch', 'catch', 'return', 'require', 'import', 'export', 'const', 'let', 'var'].includes(fname)) {
+                                            functions.push(fname);
+                                        }
+                                    }
                                 }
                                 if (exports.length > 0) info.exports = exports.slice(0, 10);
                                 if (imports.length > 0) info.imports = imports.slice(0, 10);
+                                if (functions.length > 0) info.functions = [...new Set(functions)].slice(0, 15);
 
                                 // Extract component/function signatures for entry files
                                 if (['tsx', 'jsx'].includes(ext)) {
@@ -2662,11 +2920,171 @@ async function executeTool(name, args) {
                 }
             }
 
+            case 'git_diff': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const staged = args.staged || false;
+                const filePath = args.file_path || null;
+                try {
+                    let cmd = staged ? 'git diff --cached' : 'git diff';
+                    if (filePath) cmd += ` -- ${JSON.stringify(filePath)}`;
+                    const diff = execSync(cmd, { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    const result = { diff: diff || '(no changes)', staged };
+                    if (filePath) result.file_path = filePath;
+                    return result;
+                } catch (err) {
+                    return { error: `Git diff failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_log': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const count = Math.min(Math.max(args.count || 20, 1), 50);
+                try {
+                    const log = execSync(`git log --oneline --format="%h %s (%an, %cr)" -${count}`, { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    return { log: log || '(no commits)', count };
+                } catch (err) {
+                    return { error: `Git log failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_branches': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                try {
+                    const currentBranch = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    const output = execSync('git branch -a --format="%(refname:short) %(objectname:short) %(upstream:short)"', { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    const local = [];
+                    const remote = [];
+                    output.split('\n').filter(Boolean).forEach(line => {
+                        const name = line.split(' ')[0];
+                        if (name.startsWith('origin/') || name.startsWith('remotes/')) {
+                            remote.push(name);
+                        } else {
+                            local.push(name);
+                        }
+                    });
+                    return { current: currentBranch, local, remote };
+                } catch (err) {
+                    return { error: `Git branches failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_checkout': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const branch = args.branch;
+                const create = args.create || false;
+                if (!branch) return { error: 'Branch name is required' };
+                try {
+                    const cmd = create ? `git checkout -b ${JSON.stringify(branch)}` : `git checkout ${JSON.stringify(branch)}`;
+                    execSync(cmd, { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
+                    logger.info('git', `Checked out branch: ${branch}${create ? ' (created)' : ''}`);
+                    return { success: true, branch, created: create };
+                } catch (err) {
+                    return { error: `Git checkout failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_stash': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const action = args.action;
+                const message = args.message || '';
+                try {
+                    let cmd;
+                    if (action === 'push') {
+                        cmd = message ? `git stash push -m ${JSON.stringify(message)}` : 'git stash push';
+                    } else if (action === 'pop') {
+                        cmd = 'git stash pop';
+                    } else if (action === 'list') {
+                        cmd = 'git stash list';
+                    } else if (action === 'drop') {
+                        cmd = 'git stash drop';
+                    } else {
+                        return { error: `Unknown stash action: ${action}. Use push, pop, list, or drop.` };
+                    }
+                    const output = execSync(cmd, { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    logger.info('git', `Stash ${action}: ${output.slice(0, 100)}`);
+                    return { success: true, action, output: output || `(stash ${action} completed)` };
+                } catch (err) {
+                    return { error: `Git stash ${action} failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_pull': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                try {
+                    const output = execSync('git pull', { cwd, encoding: 'utf-8', timeout: 15000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    logger.info('git', `Pull: ${output.slice(0, 100)}`);
+                    return { success: true, output: output || 'Already up to date.' };
+                } catch (err) {
+                    return { error: `Git pull failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
             default:
                 return { error: `Unknown tool: ${name}` };
+        } })();
+
+        // ── Post-tool hooks (only on success) ──
+        if (toolResult && !toolResult.error) {
+            try {
+                // PostToolUse — runs after any successful tool call
+                executeHook('PostToolUse', { ...hookContext, toolOutput: toolResult });
+
+                // PostEdit — runs after file edits
+                const editToolNames = ['edit_file', 'multi_edit', 'create_file'];
+                if (editToolNames.includes(name) && args.file_path) {
+                    executeHook('PostEdit', { ...hookContext, filePath: args.file_path, toolOutput: toolResult });
+                }
+
+                // PostCommand — runs after shell commands
+                if (name === 'run_command') {
+                    executeHook('PostCommand', {
+                        ...hookContext,
+                        command: args.command,
+                        exitCode: toolResult.code || toolResult.exit_code || 0,
+                        toolOutput: toolResult,
+                    });
+
+                    // OnTestFailure — detect test commands with non-zero exit
+                    const cmd = (args.command || '').toLowerCase();
+                    const exitCode = toolResult.code || toolResult.exit_code || 0;
+                    if (exitCode !== 0 && (cmd.includes('test') || cmd.includes('jest') || cmd.includes('vitest') ||
+                        cmd.includes('pytest') || cmd.includes('mocha') || cmd.includes('cargo test'))) {
+                        executeHook('OnTestFailure', {
+                            ...hookContext,
+                            command: args.command,
+                            exitCode,
+                            error: toolResult.stderr || `Test exited with code ${exitCode}`,
+                        });
+                    }
+                }
+
+                // PostCommit — runs after git commit
+                if (name === 'git_commit') {
+                    executeHook('PostCommit', { ...hookContext, commitMsg: args.message || '' });
+                }
+            } catch { /* post-hooks are non-fatal */ }
         }
+
+        return toolResult;
     } catch (err) {
         logger.error('tool-exec', `${name} failed: ${err.message}`);
+
+        // ── ToolError hook ──
+        try {
+            executeHook('ToolError', { ...hookContext, error: err.message });
+        } catch { /* hook errors are non-fatal */ }
+
+        // ── OnTestFailure hook — detect test commands that failed ──
+        if (name === 'run_command' && args.command) {
+            const cmd = args.command.toLowerCase();
+            if (cmd.includes('test') || cmd.includes('jest') || cmd.includes('vitest') ||
+                cmd.includes('pytest') || cmd.includes('mocha') || cmd.includes('cargo test')) {
+                try {
+                    executeHook('OnTestFailure', { ...hookContext, command: args.command, error: err.message });
+                } catch { /* non-fatal */ }
+            }
+        }
+
         return { error: `Tool execution error: ${err.message}` };
     }
 }
@@ -2691,6 +3109,8 @@ module.exports = {
     // New exports for enhanced agentic loop
     setPermissions,
     setAgentModeRef,
+    setDangerousProtectionCheck,
+    setAutoCommitCheck,
     setAICallFunction,
     setLastProviderConfig,
     startSession,

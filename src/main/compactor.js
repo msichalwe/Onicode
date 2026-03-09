@@ -377,6 +377,14 @@ function compactMessages(messages, keepLast = DEFAULT_KEEP_LAST) {
     const newMessages = [summaryMessage, ...cleanKept];
     const newTokens = estimateTokens(newMessages);
 
+    // Bridge to memory system — persist compaction summary to daily log
+    try {
+        const { saveCompactionToMemory } = require('./memory');
+        saveCompactionToMemory(summaryText, splitIndex);
+    } catch {
+        // Memory module not available — proceed without persisting
+    }
+
     return {
         messages: newMessages,
         compacted: true,

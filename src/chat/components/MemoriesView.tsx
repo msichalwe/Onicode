@@ -100,6 +100,15 @@ export default function MemoriesView() {
 
     useEffect(() => { loadMemFiles(); }, [loadMemFiles]);
 
+    // Listen for memory change notifications (from AI tools, compaction, etc.)
+    useEffect(() => {
+        if (!window.onicode?.onMemoryChanged) return;
+        const unsub = window.onicode.onMemoryChanged(() => {
+            loadMemFiles();
+        });
+        return unsub;
+    }, [loadMemFiles]);
+
     const openFile = useCallback(async (name: string) => {
         if (!isElectron) return;
         const result = await window.onicode!.memoryRead(name);
@@ -180,8 +189,9 @@ export default function MemoriesView() {
 
     const runningAgents = agents.filter(a => a.status === 'running');
     const runningTerminals = terminals.filter(t => t.status === 'running');
-    const coreFiles = memFiles.filter(f => CORE_FILES.includes(f.name));
-    const dailyFiles = memFiles.filter(f => !CORE_FILES.includes(f.name));
+    const coreFiles = memFiles.filter(f => CORE_FILES.includes(f.name) && (f as MemoryFile & { scope?: string }).scope !== 'project');
+    const projectFiles = memFiles.filter(f => (f as MemoryFile & { scope?: string }).scope === 'project');
+    const dailyFiles = memFiles.filter(f => !CORE_FILES.includes(f.name) && (f as MemoryFile & { scope?: string }).scope !== 'project');
 
     // Auto-refresh memory files periodically
     useEffect(() => {
@@ -319,6 +329,29 @@ export default function MemoriesView() {
                                     );
                                 })}
                             </div>
+                            {projectFiles.length > 0 && (
+                                <div className="memories-section">
+                                    <div className="memories-section-title">Project Memories</div>
+                                    {projectFiles.map(file => (
+                                        <div key={file.name} className="memory-card" onClick={() => openFile(file.name)}>
+                                            <div className="memory-card-info">
+                                                <div className="memory-card-name">{file.name.replace('.md', '')}</div>
+                                                <div className="memory-card-meta">{formatSize(file.size)} · {formatDate(file.modified)}</div>
+                                            </div>
+                                            <button
+                                                className="memory-card-delete"
+                                                onClick={(e) => { e.stopPropagation(); deleteFile(file.name); }}
+                                                title="Delete"
+                                            >
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                    <polyline points="3 6 5 6 21 6" />
+                                                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                             {dailyFiles.length > 0 && (
                                 <div className="memories-section">
                                     <div className="memories-section-title">Daily Logs</div>

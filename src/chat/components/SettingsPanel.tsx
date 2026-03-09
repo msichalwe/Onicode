@@ -28,9 +28,10 @@ const THEMES: { id: ThemeName; name: string; previewClass: string; type: 'light'
 //  Tab Definitions
 // ══════════════════════════════════════════
 
-type SettingsTab = 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'connectors' | 'data';
+type SettingsTab = 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'connectors' | 'data';
 
 const TABS: { id: SettingsTab; label: string }[] = [
+    { id: 'general', label: 'General' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'providers', label: 'Providers' },
     { id: 'skills', label: 'Skills' },
@@ -72,6 +73,9 @@ export default function SettingsPanel() {
     const [newHookCmd, setNewHookCmd] = useState('');
     const [newHookMatcher, setNewHookMatcher] = useState('');
     const [panelMode, setPanelMode] = useState(() => localStorage.getItem('onicode-panel-mode') || 'always');
+    const [permissionMode, setPermissionMode] = useState(() => localStorage.getItem('onicode-permission-mode') || 'auto-allow');
+    const [autoCommit, setAutoCommit] = useState(() => localStorage.getItem('onicode-auto-commit') !== 'false');
+    const [dangerousCommandProtection, setDangerousCommandProtection] = useState(() => localStorage.getItem('onicode-dangerous-cmd-protection') !== 'false');
 
     const loadConnectors = useCallback(async () => {
         if (!isElectron) return;
@@ -212,6 +216,79 @@ export default function SettingsPanel() {
             </div>
 
             {/* ── Appearance Tab ── */}
+            {activeTab === 'general' && (
+                <div className="settings-tab-content">
+                    <div className="settings-section">
+                        <h3>Permissions</h3>
+                        <p className="settings-section-desc">Control how much autonomy the AI has when working on your projects.</p>
+
+                        <div className="setting-row">
+                            <div className="setting-label">
+                                <span className="setting-name">Permission Mode</span>
+                                <span className="setting-desc">How the AI handles tool permissions. Since Oni works within project scope, auto-allow is recommended.</span>
+                            </div>
+                            <div className="setting-toggle-group">
+                                <button className={`setting-toggle-btn ${permissionMode === 'auto-allow' ? 'active' : ''}`} onClick={() => {
+                                    setPermissionMode('auto-allow');
+                                    localStorage.setItem('onicode-permission-mode', 'auto-allow');
+                                    if (isElectron) window.onicode!.agentSetMode('build');
+                                }}>Auto Allow</button>
+                                <button className={`setting-toggle-btn ${permissionMode === 'ask-destructive' ? 'active' : ''}`} onClick={() => {
+                                    setPermissionMode('ask-destructive');
+                                    localStorage.setItem('onicode-permission-mode', 'ask-destructive');
+                                    if (isElectron) window.onicode!.agentSetMode('ask-destructive');
+                                }}>Ask for Destructive</button>
+                                <button className={`setting-toggle-btn ${permissionMode === 'plan-only' ? 'active' : ''}`} onClick={() => {
+                                    setPermissionMode('plan-only');
+                                    localStorage.setItem('onicode-permission-mode', 'plan-only');
+                                    if (isElectron) window.onicode!.agentSetMode('plan');
+                                }}>Plan Only</button>
+                            </div>
+                        </div>
+
+                        <div className="permission-mode-info">
+                            {permissionMode === 'auto-allow' && <span>The AI can read, write, delete files, run commands, and commit — no interruptions. Best for productive coding sessions.</span>}
+                            {permissionMode === 'ask-destructive' && <span>The AI will ask before deleting files, restoring snapshots, or running destructive commands. Everything else is auto-allowed.</span>}
+                            {permissionMode === 'plan-only' && <span>The AI can only read files and search. No writes, no commands, no commits. Use this for code review or planning.</span>}
+                        </div>
+                    </div>
+
+                    <div className="settings-section">
+                        <h3>Safety</h3>
+
+                        <div className="setting-row">
+                            <div className="setting-label">
+                                <span className="setting-name">Dangerous Command Protection</span>
+                                <span className="setting-desc">Auto-detect and block destructive commands like rm -rf, git reset --hard, DROP TABLE</span>
+                            </div>
+                            <label className="setting-switch">
+                                <input type="checkbox" checked={dangerousCommandProtection} onChange={(e) => {
+                                    setDangerousCommandProtection(e.target.checked);
+                                    localStorage.setItem('onicode-dangerous-cmd-protection', String(e.target.checked));
+                                    if (isElectron) window.onicode!.setSetting('dangerous-cmd-protection', e.target.checked);
+                                }} />
+                                <span className="setting-switch-slider" />
+                            </label>
+                        </div>
+
+                        <div className="setting-row">
+                            <div className="setting-label">
+                                <span className="setting-name">Auto-Commit</span>
+                                <span className="setting-desc">AI automatically commits at milestones, after builds, and at session end</span>
+                            </div>
+                            <label className="setting-switch">
+                                <input type="checkbox" checked={autoCommit} onChange={(e) => {
+                                    setAutoCommit(e.target.checked);
+                                    localStorage.setItem('onicode-auto-commit', String(e.target.checked));
+                                    if (isElectron) window.onicode!.setSetting('auto-commit', e.target.checked);
+                                }} />
+                                <span className="setting-switch-slider" />
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {activeTab === 'appearance' && (
                 <div className="settings-tab-content">
                     <div className="settings-section">
@@ -419,43 +496,160 @@ export default function SettingsPanel() {
 
             {/* ── Advanced Tab ── */}
             {/* ── Hooks Tab ── */}
-            {activeTab === 'hooks' && (
+            {activeTab === 'hooks' && (() => {
+                const HOOK_CATEGORIES: Record<string, { label: string; types: Array<{ type: string; desc: string; blocking: boolean }> }> = {
+                    tool: { label: 'Tool Lifecycle', types: [
+                        { type: 'PreToolUse', desc: 'Before any AI tool call. Exit non-zero to BLOCK.', blocking: true },
+                        { type: 'PostToolUse', desc: 'After any AI tool call completes.', blocking: false },
+                        { type: 'ToolError', desc: 'When a tool call fails or errors.', blocking: false },
+                    ]},
+                    file: { label: 'File Operations', types: [
+                        { type: 'PreEdit', desc: 'Before editing a file. Exit non-zero to BLOCK.', blocking: true },
+                        { type: 'PostEdit', desc: 'After a file is edited. Run linters, tests, formatters.', blocking: false },
+                    ]},
+                    command: { label: 'Commands', types: [
+                        { type: 'PreCommand', desc: 'Before running a shell command. Exit non-zero to BLOCK.', blocking: true },
+                        { type: 'PostCommand', desc: 'After a command completes.', blocking: false },
+                        { type: 'OnDangerousCommand', desc: 'Auto-detected destructive commands (rm -rf, git reset --hard). Exit non-zero to BLOCK.', blocking: true },
+                    ]},
+                    git: { label: 'Git / Version Control', types: [
+                        { type: 'PreCommit', desc: 'Before git commit. Run lint + typecheck + format. Exit non-zero to BLOCK.', blocking: true },
+                        { type: 'PostCommit', desc: 'After git commit succeeds.', blocking: false },
+                    ]},
+                    testing: { label: 'Testing', types: [
+                        { type: 'OnTestFailure', desc: 'When a test command exits with non-zero code.', blocking: false },
+                    ]},
+                    task: { label: 'Tasks & Sessions', types: [
+                        { type: 'OnTaskComplete', desc: 'When the AI marks a task as done.', blocking: false },
+                        { type: 'SessionStart', desc: 'When a new AI session begins.', blocking: false },
+                        { type: 'AIResponse', desc: 'After the AI finishes a full response.', blocking: false },
+                        { type: 'Stop', desc: 'When the AI stops (max rounds reached).', blocking: false },
+                    ]},
+                    other: { label: 'Other', types: [
+                        { type: 'UserPromptSubmit', desc: 'When user submits a message. Exit non-zero to BLOCK.', blocking: true },
+                        { type: 'PreCompact', desc: 'Before context compaction.', blocking: false },
+                        { type: 'SubagentStop', desc: 'When a sub-agent completes.', blocking: false },
+                        { type: 'Notification', desc: 'When a notification event fires.', blocking: false },
+                    ]},
+                };
+
+                const totalHooks = Object.values(hooks).reduce((sum, arr) => sum + arr.length, 0);
+
+                return (
                 <div className="settings-tab-content">
                     <div className="settings-section">
-                        <h3>Lifecycle Hooks</h3>
-                        <p className="settings-section-desc">Shell commands that execute at lifecycle events. PreToolUse hooks can block dangerous operations.</p>
+                        <h3>Lifecycle Hooks <span className="hook-total-badge">{totalHooks} registered</span></h3>
+                        <p className="settings-section-desc">Shell commands that execute at lifecycle events. Blocking hooks (marked with a shield) can prevent operations when they exit non-zero.</p>
 
-                        {Object.entries(hooks).map(([type, hookList]) => (
-                            hookList.map((hook, idx) => (
-                                <div key={`${type}-${idx}`} className="hook-item">
-                                    <div className="hook-item-header">
-                                        <span className="hook-type-badge">{type}</span>
-                                        {hook.matcher && <span className="hook-matcher">/{hook.matcher}/</span>}
-                                    </div>
-                                    <code className="hook-command">{hook.command}</code>
-                                    <button className="hook-remove" onClick={() => removeHook(type, idx)} title="Remove">
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                                        </svg>
-                                    </button>
+                        {/* Registered hooks grouped by category */}
+                        {Object.entries(HOOK_CATEGORIES).map(([catId, cat]) => {
+                            const catHooks = cat.types.filter(t => hooks[t.type]?.length > 0);
+                            if (catHooks.length === 0) return null;
+                            return (
+                                <div key={catId} className="hook-category">
+                                    <div className="hook-category-header">{cat.label}</div>
+                                    {catHooks.map(hookType => (
+                                        hooks[hookType.type]?.map((hook, idx) => (
+                                            <div key={`${hookType.type}-${idx}`} className="hook-item">
+                                                <div className="hook-item-header">
+                                                    <span className={`hook-type-badge ${hookType.blocking ? 'hook-blocking' : ''}`}>
+                                                        {hookType.blocking && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{marginRight: 3, verticalAlign: -1}}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>}
+                                                        {hookType.type}
+                                                    </span>
+                                                    {hook.matcher && <span className="hook-matcher">/{hook.matcher}/</span>}
+                                                </div>
+                                                <code className="hook-command">{hook.command}</code>
+                                                <button className="hook-remove" onClick={() => removeHook(hookType.type, idx)} title="Remove">
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                        ))
+                                    ))}
                                 </div>
-                            ))
-                        ))}
+                            );
+                        })}
 
+                        {totalHooks === 0 && (
+                            <div className="hook-empty">
+                                <p>No hooks configured yet</p>
+                                <span>Add hooks below to automate linting, testing, formatting, and safety checks during AI tool execution.</span>
+                            </div>
+                        )}
+
+                        {/* Add hook form */}
                         <div className="hook-add-form">
-                            <select className="hook-type-select" value={newHookType} onChange={e => setNewHookType(e.target.value)}>
-                                {['PreToolUse','PostToolUse','Stop','SubagentStop','UserPromptSubmit','Notification','PreCompact','SessionStart','ToolError','AIResponse'].map(t => (
-                                    <option key={t} value={t}>{t}</option>
-                                ))}
-                            </select>
-                            <input className="hook-input" placeholder="Matcher regex (optional)" value={newHookMatcher} onChange={e => setNewHookMatcher(e.target.value)} />
-                            <input className="hook-input hook-input-cmd" placeholder="Shell command" value={newHookCmd} onChange={e => setNewHookCmd(e.target.value)} onKeyDown={e => e.key === 'Enter' && addHook()} />
-                            <button className="hook-add-btn" onClick={addHook} disabled={!newHookCmd.trim()}>Add</button>
+                            <div className="hook-add-form-row">
+                                <select className="hook-type-select" value={newHookType} onChange={e => setNewHookType(e.target.value)}>
+                                    {Object.entries(HOOK_CATEGORIES).map(([catId, cat]) => (
+                                        <optgroup key={catId} label={cat.label}>
+                                            {cat.types.map(t => (
+                                                <option key={t.type} value={t.type}>{t.type}{t.blocking ? ' (blocking)' : ''}</option>
+                                            ))}
+                                        </optgroup>
+                                    ))}
+                                </select>
+                                <input className="hook-input" placeholder="Matcher regex (optional)" value={newHookMatcher} onChange={e => setNewHookMatcher(e.target.value)} />
+                            </div>
+                            <div className="hook-add-form-row">
+                                <input className="hook-input hook-input-cmd" placeholder="Shell command (e.g. npm run lint, npx tsc --noEmit)" value={newHookCmd} onChange={e => setNewHookCmd(e.target.value)} onKeyDown={e => e.key === 'Enter' && addHook()} />
+                                <button className="hook-add-btn" onClick={addHook} disabled={!newHookCmd.trim()}>Add Hook</button>
+                            </div>
                         </div>
 
+                        {/* Hook type reference */}
+                        <details className="hook-reference">
+                            <summary className="hook-reference-title">All Hook Types Reference</summary>
+                            <div className="hook-reference-content">
+                                {Object.entries(HOOK_CATEGORIES).map(([catId, cat]) => (
+                                    <div key={catId} className="hook-ref-category">
+                                        <div className="hook-ref-category-label">{cat.label}</div>
+                                        {cat.types.map(t => (
+                                            <div key={t.type} className="hook-ref-item">
+                                                <span className={`hook-ref-type ${t.blocking ? 'hook-blocking' : ''}`}>{t.type}</span>
+                                                <span className="hook-ref-desc">{t.desc}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+
+                        {/* Example hooks */}
+                        <details className="hook-reference">
+                            <summary className="hook-reference-title">Example Hooks</summary>
+                            <div className="hook-reference-content hook-examples">
+                                <div className="hook-example">
+                                    <strong>PreCommit</strong> — Lint + typecheck before every commit
+                                    <code>npm run lint && npx tsc --noEmit</code>
+                                </div>
+                                <div className="hook-example">
+                                    <strong>PostEdit</strong> (matcher: <code>\.tsx?$</code>) — TypeScript check after editing .ts/.tsx
+                                    <code>npx tsc --noEmit 2&gt;&amp;1 | head -20</code>
+                                </div>
+                                <div className="hook-example">
+                                    <strong>PostEdit</strong> (matcher: <code>schema|migration</code>) — Check migrations after schema changes
+                                    <code>npx prisma validate</code>
+                                </div>
+                                <div className="hook-example">
+                                    <strong>OnDangerousCommand</strong> — Block all destructive commands
+                                    <code>echo "Blocked: $ONICODE_COMMAND" &amp;&amp; exit 1</code>
+                                </div>
+                                <div className="hook-example">
+                                    <strong>OnTestFailure</strong> — Log test failures
+                                    <code>echo "FAIL: $ONICODE_COMMAND" &gt;&gt; ~/.onicode/test-failures.log</code>
+                                </div>
+                                <div className="hook-example">
+                                    <strong>PostCommand</strong> (matcher: <code>npm run dev</code>) — Open browser after dev server starts
+                                    <code>open http://localhost:3000</code>
+                                </div>
+                            </div>
+                        </details>
+
                         <div className="hook-env-info">
-                            <span className="hook-env-label">Env vars:</span>
-                            <code>$ONICODE_TOOL_NAME</code> <code>$ONICODE_TOOL_INPUT</code> <code>$ONICODE_TOOL_OUTPUT</code> <code>$ONICODE_PROJECT_DIR</code> <code>$ONICODE_SESSION_ID</code>
+                            <span className="hook-env-label">Available env vars:</span>
+                            <code>$ONICODE_TOOL_NAME</code> <code>$ONICODE_TOOL_INPUT</code> <code>$ONICODE_TOOL_OUTPUT</code> <code>$ONICODE_PROJECT_DIR</code> <code>$ONICODE_SESSION_ID</code> <code>$ONICODE_COMMAND</code> <code>$ONICODE_FILE_PATH</code> <code>$ONICODE_COMMIT_MSG</code> <code>$ONICODE_ERROR</code> <code>$ONICODE_EXIT_CODE</code> <code>$ONICODE_TASK_CONTENT</code>
                         </div>
                     </div>
 
@@ -482,7 +676,7 @@ export default function SettingsPanel() {
                         )}
                     </div>
                 </div>
-            )}
+            )})()}
 
             {/* ── MCP Tab ── */}
             {activeTab === 'mcp' && (

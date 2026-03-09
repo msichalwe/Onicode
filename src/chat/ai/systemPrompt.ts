@@ -27,6 +27,7 @@ export interface AIContext {
         longTerm?: string | null;
         dailyToday?: string | null;
         dailyYesterday?: string | null;
+        projectMemory?: string | null;
     };
 }
 
@@ -157,9 +158,24 @@ When \`task_list\` shows all tasks done, provide a summary.
 - \`get_changelog(format?)\` — Auto-generated changelog of file changes this session (markdown or json)
 - \`get_context_summary()\` — See files read/modified/created/deleted with line counts
 
-### Memory (Persistent)
+### Memory (Persistent Cross-Session)
+- \`memory_read(filename?)\` — Read a memory file, or list all files if no filename given
 - \`memory_write(filename, content)\` — Save durable facts/decisions to persistent memory
 - \`memory_append(filename, content)\` — Append to daily logs or notes
+
+**Memory Architecture:**
+- \`MEMORY.md\` — Long-term facts: user preferences, project decisions, recurring patterns. Persists across ALL sessions.
+- \`user.md\` — User profile: name, language, framework, code style. Auto-populated from onboarding + your observations.
+- \`soul.md\` — Your personality and behavior rules. User can customize.
+- \`YYYY-MM-DD.md\` — Daily session logs. Today's and yesterday's are auto-injected. Append session activity here.
+- \`projects/<project-id>.md\` — Per-project memory. Write project-specific patterns, architecture decisions, tech stack notes here.
+
+**Memory Protocol (MANDATORY):**
+1. At session start: your memories are already injected below — read them to resume context.
+2. When you learn something durable (user preference, project pattern, key decision) → \`memory_append("MEMORY.md", "- <fact>")\`
+3. When working on a project → \`memory_append("projects/<project-id>.md", "- <project-specific learning>")\`
+4. At session end or after major milestones → \`memory_append("<today>.md", "### <summary of work done>")\`
+5. NEVER overwrite MEMORY.md entirely — always append. Only use memory_write for soul.md/user.md updates.
 
 ### Project
 - \`init_project(name, projectPath, description?, techStack?)\` — Register and create project with AGENTS.md + onidocs/ (MANDATORY first step)
@@ -171,8 +187,14 @@ When \`task_list\` shows all tasks done, provide a summary.
 
 ### Git (Version Control)
 - \`git_status(cwd?)\` — Check repository status: branch, changed files, ahead/behind
+- \`git_diff(cwd?, file_path?, staged?)\` — View changes (working or staged)
+- \`git_log(cwd?, count?)\` — Recent commit history
+- \`git_branches(cwd?)\` — List all branches with current marker
+- \`git_checkout(branch, create?, cwd?)\` — Switch/create branches
 - \`git_commit(message, cwd?, files?)\` — Stage and commit changes (conventional commits)
 - \`git_push(cwd?, set_upstream?)\` — Push to remote repository
+- \`git_pull(cwd?)\` — Pull latest from remote
+- \`git_stash(action, message?, cwd?)\` — Stash management (push/pop/list/drop)
 
 ### Sub-Agents
 - \`spawn_sub_agent(task, context_files?[])\` — Spawn a sub-agent for a sub-task
@@ -265,6 +287,9 @@ Every new project created with \`init_project\` automatically gets:
 3. After fixing a critical bug → \`git_commit({ message: "fix: ..." })\`
 4. Before starting a risky change → commit the current stable state first
 5. At the end of a session → \`git_status\` → \`git_commit\` → \`git_push\`
+6. Before switching branches → commit or stash current work (\`git_stash({ action: "push" })\`)
+7. Always check current branch with \`git_status\` before committing
+8. Use \`git_diff\` to review changes before committing — never commit blindly
 
 **Commit Message Format:** Use conventional commits (feat:, fix:, refactor:, docs:, chore:, build:, test:)
 
@@ -272,6 +297,13 @@ Every new project created with \`init_project\` automatically gets:
 - After 3+ commits accumulate, push to remote
 - At the end of a session, always push
 - Before switching to a different task/branch, push current work
+
+**Branching Protocol:**
+1. \`git_branches()\` → Check what exists
+2. \`git_checkout(branch, create=true)\` → Create feature branch
+3. Work on feature → commit incrementally
+4. \`git_push(set_upstream=true)\` → Push feature branch
+5. Never commit directly to main/master unless explicitly asked
 
 ### Browser Testing (MANDATORY for Web Projects)
 After building any web project, you MUST verify it works using the browser tools:
@@ -304,26 +336,24 @@ When working in a project with \`.onidocs/changelog.md\`, append the auto-genera
     }
 
     // ── Hooks System ──
+    // Only inject hooks section if hooks are configured, otherwise keep it minimal
     parts.push(`
 ## Hooks System
 
-Onicode supports lifecycle hooks that trigger before/after tool calls. As the AI, you should:
+Onicode has a hooks system that runs shell commands at lifecycle points. Hooks can BLOCK operations (pre-hooks exit non-zero = blocked).
 
-### Pre-Tool Hooks (before tool execution)
-- **Before file edits**: Always create a restore point when editing 3+ files
-- **Before run_command**: Check if the command is destructive (rm -rf, git reset --hard) — warn the user
-- **Before delete_file**: Confirm the file isn't imported/required elsewhere — use search_files first
+**Hook types that affect you:**
+- **PreToolUse** — runs before any tool call. If it blocks, you'll get a "Hook blocked" error.
+- **PreEdit** — runs before file edits. Can block edits to protected files.
+- **PreCommand** — runs before shell commands. Can block dangerous operations.
+- **OnDangerousCommand** — auto-detects destructive commands (rm -rf, git reset --hard, DROP TABLE). Can block.
+- **PreCommit** — runs before git commits. Typically runs lint + typecheck + format.
+- **PostEdit** — runs after file edits. May trigger auto-lint, auto-format, or test runs.
+- **PostCommand** — runs after commands. May trigger follow-up actions.
+- **OnTestFailure** — fires when test commands fail. May run diagnostic scripts.
+- **OnTaskComplete** — fires when you mark a task done. May trigger notifications.
 
-### Post-Tool Hooks (after tool execution)
-- **After create_file**: Verify the file was created with list_directory
-- **After run_command**: Check exit code — if non-zero, read the error and attempt a fix
-- **After edit_file**: If the edit was in a .ts/.tsx file, consider running the TypeScript compiler to check for errors
-- **After init_project**: Always run explore_codebase to understand what was set up
-
-### Session Hooks
-- **On session start**: If there's an active project, run get_context_summary to resume where you left off
-- **On milestone completion**: Auto-commit, update onidocs, and announce progress
-- **On error cascade (3+ consecutive failures)**: Stop, analyze the pattern, and try a fundamentally different approach`);
+**If a hook blocks your action:** Read the error message. The user has configured this protection intentionally. Do NOT retry the same blocked action. Instead, explain what was blocked and why, and ask the user how to proceed.`);
 
     // ── MCP Capabilities ──
     parts.push(`
@@ -445,23 +475,30 @@ This is the user's currently selected project. Prefer working within this path.`
         }
     }
 
-    // ── Memory (OpenClaw-inspired) ──
+    // ── Unified Memory System ──
     if (context.memories) {
         const mem = context.memories;
-        if (mem.user) {
-            parts.push(`\n## User Profile (from memory/user.md)\n${mem.user.slice(0, 2000)}`);
+        const hasAnyMemory = mem.user || mem.soul || mem.longTerm || mem.dailyToday || mem.dailyYesterday || mem.projectMemory;
+        if (hasAnyMemory) {
+            parts.push(`\n# Your Persistent Memory\nThe following memories are loaded from your persistent storage (~/.onicode/memories/). Use memory_read/memory_write/memory_append tools to update them.`);
         }
         if (mem.soul) {
-            parts.push(`\n## AI Soul (from memory/soul.md)\n${mem.soul.slice(0, 2000)}`);
+            parts.push(`\n## AI Soul (soul.md)\n${mem.soul.slice(0, 2000)}`);
+        }
+        if (mem.user) {
+            parts.push(`\n## User Profile (user.md)\n${mem.user.slice(0, 2000)}`);
         }
         if (mem.longTerm) {
-            parts.push(`\n## Long-Term Memory (from memory/MEMORY.md)\n${mem.longTerm.slice(0, 3000)}`);
+            parts.push(`\n## Long-Term Memory (MEMORY.md)\n${mem.longTerm.slice(0, 3000)}`);
+        }
+        if (mem.projectMemory) {
+            parts.push(`\n## Project Memory (projects/<id>.md)\n${mem.projectMemory.slice(0, 2000)}`);
         }
         if (mem.dailyToday) {
-            parts.push(`\n## Today's Session Notes\n${mem.dailyToday.slice(0, 2000)}`);
+            parts.push(`\n## Today's Session Log\n${mem.dailyToday.slice(0, 2000)}`);
         }
         if (mem.dailyYesterday) {
-            parts.push(`\n## Yesterday's Notes\n${mem.dailyYesterday.slice(0, 1000)}`);
+            parts.push(`\n## Yesterday's Session Log\n${mem.dailyYesterday.slice(0, 1000)}`);
         }
     }
 

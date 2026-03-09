@@ -7,13 +7,13 @@ const { registerTerminalIPC, killAllSessions } = require('./terminal');
 const { registerProjectIPC } = require('./projects');
 const { registerGitIPC } = require('./git');
 const { registerConnectorIPC } = require('./connectors');
-const { registerMemoryIPC } = require('./memory');
+const { registerMemoryIPC, setMainWindow: setMemoryWindow } = require('./memory');
 const { logger, registerLoggerIPC } = require('./logger');
 const { registerBrowserIPC } = require('./browser');
-const { registerHooksIPC, executeHook, getHooksSummary } = require('./hooks');
+const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses } = require('./aiTools');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses } = require('./aiTools');
 const { conversationStorage, closeDB } = require('./storage');
 
 let mainWindow = null;
@@ -63,8 +63,13 @@ function createWindow() {
     mainWindow.once('ready-to-show', () => mainWindow.show());
     mainWindow.on('closed', () => { mainWindow = null; });
 
-    // Give aiTools access to mainWindow for IPC events
+    // Give modules access to mainWindow for IPC events
     setAIToolsWindow(mainWindow);
+    setMemoryWindow(mainWindow);
+    setHooksWindow(mainWindow);
+
+    // Load global hooks on startup
+    loadHooks();
 }
 
 // ══════════════════════════════════════════
@@ -403,10 +408,15 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
         if (pathMatch) projectPath = pathMatch[1];
     }
 
+    // Reload hooks for current project (ensures project-level hooks are fresh)
+    if (projectPath) loadHooks(projectPath);
+
     // Auto-generate session title from first user message (fire-and-forget)
     const userMsgs = messages.filter(m => m.role === 'user');
     if (userMsgs.length === 1) {
         generateSessionTitle(userMsgs[0].content, providerConfig).catch(() => { });
+        // SessionStart hook — first message = new session
+        try { executeHook('SessionStart', { projectDir: projectPath || '' }); } catch { }
     }
 
     // Route based on token type
@@ -1284,7 +1294,8 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             currentAIRequest = null;
             sendCompletionSummary(toolsUsed);
             mainWindow?.webContents.send('ai-stream-done', null);
-            // Auto-extract memories from this conversation (background, non-blocking)
+            // Post-response hooks and memory extraction (background, non-blocking)
+            try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
             try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
             return { success: true };
         }
@@ -1349,6 +1360,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
     sendCompletionSummary(toolsUsed);
     mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum tool-calling rounds. Stopping.]*');
     mainWindow?.webContents.send('ai-stream-done', null);
+    try { executeHook('Stop', { projectDir: projectPath || '' }); } catch {}
     try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
     currentAIRequest = null;
     return { success: true };
@@ -1520,15 +1532,15 @@ async function generateSessionTitle(userMessage, providerConfig) {
 function extractAndSaveMemory(messages, providerConfig) {
     if (!providerConfig?.apiKey || messages.length < 4) return; // Need enough context
     try {
-        const { appendMemory, readMemory } = require('./memory');
-        const today = new Date().toISOString().slice(0, 10);
+        const { appendMemory, readMemory, appendProjectMemory, todayString } = require('./memory');
+        const today = todayString();
 
         // Extract key facts from the conversation
         const userMsgs = messages.filter(m => m.role === 'user').map(m => m.content.slice(0, 300));
-        const aiMsgs = messages.filter(m => m.role === 'assistant' || m.role === 'ai').map(m => m.content.slice(0, 300));
 
         // Simple heuristic extraction (no AI call needed — fast and free)
         const learnings = [];
+        const projectLearnings = [];
 
         // Detect user preferences
         for (const msg of userMsgs) {
@@ -1546,32 +1558,54 @@ function extractAndSaveMemory(messages, providerConfig) {
             }
         }
 
-        // Detect project patterns
+        // Detect project patterns from tool calls
         const toolSteps = messages.flatMap(m => m.toolSteps || []);
         const filesCreated = toolSteps.filter(s => s.name === 'create_file').map(s => s.args?.file_path).filter(Boolean);
+        const filesEdited = toolSteps.filter(s => s.name === 'edit_file').map(s => s.args?.file_path).filter(Boolean);
         const projectsCreated = toolSteps.filter(s => s.name === 'init_project').map(s => s.args?.name).filter(Boolean);
+        const commandsRun = toolSteps.filter(s => s.name === 'run_command').map(s => s.args?.command).filter(Boolean);
 
         if (projectsCreated.length > 0) {
-            learnings.push(`Created project(s): ${projectsCreated.join(', ')}`);
+            projectLearnings.push(`Created project(s): ${projectsCreated.join(', ')}`);
         }
-        if (filesCreated.length > 3) {
-            learnings.push(`Created ${filesCreated.length} files`);
+        if (filesCreated.length > 0) {
+            projectLearnings.push(`Created ${filesCreated.length} files: ${filesCreated.slice(-5).join(', ')}`);
+        }
+        if (filesEdited.length > 0) {
+            projectLearnings.push(`Edited ${filesEdited.length} files: ${filesEdited.slice(-5).join(', ')}`);
+        }
+        if (commandsRun.length > 0) {
+            projectLearnings.push(`Ran ${commandsRun.length} commands`);
         }
 
-        // Save to daily log if we found anything
-        if (learnings.length > 0) {
-            const entry = `\n### Session ${new Date().toLocaleTimeString()}\n${learnings.map(l => `- ${l}`).join('\n')}\n`;
+        // Save to daily log
+        const allLearnings = [...learnings, ...projectLearnings];
+        if (allLearnings.length > 0) {
+            const entry = `\n### Session ${new Date().toLocaleTimeString()}\n${allLearnings.map(l => `- ${l}`).join('\n')}\n`;
             appendMemory(`${today}.md`, entry);
         }
 
-        // Also build up MEMORY.md with durable facts (user preferences only)
+        // Build up MEMORY.md with durable facts (user preferences only)
         const prefs = learnings.filter(l => l.startsWith('User ') || l.startsWith('Tech '));
         if (prefs.length > 0) {
             const existing = readMemory('MEMORY.md') || '# Long-Term Memory\n';
-            // Don't duplicate — check if already present
             const newPrefs = prefs.filter(p => !existing.includes(p));
             if (newPrefs.length > 0) {
                 appendMemory('MEMORY.md', '\n' + newPrefs.map(p => `- ${p}`).join('\n'));
+            }
+        }
+
+        // Save project-specific learnings to project memory
+        const systemMsg = messages.find(m => m.role === 'system');
+        if (systemMsg?.content && projectLearnings.length > 0) {
+            // Extract project ID from system prompt
+            const projMatch = systemMsg.content.match(/## Active Project:.*?\nPath:\s*`([^`]+)`/);
+            if (projMatch) {
+                // Use path hash as project ID for memory
+                const projPath = projMatch[1];
+                const projId = projPath.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+                const entry = `\n### ${new Date().toLocaleTimeString()} — ${today}\n${projectLearnings.map(l => `- ${l}`).join('\n')}\n`;
+                try { appendProjectMemory(projId, entry); } catch { /* project memory not critical */ }
             }
         }
     } catch (err) {
@@ -1591,7 +1625,7 @@ const DEFAULT_PERMISSIONS = {
     read_file: 'allow',
     edit_file: 'allow',
     create_file: 'allow',
-    delete_file: 'ask',
+    delete_file: 'allow',
     multi_edit: 'allow',
     run_command: 'allow',
     search_files: 'allow',
@@ -1612,16 +1646,23 @@ const DEFAULT_PERMISSIONS = {
     task_list: 'allow',
     task_clear: 'allow',
     init_project: 'allow',
+    memory_read: 'allow',
     memory_write: 'allow',
     memory_append: 'allow',
     create_restore_point: 'allow',
-    restore_to_point: 'ask',
+    restore_to_point: 'allow',
     list_restore_points: 'allow',
     get_context_summary: 'allow',
     spawn_sub_agent: 'allow',
     get_agent_status: 'allow',
     get_system_logs: 'allow',
     get_changelog: 'allow',
+    git_diff: 'allow',
+    git_log: 'allow',
+    git_branches: 'allow',
+    git_checkout: 'allow',
+    git_stash: 'allow',
+    git_pull: 'allow',
 };
 
 let activePermissions = { ...DEFAULT_PERMISSIONS };
@@ -1651,7 +1692,14 @@ function setAgentMode(mode) {
         activePermissions.multi_edit = 'deny';
         activePermissions.run_command = 'ask';
         activePermissions.init_project = 'deny';
+    } else if (mode === 'ask-destructive') {
+        // Ask-destructive mode: allow everything except destructive ops
+        activePermissions = { ...DEFAULT_PERMISSIONS };
+        activePermissions.delete_file = 'ask';
+        activePermissions.restore_to_point = 'ask';
+        activePermissions.run_command = 'ask'; // commands checked individually
     } else {
+        // Auto-allow / build mode: everything allowed
         activePermissions = { ...DEFAULT_PERMISSIONS };
     }
     // Sync permissions to aiTools module
@@ -1674,6 +1722,32 @@ ipcMain.handle('agent-set-mode', (_, mode) => {
 ipcMain.handle('agent-get-mode', () => {
     return { mode: agentMode, permissions: activePermissions };
 });
+
+// ── Settings flags (synced from renderer localStorage) ──
+
+let dangerousCommandProtection = true;
+let autoCommitEnabled = true;
+
+ipcMain.handle('set-setting', (_, key, value) => {
+    if (key === 'dangerous-cmd-protection') {
+        dangerousCommandProtection = !!value;
+        logger.info('settings', `Dangerous command protection: ${dangerousCommandProtection}`);
+    } else if (key === 'auto-commit') {
+        autoCommitEnabled = !!value;
+        logger.info('settings', `Auto-commit: ${autoCommitEnabled}`);
+    }
+    return { success: true };
+});
+
+ipcMain.handle('get-setting', (_, key) => {
+    if (key === 'dangerous-cmd-protection') return dangerousCommandProtection;
+    if (key === 'auto-commit') return autoCommitEnabled;
+    return null;
+});
+
+// Expose to aiTools
+function isDangerousProtectionEnabled() { return dangerousCommandProtection; }
+function isAutoCommitEnabled() { return autoCommitEnabled; }
 
 // ══════════════════════════════════════════
 //  Register Terminal & Project IPC
@@ -1771,6 +1845,8 @@ ipcMain.handle('conversation-migrate', async (_event, conversations) => {
 // Sync default permissions to aiTools on startup
 setPermissions(activePermissions);
 setAgentModeRef(agentMode);
+setDangerousProtectionCheck(() => dangerousCommandProtection);
+setAutoCommitCheck(() => autoCommitEnabled);
 
 // ══════════════════════════════════════════
 //  App Lifecycle

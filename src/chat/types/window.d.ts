@@ -165,7 +165,7 @@ interface OnicodeAPI {
     onConnectorGoogleResult: (callback: (result: { success?: boolean; error?: string; email?: string; name?: string; picture?: string }) => void) => () => void;
 
     // Memory
-    memoryLoadCore: () => Promise<{
+    memoryLoadCore: (projectId?: string) => Promise<{
         success: boolean;
         memories?: {
             soul: string | null;
@@ -173,6 +173,7 @@ interface OnicodeAPI {
             longTerm: string | null;
             dailyToday: string | null;
             dailyYesterday: string | null;
+            projectMemory: string | null;
             hasUserProfile: boolean;
             hasSoul: boolean;
         };
@@ -183,9 +184,17 @@ interface OnicodeAPI {
     memoryRead: (filename: string) => Promise<{ success: boolean; content?: string | null; error?: string }>;
     memoryWrite: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>;
     memoryAppend: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>;
-    memoryList: () => Promise<{ success: boolean; files?: Array<{ name: string; size: number; modified: string }>; error?: string }>;
+    memoryList: () => Promise<{ success: boolean; files?: Array<{ name: string; size: number; modified: string; scope: string }>; error?: string }>;
     memoryDelete: (filename: string) => Promise<{ success: boolean; error?: string }>;
     memoryCompact: (messages: unknown[], keepRecent?: number) => Promise<{ success: boolean; result?: { summary: string; recentMessages: unknown[]; compactedCount: number } | null; error?: string }>;
+
+    // Project-scoped memory
+    memoryProjectRead: (projectId: string) => Promise<{ success: boolean; content?: string | null; error?: string }>;
+    memoryProjectWrite: (projectId: string, content: string) => Promise<{ success: boolean; error?: string }>;
+    memoryProjectAppend: (projectId: string, content: string) => Promise<{ success: boolean; error?: string }>;
+
+    // Memory change notifications
+    onMemoryChanged: (callback: (data: { filename: string; action: string; scope: string }) => void) => () => void;
 
     // Browser / Puppeteer
     browserLaunch: (opts?: { headless?: boolean; width?: number; height?: number }) => Promise<{ success?: boolean; error?: string; reused?: boolean; message?: string }>;
@@ -229,6 +238,8 @@ interface OnicodeAPI {
     // Agent Mode & Permissions
     agentSetMode: (mode: string) => Promise<{ success: boolean; mode: string }>;
     agentGetMode: () => Promise<{ mode: string; permissions: Record<string, string> }>;
+    setSetting: (key: string, value: unknown) => Promise<{ success: boolean }>;
+    getSetting: (key: string) => Promise<unknown>;
     onAgentMode: (callback: (mode: string) => void) => () => void;
 
     // Session Title

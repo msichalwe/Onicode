@@ -621,11 +621,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             attachmentContext = parts.join('');
         }
 
-        // Load core memories for injection into system prompt
-        let memories: { soul?: string | null; user?: string | null; longTerm?: string | null; dailyToday?: string | null; dailyYesterday?: string | null } | undefined;
+        // Load core memories for injection into system prompt (including project memory)
+        let memories: { soul?: string | null; user?: string | null; longTerm?: string | null; dailyToday?: string | null; dailyYesterday?: string | null; projectMemory?: string | null } | undefined;
         if (isElectron) {
             try {
-                const memResult = await window.onicode!.memoryLoadCore();
+                const projectId = (scope === 'project' && activeProject?.id) ? activeProject.id : undefined;
+                const memResult = await window.onicode!.memoryLoadCore(projectId);
                 if (memResult.success && memResult.memories) {
                     memories = {
                         soul: memResult.memories.soul,
@@ -633,6 +634,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         longTerm: memResult.memories.longTerm,
                         dailyToday: memResult.memories.dailyToday,
                         dailyYesterday: memResult.memories.dailyYesterday,
+                        projectMemory: memResult.memories.projectMemory,
                     };
                 }
             } catch { /* memory load failed, proceed without */ }
