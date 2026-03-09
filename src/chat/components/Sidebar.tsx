@@ -1,6 +1,6 @@
 import React from 'react';
 
-type View = 'chat' | 'projects' | 'documents' | 'settings' | 'todo';
+type View = 'chat' | 'projects' | 'documents' | 'memories' | 'settings' | 'todo';
 
 interface SidebarProps {
     currentView: View;
@@ -54,6 +54,18 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
                         <polyline points="10 9 9 9 8 9" />
                     </svg>
                     Docs
+                </button>
+
+                <button
+                    className={`sidebar-btn ${currentView === 'memories' ? 'active' : ''}`}
+                    onClick={() => onViewChange('memories')}
+                    title="Memories"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
+                        <path d="M12 6v6l4 2" />
+                    </svg>
+                    Memory
                 </button>
             </nav>
 

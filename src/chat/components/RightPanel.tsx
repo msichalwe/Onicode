@@ -324,6 +324,7 @@ function ProjectWidget() {
         gitBranch?: string; hasGit?: boolean;
     } | null>(null);
     const [docs, setDocs] = useState<Array<{ name: string; content: string }>>([]);
+    const [tasks, setTasks] = useState<TaskSummary | null>(null);
 
     useEffect(() => {
         try {
@@ -343,12 +344,26 @@ function ProjectWidget() {
             }
         } catch { /* ignore */ }
 
+        // Load initial tasks
+        if (isElectron) {
+            window.onicode!.tasksList().then(setTasks).catch(() => { });
+        }
+
+        // Listen for real-time task updates from main process
+        let unsubTasks: (() => void) | undefined;
+        if (isElectron) {
+            unsubTasks = window.onicode!.onTasksUpdated((data) => setTasks(data));
+        }
+
         const handler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
             if (detail?.name) setProject(detail);
         };
         window.addEventListener('onicode-project-activate', handler);
-        return () => window.removeEventListener('onicode-project-activate', handler);
+        return () => {
+            window.removeEventListener('onicode-project-activate', handler);
+            unsubTasks?.();
+        };
     }, []);
 
     if (!project) {
@@ -362,6 +377,17 @@ function ProjectWidget() {
             </div>
         );
     }
+
+    const statusIcon = (status: string) => {
+        switch (status) {
+            case 'done': return <span className="task-status-icon task-done">✓</span>;
+            case 'in_progress': return <span className="task-status-icon task-progress">▶</span>;
+            case 'skipped': return <span className="task-status-icon task-skipped">–</span>;
+            default: return <span className="task-status-icon task-pending">○</span>;
+        }
+    };
+
+    const priorityClass = (p: string) => p === 'high' ? 'task-high' : p === 'low' ? 'task-low' : '';
 
     return (
         <div className="project-widget">
@@ -386,6 +412,27 @@ function ProjectWidget() {
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 01-9 9" /></svg>
                         {project.gitBranch}
                     </span>
+                </div>
+            )}
+            {tasks && tasks.total > 0 && (
+                <div className="project-widget-section">
+                    <div className="project-widget-label">
+                        Tasks ({tasks.done}/{tasks.total})
+                    </div>
+                    <div className="project-widget-progress">
+                        <div className="progress-bar">
+                            <div className="progress-fill" style={{ width: `${tasks.total > 0 ? (tasks.done / tasks.total) * 100 : 0}%` }} />
+                        </div>
+                        <span className="progress-text">{Math.round((tasks.done / tasks.total) * 100)}%</span>
+                    </div>
+                    <div className="project-widget-tasks">
+                        {tasks.tasks.map((task: TaskItem) => (
+                            <div key={task.id} className={`project-widget-task ${priorityClass(task.priority)}`}>
+                                {statusIcon(task.status)}
+                                <span className={task.status === 'done' ? 'task-content-done' : ''}>{task.content}</span>
+                            </div>
+                        ))}
+                    </div>
                 </div>
             )}
             {docs.length > 0 && (

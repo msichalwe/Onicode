@@ -332,8 +332,40 @@ function GitTab({ projectPath }: { projectPath: string }) {
 //  Tasks / Kanban Tab
 // ══════════════════════════════════════════
 
+// Map AI TaskManager status to Kanban column status
+function mapAIStatusToKanban(status: string): TaskItem['status'] {
+    switch (status) {
+        case 'in_progress': return 'in-progress';
+        case 'done': return 'done';
+        case 'skipped': return 'done';
+        case 'pending':
+        default: return 'todo';
+    }
+}
+
+// Map AI TaskManager priority
+function mapAIPriority(priority: string): TaskItem['priority'] {
+    if (priority === 'high') return 'high';
+    if (priority === 'low') return 'low';
+    return 'medium';
+}
+
+// Convert AI TaskManager task to Kanban TaskItem
+function aiTaskToKanban(aiTask: { id: number; content: string; status: string; priority: string; createdAt: string }): TaskItem {
+    return {
+        id: `ai-${aiTask.id}`,
+        title: aiTask.content,
+        description: '',
+        status: mapAIStatusToKanban(aiTask.status),
+        priority: mapAIPriority(aiTask.priority),
+        type: 'task',
+        createdAt: new Date(aiTask.createdAt).getTime(),
+    };
+}
+
 function TasksTab({ projectId }: { projectId: string }) {
-    const [tasks, setTasks] = useState<TaskItem[]>(() => loadTasks(projectId));
+    const [manualTasks, setManualTasks] = useState<TaskItem[]>(() => loadTasks(projectId));
+    const [aiTasks, setAiTasks] = useState<TaskItem[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [formTitle, setFormTitle] = useState('');
     const [formDesc, setFormDesc] = useState('');
@@ -341,9 +373,30 @@ function TasksTab({ projectId }: { projectId: string }) {
     const [formType, setFormType] = useState<TaskItem['type']>('task');
     const [dragItem, setDragItem] = useState<string | null>(null);
 
-    useEffect(() => { setTasks(loadTasks(projectId)); }, [projectId]);
+    // Merged view: AI tasks + manual tasks
+    const tasks = [...aiTasks, ...manualTasks];
 
-    const persist = (updated: TaskItem[]) => { setTasks(updated); saveTasks(projectId, updated); };
+    useEffect(() => { setManualTasks(loadTasks(projectId)); }, [projectId]);
+
+    // Fetch AI tasks from TaskManager and subscribe to updates
+    useEffect(() => {
+        if (!isElectron) return;
+        // Initial fetch
+        window.onicode!.tasksList().then((summary: TaskSummary) => {
+            if (summary?.tasks) {
+                setAiTasks(summary.tasks.map(aiTaskToKanban));
+            }
+        }).catch(() => { });
+        // Subscribe to real-time updates
+        const cleanup = window.onicode!.onTasksUpdated((summary: TaskSummary) => {
+            if (summary?.tasks) {
+                setAiTasks(summary.tasks.map(aiTaskToKanban));
+            }
+        });
+        return cleanup;
+    }, [projectId]);
+
+    const persistManual = (updated: TaskItem[]) => { setManualTasks(updated); saveTasks(projectId, updated); };
 
     const addTask = () => {
         if (!formTitle.trim()) return;
@@ -351,16 +404,20 @@ function TasksTab({ projectId }: { projectId: string }) {
             id: generateId(), title: formTitle.trim(), description: formDesc.trim(),
             status: 'backlog', priority: formPriority, type: formType, createdAt: Date.now(),
         };
-        persist([...tasks, task]);
+        persistManual([...manualTasks, task]);
         setFormTitle(''); setFormDesc(''); setShowForm(false);
     };
 
     const moveTask = (taskId: string, newStatus: TaskItem['status']) => {
-        persist(tasks.map(t => t.id === taskId ? { ...t, status: newStatus } : t));
+        // Only manual tasks can be moved via drag-drop (AI tasks are managed by the agent)
+        if (taskId.startsWith('ai-')) return;
+        persistManual(manualTasks.map(t => t.id === taskId ? { ...t, status: newStatus } : t));
     };
 
     const deleteTask = (taskId: string) => {
-        persist(tasks.filter(t => t.id !== taskId));
+        // Only manual tasks can be deleted (AI tasks are managed by the agent)
+        if (taskId.startsWith('ai-')) return;
+        persistManual(manualTasks.filter(t => t.id !== taskId));
     };
 
     const priorityColor = (p: string) => {

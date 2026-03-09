@@ -152,6 +152,59 @@ interface OnicodeAPI {
     connectorGoogleCancel: () => Promise<{ success: boolean }>;
     onConnectorGoogleResult: (callback: (result: { success?: boolean; error?: string; email?: string; name?: string; picture?: string }) => void) => () => void;
 
+    // Memory
+    memoryLoadCore: () => Promise<{
+        success: boolean;
+        memories?: {
+            soul: string | null;
+            user: string | null;
+            longTerm: string | null;
+            dailyToday: string | null;
+            dailyYesterday: string | null;
+            hasUserProfile: boolean;
+            hasSoul: boolean;
+        };
+        error?: string;
+    }>;
+    memoryEnsureDefaults: () => Promise<{ success: boolean; created?: string[]; needsOnboarding?: boolean; error?: string }>;
+    memorySaveOnboarding: (answers: { name?: string; language?: string; framework?: string; codeStyle?: string; extras?: string }) => Promise<{ success: boolean; error?: string }>;
+    memoryRead: (filename: string) => Promise<{ success: boolean; content?: string | null; error?: string }>;
+    memoryWrite: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>;
+    memoryAppend: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>;
+    memoryList: () => Promise<{ success: boolean; files?: Array<{ name: string; size: number; modified: string }>; error?: string }>;
+    memoryDelete: (filename: string) => Promise<{ success: boolean; error?: string }>;
+    memoryCompact: (messages: unknown[], keepRecent?: number) => Promise<{ success: boolean; result?: { summary: string; recentMessages: unknown[]; compactedCount: number } | null; error?: string }>;
+
+    // Browser / Puppeteer
+    browserLaunch: (opts?: { headless?: boolean; width?: number; height?: number }) => Promise<{ success?: boolean; error?: string; reused?: boolean; message?: string }>;
+    browserClose: () => Promise<{ success: boolean }>;
+    browserNavigate: (url: string, opts?: { waitUntil?: string; timeout?: number }) => Promise<{ success?: boolean; url?: string; status?: number | null; title?: string; error?: string }>;
+    browserScreenshot: (opts: { name: string; selector?: string; fullPage?: boolean }) => Promise<{ success?: boolean; path?: string; name?: string; size?: number; error?: string }>;
+    browserEvaluate: (script: string) => Promise<{ success?: boolean; result?: string; error?: string }>;
+    browserClick: (selector: string) => Promise<{ success?: boolean; selector?: string; error?: string }>;
+    browserType: (selector: string, text: string) => Promise<{ success?: boolean; selector?: string; typed?: number; error?: string }>;
+    browserWait: (selector: string, opts?: { timeout?: number }) => Promise<{ success?: boolean; selector?: string; error?: string }>;
+    browserContent: () => Promise<{ success?: boolean; url?: string; title?: string; html?: string; length?: number; error?: string }>;
+    browserConsoleLogs: (opts?: { type?: string; limit?: number }) => Promise<{ success: boolean; logs: Array<{ type: string; text: string; ts: string }> }>;
+    browserConsoleClear: () => Promise<{ success: boolean }>;
+
+    // Logger
+    loggerGetRecent: (opts?: { level?: string; category?: string; limit?: number; since?: string }) => Promise<{ success: boolean; entries: Array<{ ts: string; level: string; category: string; message: string; data: string | null }> }>;
+    loggerReadDay: (date: string) => Promise<{ success: boolean; entries: Array<{ ts: string; level: string; category: string; message: string; data: string | null }> }>;
+    loggerListFiles: () => Promise<{ success: boolean; files: Array<{ name: string; date: string; size: number }> }>;
+
+    // Tasks
+    tasksList: () => Promise<TaskSummary>;
+    onTasksUpdated: (callback: (data: TaskSummary) => void) => () => void;
+
+    // Agent Mode & Permissions
+    agentSetMode: (mode: string) => Promise<{ success: boolean; mode: string }>;
+    agentGetMode: () => Promise<{ mode: string; permissions: Record<string, string> }>;
+    onAgentMode: (callback: (mode: string) => void) => () => void;
+
+    // Session Title
+    onSessionTitle: (callback: (title: string) => void) => () => void;
+
     // Git
     gitIsRepo: (repoPath: string) => Promise<{ isRepo: boolean }>;
     gitInit: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
@@ -177,6 +230,25 @@ interface OnicodeAPI {
 }
 
 declare global {
+    interface TaskItem {
+        id: number;
+        content: string;
+        status: 'pending' | 'in_progress' | 'done' | 'skipped';
+        priority: 'high' | 'medium' | 'low';
+        createdAt: string;
+        completedAt: string | null;
+    }
+
+    interface TaskSummary {
+        total: number;
+        done: number;
+        pending: number;
+        inProgress: number;
+        allDone: boolean;
+        nextTask: TaskItem | null;
+        tasks: TaskItem[];
+    }
+
     interface GitStatusFile {
         path: string;
         status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted';

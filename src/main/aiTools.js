@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync, spawn } = require('child_process');
+const { logger } = require('./logger');
 
 // ══════════════════════════════════════════
 //  Main Window Reference (for IPC events)
@@ -32,10 +33,11 @@ function sendToRenderer(channel, data) {
 
 class FileContextTracker {
     constructor() {
-        this.readFiles = new Map();    // path -> { lines, lastRead, hash }
-        this.modifiedFiles = new Map(); // path -> { edits: [], original }
+        this.readFiles = new Map();    // path -> { lines, lastRead, size }
+        this.modifiedFiles = new Map(); // path -> { edits: [], linesAdded, linesDeleted }
         this.createdFiles = new Set();
         this.deletedFiles = new Set();
+        this.changelog = [];           // Ordered list of { ts, action, path, detail }
     }
 
     trackRead(filePath, content) {
@@ -45,33 +47,73 @@ class FileContextTracker {
             lastRead: Date.now(),
             size: content.length,
         });
+        logger.debug('file-ctx', `Read: ${filePath} (${lines} lines)`);
     }
 
     trackEdit(filePath, oldStr, newStr) {
         if (!this.modifiedFiles.has(filePath)) {
-            this.modifiedFiles.set(filePath, { edits: [] });
+            this.modifiedFiles.set(filePath, { edits: [], linesAdded: 0, linesDeleted: 0 });
         }
-        this.modifiedFiles.get(filePath).edits.push({
+        const entry = this.modifiedFiles.get(filePath);
+        const oldLines = oldStr.split('\n').length;
+        const newLines = newStr.split('\n').length;
+        const added = Math.max(0, newLines - oldLines);
+        const deleted = Math.max(0, oldLines - newLines);
+        entry.linesAdded += added;
+        entry.linesDeleted += deleted;
+        entry.edits.push({
             oldStr: oldStr.slice(0, 100),
             newStr: newStr.slice(0, 100),
+            linesAdded: added,
+            linesDeleted: deleted,
             timestamp: Date.now(),
         });
+        this.changelog.push({
+            ts: new Date().toISOString(),
+            action: 'edit',
+            path: filePath,
+            detail: `+${added} -${deleted} lines`,
+        });
+        logger.fileChange('edit', filePath, { added, deleted });
     }
 
-    trackCreate(filePath) {
+    trackCreate(filePath, content) {
         this.createdFiles.add(filePath);
+        const lines = content ? content.split('\n').length : 0;
+        this.changelog.push({
+            ts: new Date().toISOString(),
+            action: 'create',
+            path: filePath,
+            detail: `${lines} lines`,
+        });
+        logger.fileChange('create', filePath, { lines });
     }
 
     trackDelete(filePath) {
         this.deletedFiles.add(filePath);
+        this.changelog.push({
+            ts: new Date().toISOString(),
+            action: 'delete',
+            path: filePath,
+            detail: '',
+        });
+        logger.fileChange('delete', filePath);
     }
 
     getSummary() {
+        let totalAdded = 0;
+        let totalDeleted = 0;
+        for (const entry of this.modifiedFiles.values()) {
+            totalAdded += entry.linesAdded;
+            totalDeleted += entry.linesDeleted;
+        }
         return {
             filesRead: this.readFiles.size,
             filesModified: this.modifiedFiles.size,
             filesCreated: this.createdFiles.size,
             filesDeleted: this.deletedFiles.size,
+            totalLinesAdded: totalAdded,
+            totalLinesDeleted: totalDeleted,
             readPaths: [...this.readFiles.keys()],
             modifiedPaths: [...this.modifiedFiles.keys()],
             createdPaths: [...this.createdFiles],
@@ -79,15 +121,143 @@ class FileContextTracker {
         };
     }
 
+    getChangelog() {
+        return this.changelog.slice(-100);
+    }
+
+    generateChangelogMarkdown() {
+        if (this.changelog.length === 0) return '(no changes yet)';
+        const lines = [];
+        const created = this.changelog.filter(c => c.action === 'create');
+        const edited = this.changelog.filter(c => c.action === 'edit');
+        const deleted = this.changelog.filter(c => c.action === 'delete');
+        if (created.length > 0) {
+            lines.push('### Created');
+            const uniquePaths = [...new Set(created.map(c => c.path))];
+            uniquePaths.forEach(p => lines.push(`- \`${p}\``));
+        }
+        if (edited.length > 0) {
+            lines.push('### Modified');
+            const uniquePaths = [...new Set(edited.map(c => c.path))];
+            uniquePaths.forEach(p => {
+                const entry = this.modifiedFiles.get(p);
+                const detail = entry ? ` (+${entry.linesAdded} -${entry.linesDeleted})` : '';
+                lines.push(`- \`${p}\`${detail}`);
+            });
+        }
+        if (deleted.length > 0) {
+            lines.push('### Deleted');
+            const uniquePaths = [...new Set(deleted.map(c => c.path))];
+            uniquePaths.forEach(p => lines.push(`- \`${p}\``));
+        }
+        return lines.join('\n');
+    }
+
     reset() {
         this.readFiles.clear();
         this.modifiedFiles.clear();
         this.createdFiles.clear();
         this.deletedFiles.clear();
+        this.changelog = [];
     }
 }
 
 const fileContext = new FileContextTracker();
+
+// ══════════════════════════════════════════
+//  Task Manager — AI-managed task list
+// ══════════════════════════════════════════
+
+class TaskManager {
+    constructor() {
+        this.tasks = [];    // { id, content, status, priority, createdAt, completedAt }
+        this.nextId = 1;
+    }
+
+    // Notify renderer of task changes
+    _notifyRenderer() {
+        sendToRenderer('ai-tasks-updated', this.getSummary());
+    }
+
+    addTask(content, priority = 'medium') {
+        const task = {
+            id: this.nextId++,
+            content,
+            status: 'pending',
+            priority,
+            createdAt: new Date().toISOString(),
+            completedAt: null,
+        };
+        this.tasks.push(task);
+        logger.info('task-mgr', `Added task #${task.id}: ${content}`);
+        this._notifyRenderer();
+        return task;
+    }
+
+    updateTask(id, updates) {
+        const task = this.tasks.find(t => t.id === id);
+        if (!task) return { error: `Task #${id} not found` };
+        if (updates.status) {
+            task.status = updates.status;
+            if (updates.status === 'done') task.completedAt = new Date().toISOString();
+        }
+        if (updates.content) task.content = updates.content;
+        if (updates.priority) task.priority = updates.priority;
+        logger.info('task-mgr', `Updated task #${id}: ${task.status}`);
+        this._notifyRenderer();
+        return task;
+    }
+
+    getTask(id) {
+        return this.tasks.find(t => t.id === id) || null;
+    }
+
+    listTasks(filter) {
+        let result = [...this.tasks];
+        if (filter?.status) result = result.filter(t => t.status === filter.status);
+        if (filter?.priority) result = result.filter(t => t.priority === filter.priority);
+        return result;
+    }
+
+    getNextTask() {
+        // Priority order: high > medium > low, then by creation order
+        const pending = this.tasks.filter(t => t.status === 'pending' || t.status === 'in_progress');
+        if (pending.length === 0) return null;
+        const inProgress = pending.find(t => t.status === 'in_progress');
+        if (inProgress) return inProgress;
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        pending.sort((a, b) => (priorityOrder[a.priority] || 1) - (priorityOrder[b.priority] || 1));
+        return pending[0];
+    }
+
+    allDone() {
+        return this.tasks.length > 0 && this.tasks.every(t => t.status === 'done' || t.status === 'skipped');
+    }
+
+    getSummary() {
+        const total = this.tasks.length;
+        const done = this.tasks.filter(t => t.status === 'done').length;
+        const pending = this.tasks.filter(t => t.status === 'pending').length;
+        const inProgress = this.tasks.filter(t => t.status === 'in_progress').length;
+        return {
+            total,
+            done,
+            pending,
+            inProgress,
+            allDone: this.allDone(),
+            nextTask: this.getNextTask(),
+            tasks: this.tasks,
+        };
+    }
+
+    clear() {
+        this.tasks = [];
+        this.nextId = 1;
+        this._notifyRenderer();
+    }
+}
+
+const taskManager = new TaskManager();
 
 // ══════════════════════════════════════════
 //  Terminal Session Tracking
@@ -477,6 +647,296 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'init_project',
+            description: 'MANDATORY first step when creating any new project. Registers the project in Onicode\'s Projects tab, creates .onidocs/ folder with project.md, tasks.md, changelog.md. This activates "project mode" in the IDE. You MUST call this before any other tool call when creating a project.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Project name (e.g. "streaming-website", "todo-app")' },
+                    projectPath: { type: 'string', description: 'Full path for the project (e.g. "~/Documents/OniProjects/my-app")' },
+                    description: { type: 'string', description: 'Brief project description' },
+                    techStack: { type: 'string', description: 'Tech stack (e.g. "Next.js + TypeScript + Tailwind")' },
+                },
+                required: ['name', 'projectPath'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_write',
+            description: 'Write or update a memory file. Use this to save durable facts, user preferences, project decisions, or session notes to persistent memory.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filename: { type: 'string', description: 'Memory filename (e.g. "MEMORY.md", "user.md", "2025-03-09.md")' },
+                    content: { type: 'string', description: 'Full content to write (overwrites existing)' },
+                },
+                required: ['filename', 'content'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_append',
+            description: 'Append content to a memory file. Use for daily logs and incremental notes. Creates the file if it does not exist.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filename: { type: 'string', description: 'Memory filename to append to' },
+                    content: { type: 'string', description: 'Content to append' },
+                },
+                required: ['filename', 'content'],
+            },
+        },
+    },
+    // ── Browser / Puppeteer Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'browser_navigate',
+            description: 'Launch a browser (if not already running) and navigate to a URL. Use this to test web apps you create. Returns page title, status code, and URL. Console logs are captured automatically.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'URL to navigate to (e.g. http://localhost:3000)' },
+                    wait_until: { type: 'string', description: 'Wait strategy: "load", "domcontentloaded", "networkidle0", "networkidle2" (default)' },
+                },
+                required: ['url'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_screenshot',
+            description: 'Take a screenshot of the current browser page or a specific element. Returns the screenshot file path.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Name for the screenshot file' },
+                    selector: { type: 'string', description: 'Optional CSS selector to screenshot a specific element' },
+                    full_page: { type: 'boolean', description: 'Capture full page (default false)' },
+                },
+                required: ['name'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_evaluate',
+            description: 'Execute JavaScript in the browser page context. Use to check DOM state, read values, or interact with the page.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    script: { type: 'string', description: 'JavaScript code to execute in the browser' },
+                },
+                required: ['script'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_click',
+            description: 'Click an element on the page by CSS selector.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    selector: { type: 'string', description: 'CSS selector of element to click' },
+                },
+                required: ['selector'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_type',
+            description: 'Type text into an input field by CSS selector.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    selector: { type: 'string', description: 'CSS selector of input element' },
+                    text: { type: 'string', description: 'Text to type' },
+                },
+                required: ['selector', 'text'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_console_logs',
+            description: 'Get captured browser console logs (console.log, console.error, page errors, request failures). Use this to debug web apps.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    type: { type: 'string', description: 'Filter by type: "log", "error", "warn", "info"' },
+                    limit: { type: 'integer', description: 'Max number of entries (default 50)' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_close',
+            description: 'Close the browser instance and free resources.',
+            parameters: { type: 'object', properties: {} },
+        },
+    },
+    // ── Task Management Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'task_add',
+            description: 'Add a task to your work plan. Always create a task list BEFORE starting any multi-step work. This is how you track what needs to be done.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    content: { type: 'string', description: 'Task description' },
+                    priority: { type: 'string', description: '"high", "medium", or "low"' },
+                },
+                required: ['content'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'task_update',
+            description: 'Update a task status. Mark tasks "in_progress" when starting, "done" when finished. After completing a task, check if more tasks remain.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    id: { type: 'integer', description: 'Task ID to update' },
+                    status: { type: 'string', description: '"pending", "in_progress", "done", "skipped"' },
+                    content: { type: 'string', description: 'Updated task description (optional)' },
+                },
+                required: ['id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'task_list',
+            description: 'List all tasks with their status. Use this to check what is done and what remains. Call this after completing each task to decide what to do next.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    status: { type: 'string', description: 'Filter by status: "pending", "in_progress", "done"' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'task_clear',
+            description: 'Clear all tasks. Use when starting a completely new work plan.',
+            parameters: { type: 'object', properties: {} },
+        },
+    },
+    // ── Web Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'webfetch',
+            description: 'Fetch and read the content of a web page. Use this to look up documentation, READMEs, API references, or any web content. Returns the text content of the page.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'URL to fetch (must start with http:// or https://)' },
+                    max_length: { type: 'integer', description: 'Maximum characters to return (default 8000)' },
+                },
+                required: ['url'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'websearch',
+            description: 'Search the web for information. Returns a list of relevant results with titles, URLs, and snippets. Use this to find solutions, documentation, or research topics.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search query' },
+                    max_results: { type: 'integer', description: 'Maximum number of results (default 5)' },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    // ── File Discovery Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'glob_files',
+            description: 'Find files by glob pattern. Returns matching file paths sorted by modification time. Respects .gitignore. Use this to discover files by extension or name pattern.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.ts", "src/**/*.tsx", "*.json")' },
+                    search_path: { type: 'string', description: 'Root directory to search from' },
+                    max_results: { type: 'integer', description: 'Maximum results (default 50)' },
+                },
+                required: ['pattern', 'search_path'],
+            },
+        },
+    },
+    // ── Codebase Exploration ──
+    {
+        type: 'function',
+        function: {
+            name: 'explore_codebase',
+            description: 'Fast, read-only exploration of a codebase. Analyzes project structure, key files, tech stack, and entry points. Use this to quickly understand an unfamiliar codebase before making changes.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    project_path: { type: 'string', description: 'Root path of the project to explore' },
+                    focus: { type: 'string', description: 'Optional focus area: "structure", "dependencies", "entrypoints", "config", or "all" (default)' },
+                },
+                required: ['project_path'],
+            },
+        },
+    },
+    // ── Logging / Context Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'get_system_logs',
+            description: 'Get recent system logs including command outputs, errors, tool calls. Use this to debug issues or check what happened.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    level: { type: 'string', description: 'Minimum level: "DEBUG", "INFO", "TOOL", "CMD", "WARN", "ERROR"' },
+                    category: { type: 'string', description: 'Filter by category: "tool-call", "tool-result", "cmd-exec", "file-change", "agent-step"' },
+                    limit: { type: 'integer', description: 'Max entries (default 50)' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'get_changelog',
+            description: 'Get the auto-generated changelog of all file changes in this session (files created, modified, deleted with line counts).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    format: { type: 'string', description: '"json" or "markdown" (default markdown)' },
+                },
+            },
+        },
+    },
 ];
 
 // ══════════════════════════════════════════
@@ -542,7 +1002,7 @@ async function executeTool(name, args) {
                     return { error: `File already exists: ${file_path}. Use edit_file to modify it.` };
                 }
                 fs.writeFileSync(file_path, content);
-                fileContext.trackCreate(file_path);
+                fileContext.trackCreate(file_path, content);
                 return { success: true, file_path, lines: content.split('\n').length };
             }
 
@@ -566,9 +1026,10 @@ async function executeTool(name, args) {
                     if (depth > maxD) return [];
                     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
                     const result = [];
+                    const skipDirs = ['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__', '.cache', '.turbo'];
                     for (const entry of entries) {
                         if (!include_hidden && entry.name.startsWith('.')) continue;
-                        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+                        if (skipDirs.includes(entry.name)) continue;
                         const fullPath = path.join(dirPath, entry.name);
                         const isDir = entry.isDirectory();
                         const item = {
@@ -601,10 +1062,21 @@ async function executeTool(name, args) {
                     return { error: `Path not found: ${search_path}` };
                 }
 
-                let cmd = `grep -r${case_sensitive ? '' : 'i'}n --include="${file_pattern || '*'}" `;
-                cmd += `--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist `;
-                cmd += `-m ${max_results} `;
-                cmd += `${JSON.stringify(query)} ${JSON.stringify(search_path)}`;
+                // Prefer ripgrep (rg) if available, falls back to grep. Both respect .gitignore.
+                let cmd;
+                try {
+                    execSync('which rg', { encoding: 'utf-8', timeout: 2000 });
+                    // Use ripgrep — respects .gitignore by default
+                    cmd = `rg ${case_sensitive ? '' : '-i'} -n --max-count ${max_results} `;
+                    if (file_pattern) cmd += `-g ${JSON.stringify(file_pattern)} `;
+                    cmd += `${JSON.stringify(query)} ${JSON.stringify(search_path)}`;
+                } catch {
+                    // Fallback to grep
+                    cmd = `grep -r${case_sensitive ? '' : 'i'}n --include="${file_pattern || '*'}" `;
+                    cmd += `--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=.next --exclude-dir=build --exclude-dir=coverage `;
+                    cmd += `-m ${max_results} `;
+                    cmd += `${JSON.stringify(query)} ${JSON.stringify(search_path)}`;
+                }
 
                 try {
                     const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, maxBuffer: 1024 * 1024 });
@@ -621,7 +1093,7 @@ async function executeTool(name, args) {
             }
 
             case 'run_command': {
-                const { command, cwd, timeout = 30000 } = args;
+                const { command, cwd, timeout = 120000 } = args;
                 const execCwd = cwd || os.homedir();
 
                 // Auto-open terminal panel in renderer
@@ -709,6 +1181,9 @@ async function executeTool(name, args) {
                         sessionEntry.duration = sessionEntry.finishedAt - sessionEntry.startedAt;
                         sendToRenderer('ai-terminal-session', sessionEntry);
 
+                        // Log command execution
+                        logger.cmdExec(command, execCwd, exitCode, sessionEntry.duration);
+
                         resolve({
                             command,
                             cwd: execCwd,
@@ -733,13 +1208,24 @@ async function executeTool(name, args) {
                         sessionEntry.duration = sessionEntry.finishedAt - sessionEntry.startedAt;
                         sendToRenderer('ai-terminal-session', sessionEntry);
 
+                        // Provide diagnostic hints for common errors
+                        let hint = '';
+                        if (err.code === 'ENOENT') {
+                            hint = 'HINT: "sh" not found (spawn ENOENT). Try using the full path to the binary, or ensure the cwd directory exists.';
+                        } else if (err.code === 'EACCES') {
+                            hint = 'HINT: Permission denied. The command or directory may require elevated permissions.';
+                        }
+
                         resolve({
                             command,
                             cwd: execCwd,
                             exitCode: 1,
                             stdout: stdout.slice(0, 8000),
-                            stderr: err.message,
+                            stderr: `${err.message}${hint ? '\n' + hint : ''}`,
                             success: false,
+                            error_code: err.code || 'UNKNOWN',
+                            recoverable: true,
+                            suggestion: hint || 'Check that the command exists and the working directory is valid.',
                         });
                     });
                 });
@@ -822,10 +1308,466 @@ async function executeTool(name, args) {
                 return { success: true, file_path, edits_applied: results.length, description };
             }
 
+            case 'init_project': {
+                const { name: projName, projectPath, description: projDesc, techStack } = args;
+                // Expand ~ to home directory
+                const expandedPath = projectPath.replace(/^~/, os.homedir());
+
+                const result = await new Promise((resolve) => {
+                    const projFs = require('fs');
+                    const projPath = require('path');
+
+                    // Ensure project directory exists
+                    if (!projFs.existsSync(expandedPath)) {
+                        projFs.mkdirSync(expandedPath, { recursive: true });
+                    }
+
+                    // Create onidocs directory (no dot prefix — matches project-get and project-init IPC)
+                    const onidocsDir = projPath.join(expandedPath, 'onidocs');
+                    if (!projFs.existsSync(onidocsDir)) {
+                        projFs.mkdirSync(onidocsDir, { recursive: true });
+                    }
+
+                    // Create src directory
+                    const srcDir = projPath.join(expandedPath, 'src');
+                    if (!projFs.existsSync(srcDir)) {
+                        projFs.mkdirSync(srcDir, { recursive: true });
+                    }
+
+                    // Create onidocs template files (same as project-init IPC uses)
+                    const docsDefaults = {
+                        'architecture.md': `# ${projName} — Architecture\n\n## Overview\nThis document describes the architecture of **${projName}**.\n\n## Tech Stack\n${techStack || '- To be defined'}\n\n## Directory Structure\n\`\`\`\n${projName}/\n├── src/\n├── onidocs/\n│   ├── architecture.md\n│   ├── changelog.md\n│   ├── scope.md\n│   └── tasks.md\n└── README.md\n\`\`\`\n\n## Key Decisions\n- *Document architectural decisions here*\n\n## Data Flow\n- *Describe how data flows through the system*\n`,
+                        'scope.md': `# ${projName} — Project Scope\n\n## Description\n${projDesc || 'A new project created with Onicode.'}\n\n## Goals\n- [ ] Define project objectives\n- [ ] Set up development environment\n- [ ] Build core features\n- [ ] Deploy\n\n## Non-Goals\n- *List what is explicitly out of scope*\n`,
+                        'changelog.md': `# ${projName} — Changelog\n\nAll notable changes to this project will be documented here.\n\n## [Unreleased]\n\n### Added\n- Initial project setup with Onicode\n- Created onidocs documentation structure\n`,
+                        'tasks.md': `# ${projName} — Tasks\n\n## In Progress\n- [ ] Set up project structure\n- [ ] Define architecture\n\n## To Do\n- [ ] Implement core features\n- [ ] Write tests\n- [ ] Set up CI/CD\n- [ ] Documentation\n\n## Done\n- [x] Project initialized with Onicode\n- [x] Created onidocs documentation\n`,
+                    };
+
+                    for (const [fname, content] of Object.entries(docsDefaults)) {
+                        const fpath = projPath.join(onidocsDir, fname);
+                        if (!projFs.existsSync(fpath)) {
+                            projFs.writeFileSync(fpath, content);
+                        }
+                    }
+
+                    // Create AGENTS.md (project context for AI — like OpenCode's /init)
+                    const agentsMdPath = projPath.join(expandedPath, 'AGENTS.md');
+                    if (!projFs.existsSync(agentsMdPath)) {
+                        projFs.writeFileSync(agentsMdPath, `# AGENTS.md — ${projName}\n\n## Project Overview\n${projDesc || 'A project created with Onicode AI.'}\n\n## Tech Stack\n${techStack || '- To be defined during setup'}\n\n## Directory Structure\nThis file helps the AI coding agent understand the project.\nUpdate this as the project evolves.\n\n## Coding Conventions\n- *Add project-specific patterns here*\n\n## Important Files\n- \`onidocs/architecture.md\` — System architecture\n- \`onidocs/scope.md\` — Project scope and goals\n- \`onidocs/tasks.md\` — Task tracking\n- \`onidocs/changelog.md\` — Version history\n\n## Testing\n- *Describe how to run tests*\n\n## Build & Deploy\n- *Describe build and deploy process*\n\n---\n*Auto-generated by Onicode AI. Commit this file to your repo.*\n`);
+                    }
+
+                    // Create README.md in project root
+                    const readmePath = projPath.join(expandedPath, 'README.md');
+                    if (!projFs.existsSync(readmePath)) {
+                        projFs.writeFileSync(readmePath, `# ${projName}\n\n${projDesc || 'A project created with Onicode AI.'}\n\n## Getting Started\n\n\`\`\`bash\ncd ${projName}\n# Add setup instructions here\n\`\`\`\n\n## Documentation\n\nSee the \`onidocs/\` folder for detailed project documentation:\n- **architecture.md** — System architecture and tech stack\n- **scope.md** — Project scope and goals\n- **changelog.md** — Version history\n- **tasks.md** — Task tracking\n\n---\n*Created with [Onicode](https://onicode.dev)*\n`);
+                    }
+
+                    // Load and save to projects registry
+                    const PROJECTS_FILE = projPath.join(os.homedir(), '.onicode', 'projects.json');
+                    let projects = [];
+                    try {
+                        if (projFs.existsSync(PROJECTS_FILE)) {
+                            projects = JSON.parse(projFs.readFileSync(PROJECTS_FILE, 'utf-8'));
+                        }
+                    } catch { projects = []; }
+
+                    // Check if already registered
+                    const existing = projects.find(p => p.path === expandedPath);
+                    if (existing) {
+                        resolve({ success: true, project: existing, alreadyRegistered: true });
+                        return;
+                    }
+
+                    const project = {
+                        id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                        name: projName,
+                        path: expandedPath,
+                        description: projDesc || '',
+                        techStack: techStack || '',
+                        createdAt: Date.now(),
+                    };
+                    projects.push(project);
+
+                    const onicodeDir = projPath.join(os.homedir(), '.onicode');
+                    if (!projFs.existsSync(onicodeDir)) projFs.mkdirSync(onicodeDir, { recursive: true });
+                    projFs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
+
+                    resolve({ success: true, project });
+                });
+
+                // Clear stale tasks from previous init attempts
+                taskManager.clear();
+
+                // Fire project activation event in the renderer
+                if (result.project) {
+                    sendToRenderer('ai-panel-open', { type: 'project' });
+                    // Send a custom event to activate project mode
+                    if (_mainWindow?.webContents) {
+                        _mainWindow.webContents.executeJavaScript(`
+                            window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                                detail: {
+                                    id: ${JSON.stringify(result.project.id)},
+                                    name: ${JSON.stringify(result.project.name)},
+                                    path: ${JSON.stringify(result.project.path || expandedPath)},
+                                    branch: 'main'
+                                }
+                            }));
+                        `);
+                    }
+                }
+
+                return {
+                    success: true,
+                    project_name: projName,
+                    project_path: expandedPath,
+                    already_registered: result.alreadyRegistered || false,
+                    onidocs_created: ['architecture.md', 'scope.md', 'changelog.md', 'tasks.md', 'README.md'],
+                    message: result.alreadyRegistered
+                        ? `Project "${projName}" is already registered. Task list cleared for fresh start.`
+                        : `Project "${projName}" registered in Onicode. Template onidocs/ created.`,
+                    IMPORTANT_NEXT_STEPS: `This tool ONLY registered the project and created template docs. NO source code exists yet. You MUST now: 1) Call task_add to create your build plan. 2) Call task_update + create_file + run_command to ACTUALLY build the project files. 3) Do NOT respond with only text — you must make tool calls NOW to create package.json, source files, etc. The project directory is: ${expandedPath}`,
+                };
+            }
+
+            case 'memory_write': {
+                const { filename, content } = args;
+                const memoryModule = require('./memory');
+                const MEMORIES_DIR = path.join(os.homedir(), '.onicode', 'memories');
+                if (!fs.existsSync(MEMORIES_DIR)) fs.mkdirSync(MEMORIES_DIR, { recursive: true });
+                const filePath = path.join(MEMORIES_DIR, filename);
+                fs.writeFileSync(filePath, content, 'utf-8');
+                return { success: true, filename, size: content.length, message: `Memory "${filename}" saved.` };
+            }
+
+            case 'memory_append': {
+                const { filename, content } = args;
+                const MEMORIES_DIR2 = path.join(os.homedir(), '.onicode', 'memories');
+                if (!fs.existsSync(MEMORIES_DIR2)) fs.mkdirSync(MEMORIES_DIR2, { recursive: true });
+                const filePath2 = path.join(MEMORIES_DIR2, filename);
+                fs.appendFileSync(filePath2, '\n' + content, 'utf-8');
+                return { success: true, filename, appended: content.length, message: `Appended to memory "${filename}".` };
+            }
+
+            // ── Browser / Puppeteer Executors ──
+
+            case 'browser_navigate': {
+                const browserMod = require('./browser');
+                const result = await browserMod.navigate(args.url, {
+                    waitUntil: args.wait_until || 'networkidle2',
+                });
+                logger.tool('browser', `navigate → ${args.url}`, result);
+                return result;
+            }
+
+            case 'browser_screenshot': {
+                const browserMod = require('./browser');
+                const result = await browserMod.screenshot({
+                    name: args.name,
+                    selector: args.selector,
+                    fullPage: args.full_page,
+                });
+                logger.tool('browser', `screenshot → ${args.name}`, result);
+                return result;
+            }
+
+            case 'browser_evaluate': {
+                const browserMod = require('./browser');
+                const result = await browserMod.evaluate(args.script);
+                logger.tool('browser', 'evaluate', result);
+                return result;
+            }
+
+            case 'browser_click': {
+                const browserMod = require('./browser');
+                const result = await browserMod.click(args.selector);
+                logger.tool('browser', `click → ${args.selector}`, result);
+                return result;
+            }
+
+            case 'browser_type': {
+                const browserMod = require('./browser');
+                const result = await browserMod.type(args.selector, args.text);
+                logger.tool('browser', `type → ${args.selector}`, result);
+                return result;
+            }
+
+            case 'browser_console_logs': {
+                const browserMod = require('./browser');
+                const logs = browserMod.getConsoleLogs({
+                    type: args.type,
+                    limit: args.limit,
+                });
+                return { success: true, logs, count: logs.length };
+            }
+
+            case 'browser_close': {
+                const browserMod = require('./browser');
+                const result = await browserMod.closeBrowser();
+                logger.tool('browser', 'close');
+                return result;
+            }
+
+            // ── Task Management Executors ──
+
+            case 'task_add': {
+                const task = taskManager.addTask(args.content, args.priority || 'medium');
+                const summary = taskManager.getSummary();
+                const result = { success: true, task, summary };
+                // If we have tasks but none are in-progress or done, remind AI to start executing
+                if (summary.total > 0 && summary.done === 0 && summary.inProgress === 0) {
+                    result.REMINDER = 'Tasks are just a plan. You MUST now call task_update to mark a task in_progress, then call create_file and run_command to ACTUALLY build the project files. Do not respond with only text.';
+                }
+                return result;
+            }
+
+            case 'task_update': {
+                const updates = {};
+                if (args.status) updates.status = args.status;
+                if (args.content) updates.content = args.content;
+                const task = taskManager.updateTask(args.id, updates);
+                if (task.error) return task;
+                return { success: true, task, summary: taskManager.getSummary() };
+            }
+
+            case 'task_list': {
+                const filter = {};
+                if (args.status) filter.status = args.status;
+                const tasks = taskManager.listTasks(filter);
+                return { success: true, ...taskManager.getSummary() };
+            }
+
+            case 'task_clear': {
+                taskManager.clear();
+                return { success: true, message: 'All tasks cleared.' };
+            }
+
+            // ── Logging / Context Executors ──
+
+            case 'get_system_logs': {
+                const { getRecentLogs } = require('./logger');
+                const entries = getRecentLogs({
+                    level: args.level,
+                    category: args.category,
+                    limit: args.limit,
+                });
+                return { success: true, entries, count: entries.length };
+            }
+
+            case 'get_changelog': {
+                const format = args.format || 'markdown';
+                if (format === 'json') {
+                    return { success: true, changes: fileContext.getChangelog(), summary: fileContext.getSummary() };
+                }
+                return { success: true, changelog: fileContext.generateChangelogMarkdown(), summary: fileContext.getSummary() };
+            }
+
+            // ── Web Tools Executors ──
+
+            case 'webfetch': {
+                const { url, max_length = 8000 } = args;
+                if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+                    return { error: 'URL must start with http:// or https://' };
+                }
+                const mod = url.startsWith('https:') ? require('https') : require('http');
+                return new Promise((resolve) => {
+                    const req = mod.get(url, { headers: { 'User-Agent': 'Onicode/1.0' }, timeout: 15000 }, (res) => {
+                        // Follow redirects
+                        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                            const redirectMod = res.headers.location.startsWith('https:') ? require('https') : require('http');
+                            redirectMod.get(res.headers.location, { headers: { 'User-Agent': 'Onicode/1.0' }, timeout: 15000 }, (res2) => {
+                                let data = '';
+                                res2.on('data', (c) => { data += c; if (data.length > max_length * 2) res2.destroy(); });
+                                res2.on('end', () => {
+                                    const text = data.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+                                    resolve({ success: true, url, status: res2.statusCode, content: text.slice(0, max_length), length: text.length, truncated: text.length > max_length });
+                                });
+                            }).on('error', (e) => resolve({ error: `Redirect fetch failed: ${e.message}` }));
+                            return;
+                        }
+                        let data = '';
+                        res.on('data', (c) => { data += c; if (data.length > max_length * 2) res.destroy(); });
+                        res.on('end', () => {
+                            const text = data.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+                            resolve({ success: true, url, status: res.statusCode, content: text.slice(0, max_length), length: text.length, truncated: text.length > max_length });
+                        });
+                    });
+                    req.on('error', (e) => resolve({ error: `Fetch failed: ${e.message}` }));
+                    req.on('timeout', () => { req.destroy(); resolve({ error: 'Request timed out (15s)' }); });
+                });
+            }
+
+            case 'websearch': {
+                const { query, max_results = 5 } = args;
+                // Use DuckDuckGo HTML lite (no API key needed)
+                const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+                const httpsMod = require('https');
+                return new Promise((resolve) => {
+                    httpsMod.get(searchUrl, { headers: { 'User-Agent': 'Onicode/1.0' }, timeout: 10000 }, (res) => {
+                        let data = '';
+                        res.on('data', (c) => { data += c; });
+                        res.on('end', () => {
+                            // Parse DuckDuckGo HTML results
+                            const results = [];
+                            const resultRegex = /<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+                            let match;
+                            while ((match = resultRegex.exec(data)) !== null && results.length < max_results) {
+                                const href = match[1].replace(/\/\/duckduckgo\.com\/l\/\?uddg=/, '').split('&')[0];
+                                const title = match[2].replace(/<[^>]+>/g, '').trim();
+                                const snippet = match[3].replace(/<[^>]+>/g, '').trim();
+                                try {
+                                    results.push({ title, url: decodeURIComponent(href), snippet });
+                                } catch {
+                                    results.push({ title, url: href, snippet });
+                                }
+                            }
+                            if (results.length === 0) {
+                                // Fallback: try simpler parsing
+                                const linkRegex = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
+                                while ((match = linkRegex.exec(data)) !== null && results.length < max_results) {
+                                    results.push({ title: match[2].trim(), url: match[1], snippet: '' });
+                                }
+                            }
+                            resolve({ success: true, query, results, total: results.length });
+                        });
+                    }).on('error', (e) => resolve({ error: `Search failed: ${e.message}` }));
+                });
+            }
+
+            // ── File Discovery Executors ──
+
+            case 'glob_files': {
+                const { pattern, search_path, max_results = 50 } = args;
+                if (!fs.existsSync(search_path)) {
+                    return { error: `Path not found: ${search_path}` };
+                }
+                // Use find command with -name pattern, respecting .gitignore via git ls-files or find
+                try {
+                    // Try git ls-files first (respects .gitignore)
+                    let cmd;
+                    const isGitRepo = fs.existsSync(path.join(search_path, '.git'));
+                    if (isGitRepo) {
+                        cmd = `cd ${JSON.stringify(search_path)} && git ls-files --cached --others --exclude-standard ${JSON.stringify(pattern)} 2>/dev/null | head -${max_results}`;
+                    } else {
+                        // Fallback: use find with common exclusions
+                        const findPattern = pattern.replace(/\*\*/g, '').replace(/^\*\./, '*.'); // Simplify for find
+                        cmd = `find ${JSON.stringify(search_path)} -name ${JSON.stringify(findPattern)} -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/.next/*" 2>/dev/null | head -${max_results}`;
+                    }
+                    const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, maxBuffer: 512 * 1024 });
+                    const files = output.trim().split('\n').filter(Boolean).map(f => {
+                        const fullPath = isGitRepo ? path.join(search_path, f) : f;
+                        let stat = null;
+                        try { stat = fs.statSync(fullPath); } catch { }
+                        return { path: fullPath, relative: path.relative(search_path, fullPath), size: stat?.size, modified: stat?.mtime?.toISOString() };
+                    });
+                    return { success: true, pattern, search_path, files, total: files.length };
+                } catch (err) {
+                    return { error: `Glob failed: ${err.message?.slice(0, 200)}` };
+                }
+            }
+
+            // ── Codebase Exploration Executor ──
+
+            case 'explore_codebase': {
+                const { project_path, focus = 'all' } = args;
+                if (!fs.existsSync(project_path)) {
+                    return { error: `Path not found: ${project_path}` };
+                }
+                const result = { project_path, analysis: {} };
+
+                // Structure: list top-level files and dirs
+                if (focus === 'all' || focus === 'structure') {
+                    try {
+                        const entries = fs.readdirSync(project_path, { withFileTypes: true });
+                        result.analysis.structure = entries
+                            .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules')
+                            .map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }))
+                            .sort((a, b) => a.type === 'dir' ? -1 : 1);
+                        // Count files recursively (fast estimate)
+                        try {
+                            const countOut = execSync(`find ${JSON.stringify(project_path)} -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | wc -l`, { encoding: 'utf-8', timeout: 5000 });
+                            result.analysis.total_files = parseInt(countOut.trim()) || 0;
+                        } catch { }
+                    } catch (e) { result.analysis.structure_error = e.message; }
+                }
+
+                // Dependencies: read package.json, requirements.txt, go.mod, Cargo.toml, etc.
+                if (focus === 'all' || focus === 'dependencies') {
+                    const depFiles = ['package.json', 'requirements.txt', 'go.mod', 'Cargo.toml', 'Gemfile', 'pom.xml', 'build.gradle', 'pyproject.toml', 'composer.json'];
+                    result.analysis.dependencies = {};
+                    for (const df of depFiles) {
+                        const dfPath = path.join(project_path, df);
+                        if (fs.existsSync(dfPath)) {
+                            try {
+                                const content = fs.readFileSync(dfPath, 'utf-8');
+                                if (df === 'package.json') {
+                                    const pkg = JSON.parse(content);
+                                    result.analysis.dependencies.npm = {
+                                        name: pkg.name, version: pkg.version,
+                                        deps: Object.keys(pkg.dependencies || {}),
+                                        devDeps: Object.keys(pkg.devDependencies || {}),
+                                        scripts: Object.keys(pkg.scripts || {}),
+                                    };
+                                } else {
+                                    result.analysis.dependencies[df] = content.slice(0, 2000);
+                                }
+                            } catch { }
+                        }
+                    }
+                }
+
+                // Entrypoints: common entry files
+                if (focus === 'all' || focus === 'entrypoints') {
+                    const entryFiles = [
+                        'src/index.ts', 'src/index.js', 'src/main.ts', 'src/main.js', 'src/app.ts', 'src/app.js',
+                        'src/App.tsx', 'src/App.jsx', 'app/page.tsx', 'app/layout.tsx', 'pages/index.tsx', 'pages/index.js',
+                        'index.ts', 'index.js', 'main.ts', 'main.js', 'server.ts', 'server.js', 'app.py', 'main.py',
+                        'main.go', 'src/main.rs', 'src/lib.rs',
+                    ];
+                    result.analysis.entrypoints = entryFiles
+                        .filter(f => fs.existsSync(path.join(project_path, f)))
+                        .map(f => {
+                            const content = fs.readFileSync(path.join(project_path, f), 'utf-8');
+                            return { path: f, lines: content.split('\n').length, preview: content.slice(0, 500) };
+                        });
+                }
+
+                // Config: tsconfig, .env, tailwind, etc.
+                if (focus === 'all' || focus === 'config') {
+                    const configFiles = [
+                        'tsconfig.json', 'tailwind.config.js', 'tailwind.config.ts', 'next.config.js', 'next.config.ts',
+                        'vite.config.ts', 'vite.config.js', '.env', '.env.local', '.env.example',
+                        'prisma/schema.prisma', 'drizzle.config.ts', 'eslint.config.js', '.eslintrc.json',
+                    ];
+                    result.analysis.config = configFiles
+                        .filter(f => fs.existsSync(path.join(project_path, f)))
+                        .map(f => f);
+                }
+
+                // Tech stack detection
+                result.analysis.tech_stack = [];
+                if (result.analysis.dependencies?.npm) {
+                    const deps = [...(result.analysis.dependencies.npm.deps || []), ...(result.analysis.dependencies.npm.devDeps || [])];
+                    if (deps.includes('next')) result.analysis.tech_stack.push('Next.js');
+                    if (deps.includes('react')) result.analysis.tech_stack.push('React');
+                    if (deps.includes('vue')) result.analysis.tech_stack.push('Vue');
+                    if (deps.includes('svelte')) result.analysis.tech_stack.push('Svelte');
+                    if (deps.includes('express')) result.analysis.tech_stack.push('Express');
+                    if (deps.includes('prisma') || deps.includes('@prisma/client')) result.analysis.tech_stack.push('Prisma');
+                    if (deps.includes('tailwindcss')) result.analysis.tech_stack.push('Tailwind CSS');
+                    if (deps.includes('typescript')) result.analysis.tech_stack.push('TypeScript');
+                    if (deps.includes('drizzle-orm')) result.analysis.tech_stack.push('Drizzle');
+                }
+                if (fs.existsSync(path.join(project_path, 'requirements.txt')) || fs.existsSync(path.join(project_path, 'pyproject.toml'))) result.analysis.tech_stack.push('Python');
+                if (fs.existsSync(path.join(project_path, 'go.mod'))) result.analysis.tech_stack.push('Go');
+                if (fs.existsSync(path.join(project_path, 'Cargo.toml'))) result.analysis.tech_stack.push('Rust');
+
+                return result;
+            }
+
             default:
                 return { error: `Unknown tool: ${name}` };
         }
     } catch (err) {
+        logger.error('tool-exec', `${name} failed: ${err.message}`);
         return { error: `Tool execution error: ${err.message}` };
     }
 }
@@ -846,4 +1788,5 @@ module.exports = {
     listAgents,
     setMainWindow,
     getTerminalSessions,
+    taskManager,
 };

@@ -200,8 +200,11 @@ function registerProjectIPC(ipcMain, getWindow) {
         const project = projects.find((p) => p.id === projectId);
         if (!project) return { error: 'Project not found' };
 
-        // Read onidocs if they exist
-        const onidocsPath = path.join(project.path, 'onidocs');
+        // Read onidocs if they exist (check both onidocs/ and .onidocs/)
+        let onidocsPath = path.join(project.path, 'onidocs');
+        if (!fs.existsSync(onidocsPath)) {
+            onidocsPath = path.join(project.path, '.onidocs');
+        }
         let docs = [];
         if (fs.existsSync(onidocsPath)) {
             try {

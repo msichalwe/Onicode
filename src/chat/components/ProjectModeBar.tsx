@@ -1,9 +1,9 @@
 /**
  * ProjectModeBar — Top bar shown when a project is active.
- * Displays project name, quick actions (Open, Hand off, Commit), and diff stats.
+ * Displays project name, quick actions (Open, Hand off, Commit), project switcher dropdown, and diff stats.
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 
 export interface ActiveProject {
     id: string;
@@ -19,10 +19,37 @@ interface ProjectModeBarProps {
     onClose: () => void;
     onOpen?: () => void;
     onCommit?: () => void;
+    onSwitchProject?: (project: ActiveProject) => void;
 }
 
-export default function ProjectModeBar({ project, onClose, onOpen, onCommit }: ProjectModeBarProps) {
+export default function ProjectModeBar({ project, onClose, onOpen, onCommit, onSwitchProject }: ProjectModeBarProps) {
     const isElectron = typeof window !== 'undefined' && window.onicode;
+    const [showDropdown, setShowDropdown] = useState(false);
+    const [projects, setProjects] = useState<ActiveProject[]>([]);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+
+    // Load available projects for dropdown
+    useEffect(() => {
+        if (!isElectron) return;
+        window.onicode!.listProjects().then((result: unknown) => {
+            const res = result as { projects?: Array<{ id: string; name: string; path: string }> };
+            if (res.projects) {
+                setProjects(res.projects.map(p => ({ id: p.id, name: p.name, path: p.path })));
+            }
+        }).catch(() => { });
+    }, [isElectron, project.id]);
+
+    // Close dropdown when clicking outside
+    useEffect(() => {
+        if (!showDropdown) return;
+        const handler = (e: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+                setShowDropdown(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [showDropdown]);
 
     const handleOpen = useCallback(() => {
         if (onOpen) {
@@ -39,15 +66,67 @@ export default function ProjectModeBar({ project, onClose, onOpen, onCommit }: P
     }, [onCommit]);
 
     const handleHandOff = useCallback(() => {
-        // Open terminal panel for the project
         window.dispatchEvent(new CustomEvent('onicode-panel', {
             detail: { type: 'terminal', data: { cwd: project.path } }
         }));
     }, [project.path]);
 
+    const handleSwitchProject = useCallback((p: ActiveProject) => {
+        setShowDropdown(false);
+        if (onSwitchProject && p.id !== project.id) {
+            onSwitchProject(p);
+        }
+    }, [onSwitchProject, project.id]);
+
     return (
         <div className="project-mode-bar">
-            <span className="project-mode-name">{project.name}</span>
+            {/* Project name with dropdown trigger */}
+            <div className="project-mode-selector" ref={dropdownRef}>
+                <button
+                    className="project-mode-name-btn"
+                    onClick={() => setShowDropdown(!showDropdown)}
+                    title="Switch project"
+                >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                    </svg>
+                    <span className="project-mode-name">{project.name}</span>
+                    <svg className="project-mode-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                </button>
+
+                {showDropdown && (
+                    <div className="project-dropdown">
+                        <div className="project-dropdown-header">Switch Project</div>
+                        {projects.filter(p => p.id !== project.id).length === 0 ? (
+                            <div className="project-dropdown-empty">No other projects</div>
+                        ) : (
+                            projects.filter(p => p.id !== project.id).map(p => (
+                                <button
+                                    key={p.id}
+                                    className="project-dropdown-item"
+                                    onClick={() => handleSwitchProject(p)}
+                                >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                                    </svg>
+                                    <span>{p.name}</span>
+                                </button>
+                            ))
+                        )}
+                        <div className="project-dropdown-divider" />
+                        <button className="project-dropdown-item project-dropdown-exit" onClick={onClose}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <line x1="18" y1="6" x2="6" y2="18" />
+                                <line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                            <span>Exit Project Mode</span>
+                        </button>
+                    </div>
+                )}
+            </div>
+
             {project.gitBranch && (
                 <span className="project-mode-id">{project.gitBranch}</span>
             )}

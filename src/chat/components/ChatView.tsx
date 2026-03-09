@@ -3,6 +3,8 @@ import { SLASH_COMMANDS } from '../commands/registry';
 import { executeCommand } from '../commands/executor';
 import { buildSystemPrompt } from '../ai/systemPrompt';
 import QuestionDialog, { parseQuestions, isQuestionMessage } from './QuestionDialog';
+import type { ChatScope } from '../App';
+import type { ActiveProject } from './ProjectModeBar';
 
 // ══════════════════════════════════════════
 //  Types
@@ -41,6 +43,9 @@ export interface Conversation {
     messages: Message[];
     createdAt: number;
     updatedAt: number;
+    scope?: ChatScope;
+    projectId?: string;
+    projectName?: string;
 }
 
 interface ProviderConfig {
@@ -123,7 +128,13 @@ export function requestPanel(type: string, data?: Record<string, unknown>) {
 //  Component
 // ══════════════════════════════════════════
 
-export default function ChatView() {
+interface ChatViewProps {
+    scope?: ChatScope;
+    activeProject?: ActiveProject | null;
+    onChangeScope?: (scope: ChatScope) => void;
+}
+
+export default function ChatView({ scope = 'general', activeProject, onChangeScope }: ChatViewProps) {
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
     const [activeConvId, setActiveConvId] = useState<string | null>(() => {
@@ -173,23 +184,35 @@ export default function ChatView() {
                 convs[idx].messages = msgs;
                 convs[idx].updatedAt = Date.now();
                 if (msgs.length === 1) convs[idx].title = generateTitle(msgs[0].content);
+                // Update scope info
+                convs[idx].scope = scope;
+                if (scope === 'project' && activeProject) {
+                    convs[idx].projectId = activeProject.id;
+                    convs[idx].projectName = activeProject.name;
+                }
             }
         } else {
             id = generateId();
-            convs.unshift({
+            const newConv: Conversation = {
                 id,
                 title: generateTitle(msgs[0].content),
                 messages: msgs,
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
-            });
+                scope,
+            };
+            if (scope === 'project' && activeProject) {
+                newConv.projectId = activeProject.id;
+                newConv.projectName = activeProject.name;
+            }
+            convs.unshift(newConv);
         }
 
         saveConversations(convs);
         setConversations(convs);
         localStorage.setItem(ACTIVE_CONV_KEY, id);
         return id;
-    }, []);
+    }, [scope, activeProject]);
 
     // ── Scroll ──
     const scrollToBottom = useCallback(() => {
@@ -225,11 +248,27 @@ export default function ChatView() {
     // ── Auto-open panels when AI requests (e.g. terminal on run_command) ──
     useEffect(() => {
         if (!window.onicode?.onPanelOpen) return;
-        const unsub = window.onicode.onPanelOpen((data) => {
+        const unsub = window.onicode.onPanelOpen((data: { type: string }) => {
             requestPanel(data.type);
         });
         return unsub;
     }, []);
+
+    // ── Auto-update conversation title from AI-generated title ──
+    useEffect(() => {
+        if (!window.onicode?.onSessionTitle) return;
+        const unsub = window.onicode.onSessionTitle((title: string) => {
+            if (!activeConvId || !title) return;
+            const convs = loadConversations();
+            const idx = convs.findIndex(c => c.id === activeConvId);
+            if (idx >= 0) {
+                convs[idx].title = title;
+                saveConversations(convs);
+                setConversations(convs);
+            }
+        });
+        return unsub;
+    }, [activeConvId]);
 
     // ── Send via Electron IPC (with agentic tool-call support) ──
     const toolStepsRef = useRef<ToolStep[]>([]);
@@ -453,10 +492,28 @@ export default function ChatView() {
             attachmentContext = parts.join('');
         }
 
+        // Load core memories for injection into system prompt
+        let memories: { soul?: string | null; user?: string | null; longTerm?: string | null; dailyToday?: string | null; dailyYesterday?: string | null } | undefined;
+        if (isElectron) {
+            try {
+                const memResult = await window.onicode!.memoryLoadCore();
+                if (memResult.success && memResult.memories) {
+                    memories = {
+                        soul: memResult.memories.soul,
+                        user: memResult.memories.user,
+                        longTerm: memResult.memories.longTerm,
+                        dailyToday: memResult.memories.dailyToday,
+                        dailyYesterday: memResult.memories.dailyYesterday,
+                    };
+                }
+            } catch { /* memory load failed, proceed without */ }
+        }
+
         // Build context-aware system prompt
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
         const systemContent = buildSystemPrompt({
             customSystemPrompt: customPrompt,
+            memories,
         });
 
         const apiMessages = [
@@ -573,6 +630,13 @@ export default function ChatView() {
         setAttachments([]);
     }, []);
 
+    // ── Listen for external new-chat signal (from project switch / exit) ──
+    useEffect(() => {
+        const handler = () => newChat();
+        window.addEventListener('onicode-new-chat', handler);
+        return () => window.removeEventListener('onicode-new-chat', handler);
+    }, [newChat]);
+
     // ── Execute slash commands (delegated to executor module) ──
     const handleCommand = useCallback(async (cmd: string): Promise<boolean> => {
         const result = await executeCommand(cmd, {
@@ -684,17 +748,9 @@ export default function ChatView() {
         if (activeConvId === convId) newChat();
     }, [activeConvId, newChat]);
 
-    // ── Render tool steps (Cascade-like agentic UI) ──
+    // ── Render tool steps (grouped, no emojis) ──
     const renderToolSteps = (steps: ToolStep[]) => {
         if (!steps || steps.length === 0) return null;
-
-        const toolIcons: Record<string, string> = {
-            read_file: '📄', edit_file: '✏️', create_file: '📝', delete_file: '🗑️',
-            list_directory: '📁', search_files: '🔍', run_command: '⚡',
-            create_restore_point: '💾', restore_to_point: '⏪', list_restore_points: '📋',
-            get_context_summary: '🧠', spawn_sub_agent: '🤖', get_agent_status: '📊',
-            multi_edit: '✏️',
-        };
 
         const toolLabel = (name: string) => {
             return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -713,27 +769,78 @@ export default function ChatView() {
             return '';
         };
 
+        // Group consecutive same-name tool calls
+        interface GroupedStep {
+            name: string;
+            steps: ToolStep[];
+            count: number;
+            allDone: boolean;
+            anyRunning: boolean;
+            anyError: boolean;
+        }
+        const grouped: GroupedStep[] = [];
+        for (const step of steps) {
+            const last = grouped[grouped.length - 1];
+            if (last && last.name === step.name && step.name !== 'run_command' && step.name !== 'create_file') {
+                last.steps.push(step);
+                last.count++;
+                last.allDone = last.allDone && step.status === 'done';
+                last.anyRunning = last.anyRunning || step.status === 'running';
+                last.anyError = last.anyError || step.status === 'error';
+            } else {
+                grouped.push({
+                    name: step.name,
+                    steps: [step],
+                    count: 1,
+                    allDone: step.status === 'done',
+                    anyRunning: step.status === 'running',
+                    anyError: step.status === 'error',
+                });
+            }
+        }
+
         return (
             <div className="tool-steps">
-                {steps.map((step) => (
-                    <div key={step.id} className={`tool-step tool-step-${step.status}`}>
-                        <div className="tool-step-header">
-                            <span className="tool-step-icon">{toolIcons[step.name] || '🔧'}</span>
-                            <span className="tool-step-name">{toolLabel(step.name)}</span>
-                            <span className="tool-step-detail">{formatArgs(step.name, step.args)}</span>
-                            <span className={`tool-step-status ${step.status}`}>
-                                {step.status === 'running' ? (
-                                    <span className="tool-spinner" />
-                                ) : step.status === 'done' ? '✓' : '✗'}
-                            </span>
-                        </div>
-                        {step.result && 'error' in step.result && (
-                            <div className="tool-step-error">
-                                {String(step.result.error)}
+                {grouped.map((group, gi) => {
+                    // Collapsed group (e.g., "Task Add (x5)")
+                    if (group.count > 1) {
+                        const status = group.anyRunning ? 'running' : group.anyError ? 'error' : group.allDone ? 'done' : 'running';
+                        return (
+                            <div key={gi} className={`tool-step tool-step-${status}`}>
+                                <div className="tool-step-header">
+                                    <span className="tool-step-name">{toolLabel(group.name)}</span>
+                                    <span className="tool-step-detail">({group.count}x)</span>
+                                    <span className={`tool-step-status ${status}`}>
+                                        {status === 'running' ? (
+                                            <span className="tool-spinner" />
+                                        ) : status === 'done' ? '\u2713' : '\u2717'}
+                                    </span>
+                                </div>
                             </div>
-                        )}
-                    </div>
-                ))}
+                        );
+                    }
+
+                    // Single step
+                    const step = group.steps[0];
+                    return (
+                        <div key={step.id} className={`tool-step tool-step-${step.status}`}>
+                            <div className="tool-step-header">
+                                <span className="tool-step-name">{toolLabel(step.name)}</span>
+                                <span className="tool-step-detail">{formatArgs(step.name, step.args)}</span>
+                                <span className={`tool-step-status ${step.status}`}>
+                                    {step.status === 'running' ? (
+                                        <span className="tool-spinner" />
+                                    ) : step.status === 'done' ? '\u2713' : '\u2717'}
+                                </span>
+                            </div>
+                            {step.result && 'error' in step.result && (
+                                <div className="tool-step-error">
+                                    {String(step.result.error)}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
             </div>
         );
     };
@@ -851,12 +958,17 @@ export default function ChatView() {
                 </div>
             ) : (
                 <>
-                    <div className="chat-header">
-                        <h1>Onicode</h1>
-                        <p>AI Development Environment</p>
-                        <div className="chat-header-actions">
+                    <div className="chat-topbar">
+                        <div className="chat-topbar-brand">
+                            <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
+                                <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="var(--accent)" opacity="0.9" />
+                                <path d="M24 14l8 6v12l-8-4V14z" fill="var(--accent)" opacity="0.6" />
+                            </svg>
+                            <span className="chat-topbar-title">Onicode</span>
+                        </div>
+                        <div className="chat-topbar-actions">
                             <button className="header-action-btn" onClick={() => setShowHistory(true)} title="History">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                     <circle cx="12" cy="12" r="10" />
                                     <polyline points="12 6 12 12 16 14" />
                                 </svg>
@@ -1001,12 +1113,46 @@ export default function ChatView() {
                     </div>
                 )}
 
+                {/* Scope tag bar */}
+                {scope !== 'general' && (
+                    <div className="scope-tag-bar">
+                        <div className={`scope-tag scope-tag-${scope}`}>
+                            {scope === 'project' ? (
+                                <>
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                                    </svg>
+                                    <span>Project: {activeProject?.name || 'Unknown'}</span>
+                                </>
+                            ) : (
+                                <>
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                                        <polyline points="14 2 14 8 20 8" />
+                                    </svg>
+                                    <span>Documents</span>
+                                </>
+                            )}
+                            <button
+                                className="scope-tag-close"
+                                onClick={() => onChangeScope?.('general')}
+                                title="Exit to general chat (starts new chat)"
+                            >
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <line x1="18" y1="6" x2="6" y2="18" />
+                                    <line x1="6" y1="6" x2="18" y2="18" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 <div className="input-wrapper">
                     <input
                         ref={fileInputRef}
                         type="file"
                         multiple
-                        style={{ display: 'none' }}
+                        className="file-input-hidden"
                         onChange={handleFileChange}
                     />
                     <button className="attach-btn" onClick={handleFileSelect} title="Attach file" disabled={isTyping}>
@@ -1020,7 +1166,7 @@ export default function ChatView() {
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
                         onPaste={handlePaste}
-                        placeholder="Ask Onicode anything... (type / for commands)"
+                        placeholder={scope === 'project' ? `Ask about ${activeProject?.name || 'this project'}...` : 'Ask Onicode anything... (type / for commands)'}
                         rows={1}
                         disabled={isTyping}
                     />

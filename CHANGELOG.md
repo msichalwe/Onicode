@@ -4,31 +4,210 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.8.0] — 2025-03-09
+
+### Gap Closure: OpenCode/Cascade Parity — New Tools, Context Compaction, Permissions, Agent Modes
+
+#### Added
+
+- **`webfetch` tool** — Fetch and read web page content. Strips HTML to text, follows redirects, 15s timeout. Agent can now look up documentation and API references.
+- **`websearch` tool** — Search the web via DuckDuckGo HTML lite (no API key needed). Returns titles, URLs, snippets.
+- **`glob_files` tool** — Find files by glob pattern using `git ls-files` (respects .gitignore) or `find` fallback. Sorted by modification time.
+- **`explore_codebase` tool** — Fast read-only codebase analysis: project structure, dependencies (package.json parsing), entrypoints detection, config file discovery, tech stack auto-detection (Next.js, React, Vue, Prisma, Tailwind, TypeScript, Python, Go, Rust, etc.).
+- **Context compaction** — `compactConversation()` auto-summarizes old messages when conversation exceeds ~80% of estimated token budget. Keeps system prompt + first user message + summary of tools/files + last 10 messages. Wired into agentic loop after round 3.
+- **AGENTS.md auto-generation** — `init_project` now creates an `AGENTS.md` file in the project root (like OpenCode's `/init`). Contains project overview, tech stack, directory hints, coding conventions placeholder.
+- **Session title auto-generation** — `generateSessionTitle()` fires a lightweight non-streaming AI call on the first user message. Sends `ai-session-title` IPC event to renderer.
+- **Permissions system** — `DEFAULT_PERMISSIONS` map with `allow`/`ask`/`deny` per tool. `loadProjectPermissions()` reads `.onicode/config.json` for per-project overrides. `checkPermission()` lookup. IPC handlers: `agent-set-mode`, `agent-get-mode`.
+- **Plan agent mode** — `setAgentMode('plan')` denies all write tools (edit_file, create_file, delete_file, multi_edit, init_project), sets run_command to `ask`. `setAgentMode('build')` restores full access.
+- **Config file support** — `.onicode/config.json` in project root can override permissions. Read by `loadProjectPermissions()`.
+- **Preload bindings** — `agentSetMode()`, `agentGetMode()`, `onAgentMode()`, `onSessionTitle()`.
+
+#### Changed
+
+- **`search_files`** — Now prefers ripgrep (`rg`) which respects .gitignore by default. Falls back to grep with expanded exclusion list (.next, build, coverage).
+- **`list_directory`** — Expanded skip list: node_modules, .git, dist, .next, build, coverage, \_\_pycache\_\_, .cache, .turbo.
+- **`systemPrompt.ts`** — Added documentation for webfetch, websearch, glob_files, explore_codebase tools.
+
+---
+
+## [0.7.3] — 2025-03-09
+
+### Agentic Loop Auto-Continuation, Tool Step Grouping, No Emojis
+
+#### Fixed
+
+- **Agentic loop stops after init_project + task_add** — The fundamental architecture bug: the model would call `init_project` + `task_add` x5, then respond with text-only ("Starting implementation...") and the loop would exit because `hasToolCalls` was false. **Fixed by adding auto-continuation** (inspired by claude-code/opencode pattern): when the model responds text-only but `TaskManager` has pending tasks, inject a continuation prompt ("You have N pending tasks but have not created any files yet. You MUST call create_file now.") and loop back. Up to 5 auto-continues before giving up.
+- **Same fix applied to ChatGPT Responses API backend** — Both `streamOpenAI()` and `streamChatGPTBackend()` now have identical auto-continuation logic.
+
+#### Changed
+
+- **`MAX_TOOL_ROUNDS` increased from 25 to 50** — Supports 10+ minute agentic sessions with many file creates and commands.
+- **Tool steps: emojis removed** — Replaced all emoji icons (📄, ✏️, 📝, etc.) with clean text-only display. Tool names shown as "Create File", "Run Command", etc.
+- **Tool steps: consecutive calls grouped** — 5x `task_add` now shows as "Task Add (5x) ✓" instead of 5 separate lines. `create_file` and `run_command` are kept ungrouped since their details (filename, command) are important.
+- **`index.js`** — `streamOpenAI()` and `streamChatGPTBackend()` track `toolsUsed` set and `autoContinueCount`. Auto-continue injects context-aware continuation prompt based on whether `create_file`/`run_command` have been called yet.
+- **`ChatView.tsx`** — `renderToolSteps()` groups consecutive same-name steps into collapsed rows with count badges. No emoji icons.
+- **`index.css`** — Removed `.tool-step-icon` class (no longer needed).
+
+---
+
+## [0.7.2] — 2025-03-09
+
+### Compact Chat Top Bar, Anti-Hallucination Fix (init_project + task_add loop)
+
+#### Fixed
+
+- **AI calls init_project + task_add but NEVER creates files** — The model would call `init_project`, add 6 tasks with `task_add`, then respond with "Starting implementation now..." and stop — no `create_file` or `run_command` ever called. Fixed via three-pronged approach:
+  1. **`init_project` result** now includes `IMPORTANT_NEXT_STEPS` field explicitly telling the model that no source code exists and it must call `create_file` next.
+  2. **`task_add` result** includes `REMINDER` field when tasks exist but none are in-progress, telling the model to start executing with `create_file`/`run_command`.
+  3. **System prompt** rewritten with explicit 12-step build sequence showing exactly which tool calls constitute "building" (steps 4-7: `create_file` calls).
+- **AI re-initializes project on every "start" message** — Would call `init_project` 3 times, creating 19 duplicate tasks. Fixed: `init_project` now auto-clears stale tasks via `taskManager.clear()`. System prompt adds continuation rules: "start"/"build"/"continue" → call `task_list`, not `init_project`.
+- **Tasks accumulate across init attempts** — `TaskManager.clear()` now notifies renderer so UI resets to 0.
+- **System prompt referenced `.onidocs/`** — Updated to `onidocs/` (no dot prefix).
+
+#### Changed
+
+- **Chat header → compact top bar** — Replaced centered "Onicode / AI Development Environment" header block with slim single-line bar: brand logo + title left, history + New Chat right. Saves ~60px vertical.
+- **`systemPrompt.ts`** — Rewrote "ACT, DON'T TALK" section with specific forbidden patterns. Rewrote Phase 2 with numbered 12-step build sequence. Added continuation rules. Added golden rule: "If you haven't called create_file at least 5 times, you haven't built anything."
+- **`aiTools.js`** — `init_project` clears tasks, returns `IMPORTANT_NEXT_STEPS`. `task_add` returns `REMINDER` when no tasks executing. `TaskManager.clear()` notifies renderer.
+- **`ChatView.tsx`** — `.chat-header` → `.chat-topbar` with inline brand SVG + actions row.
+- **`index.css`** — `.chat-header` → `.chat-topbar` flex row. `.chat-header-actions` → `.chat-topbar-actions`.
+
+---
+
+## [0.7.1] — 2025-03-09
+
+### Bug Fixes: Project Init, Task Sync, Chat Visibility, Tool Timeout
+
+#### Fixed
+
+- **Chat view hidden in project mode** — Replaced `position: absolute/relative` + `visibility` CSS toggling with simple `display: none/flex` for view layers. Eliminates flex layout collapse that hid the chat when entering project mode.
+- **init_project creates files in wrong directory** — AI tool was creating onidocs under `.onidocs/` (dot-prefix) but `project-get` IPC reads from `onidocs/` (no dot). Now uses `onidocs/` consistently and creates all standard template files (`architecture.md`, `scope.md`, `changelog.md`, `tasks.md`, `README.md`).
+- **Project files not showing in Projects view** — `project-get` IPC now checks both `onidocs/` and `.onidocs/` paths for backwards compatibility.
+- **Tasks not syncing to project sidebar** — `TaskManager` was in-memory only with no renderer communication. Now sends `ai-tasks-updated` IPC events on every add/update, with a new `tasks-list` IPC handler for initial load.
+- **Long-running tools timing out** — `run_command` default timeout increased from 30s to 120s. Prevents `npm install`, `npx create-next-app`, and similar commands from being killed prematurely.
+
+#### Added
+
+- **Real-time task display in ProjectWidget** — Right panel PROJECT widget now shows task progress bar (done/total with percentage) and a scrollable task list with status icons (✓ done, ▶ in-progress, ○ pending) and priority indicators (red left-border for high).
+- **Task IPC bindings** — `tasksList()` and `onTasksUpdated()` preload bindings. TypeScript `TaskItem` and `TaskSummary` global types.
+
+#### Changed
+
+- **`aiTools.js`** — `TaskManager._notifyRenderer()` pushes summary to renderer on every mutation. `init_project` creates `onidocs/` (no dot), `src/`, `README.md`, and 4 template docs matching `project-init` IPC.
+- **`projects.js`** — `project-get` handler checks both `onidocs/` and `.onidocs/` directories.
+- **`index.js`** — Imports `taskManager`, registers `tasks-list` IPC handler.
+- **`preload.js`** — Added `tasksList` and `onTasksUpdated` bindings.
+- **`window.d.ts`** — Added `TaskItem`, `TaskSummary` global interfaces and IPC method types.
+- **`RightPanel.tsx`** — `ProjectWidget` fetches tasks on mount, subscribes to real-time updates, renders progress bar and task list.
+- **`index.css`** — View layers use `display: none/flex`. Added task progress bar, task list, status icon, and priority CSS.
+
+---
+
+## [0.7.0] — 2025-03-09
+
+### Chat Scoping, Persistent AI Streaming, Project Switcher, Exit Warning
+
+#### Fixed
+
+- **AI streaming survives tab switches** — `ChatView` is now always mounted (hidden via CSS `display: none`) instead of unmounted/remounted on sidebar navigation. Streaming, tool execution, and chat state persist across tab changes.
+- **Project mode bar overlap** — Added `padding-top: calc(var(--titlebar-height) + 6px)` and `z-index: 50` so the project bar sits correctly below the native titlebar drag region without being obscured by window controls.
+
+#### Added
+
+- **Project dropdown switcher** — Click the project name in the project mode bar to open a dropdown listing all available projects. Switch between projects or exit project mode directly from the dropdown.
+- **Chat scoping** — Chats are now scoped to `general`, `project`, or `documents`. A colored scope tag appears above the input area showing the current scope (blue for project, purple for documents). Scope is persisted per conversation in localStorage.
+- **Exit project warning dialog** — Closing project mode now shows a confirmation dialog warning that a new general chat will start, with Cancel/Exit buttons.
+- **Scoped new chat** — Starting a new chat within a scoped mode inherits that scope. Exiting scope returns to general mode. Multiple project-scoped and general chats can coexist.
+- **`onicode-new-chat` event** — External signal for triggering new chat from App-level actions (project switch, exit project mode).
+
+#### Changed
+
+- **`App.tsx`** — Exports `ChatScope` and `View` types. ChatView always mounted in a `view-layer` div. Added `chatScope`, `showExitWarning` state. Project activation auto-sets scope to `project`. New callbacks: `requestExitProject`, `confirmExitProject`, `switchProject`, `changeChatScope`.
+- **`ProjectModeBar.tsx`** — Added `onSwitchProject` prop, project list dropdown with outside-click dismiss, "Exit Project Mode" option in dropdown.
+- **`ChatView.tsx`** — Accepts `scope`, `activeProject`, `onChangeScope` props. Conversations store `scope`, `projectId`, `projectName`. Input placeholder changes based on scope. Hidden file input uses CSS class instead of inline style.
+
+---
+
+## [0.6.0] — 2025-03-09
+
+### Task-Driven Agent Loop, Puppeteer Browser Testing, System Logger, Auto-Changelog
+
+#### Added
+
+- **System Logger** (`src/main/logger.js`) — Centralized structured logging for all AI actions, tool calls, command outputs, and errors. Persists daily `.jsonl` logs to `~/.onicode/logs/`. In-memory ring buffer (500 entries) with level filtering (DEBUG/INFO/TOOL/CMD/WARN/ERROR).
+- **Puppeteer Browser Automation** (`src/main/browser.js`) — Headless browser for testing web apps the AI creates. Tools: `browser_navigate`, `browser_screenshot`, `browser_evaluate`, `browser_click`, `browser_type`, `browser_console_logs`, `browser_close`. Console logs, page errors, and request failures captured automatically.
+- **Task Manager** — Built-in task management system for the AI agent loop. Tools: `task_add`, `task_update`, `task_list`, `task_clear`. AI creates a task list before work, executes one-by-one, checks completion, loops until done.
+- **Auto-Changelog** — `get_changelog()` tool generates markdown changelog from tracked file changes (created, modified, deleted with line counts).
+- **`get_system_logs` tool** — AI can query its own system logs to debug issues (filter by level, category, limit).
+- **Enhanced `FileContextTracker`** — Now tracks line-level additions/deletions per file, maintains ordered changelog of all file operations, and generates auto-changelog markdown.
+
+#### Changed
+
+- **System prompt overhaul** — Complete rewrite of AI workflow instructions:
+  - Task-driven agent loop: PLAN → EXECUTE → CHECK → DONE cycle
+  - Mandatory browser testing for web projects (navigate, check console, screenshot)
+  - Auto-changelog instructions (append to `.onidocs/changelog.md`)
+  - Enhanced error recovery with `get_system_logs` integration
+  - Full tools reference updated with all new tools
+- **Agentic loops** — Both `streamOpenAI` and `streamChatGPTBackend` now use structured `logger.toolCall` / `logger.toolResult` logging instead of raw `console.log`.
+- **`run_command` tool** — Now logs execution via `logger.cmdExec` with duration tracking.
+- **`create_file` tool** — Now passes content to `trackCreate` for accurate line counting in changelog.
+
+---
+
+## [0.5.0] — 2025-03-09
+
+### Memory System, Onboarding, Agent Loop, /init Enforcement
+
+#### Added
+
+- **Memory System (OpenClaw-inspired)** — Persistent AI memory stored in `~/.onicode/memories/`:
+  - `soul.md` — AI personality & behavior rules (always injected into system prompt)
+  - `user.md` — User preferences, name, coding style (always injected)
+  - `MEMORY.md` — Curated long-term memory (durable facts, decisions)
+  - `YYYY-MM-DD.md` — Daily append-only session logs (today + yesterday loaded)
+- **Memories sidebar tab** — New "Memory" view in sidebar with card UI for core memories and daily logs. View, edit, create, delete memory files.
+- **First-launch onboarding** — If `user.md` doesn't exist on startup, shows a modal dialog asking 4 questions (name, language, framework, code style). Saves to `user.md`. Skippable.
+- **`init_project` AI tool** — AI can now directly call `init_project` as a tool function (not just slash command). Registers project in Projects tab, creates `.onidocs/`, fires `onicode-project-activate` event to activate project mode bar.
+- **`memory_write` / `memory_append` AI tools** — AI can persist durable facts and session notes to memory files.
+- **Memory injection** — Core memories (soul.md, user.md, MEMORY.md, daily logs) are loaded and injected into the system prompt on every AI request.
+- **Memory compaction** — Heuristic compaction of older conversation messages, saving summaries to daily logs.
+- **Agent loop error recovery** — System prompt now instructs AI to read errors, fix and retry (up to 3 attempts), with diagnostic hints for ENOENT/EACCES errors in `run_command`.
+- **Memory IPC handlers** — Full CRUD for memory files: `memory-load-core`, `memory-ensure-defaults`, `memory-save-onboarding`, `memory-read`, `memory-write`, `memory-append`, `memory-list`, `memory-delete`, `memory-compact`.
+
+#### Changed
+
+- **System prompt Phase 2** — `init_project` is now **MANDATORY step 1** before any other tool call when creating a project. Explicit warning that skipping it means the project won't appear in Projects tab.
+- **`run_command` error responses** — Now include `error_code`, `recoverable` flag, and `suggestion` string for common failures (ENOENT, EACCES).
+- **Sidebar** — Added "Memory" button between Docs and Settings.
+
+#### Fixed
+
+- **AI skipped `/init` when creating projects** — Projects weren't registered in Projects tab. Now enforced via dedicated `init_project` tool + mandatory system prompt instruction.
+
+---
+
 ## [0.4.0] — 2025-03-09
 
 ### Project Mode, Question Dialog, Scrollbar Theming, Panel Overhaul
 
 #### Added
 
-- **Project Mode Bar** — Top bar appears when a project is active (via `/init` or `/openproject`), showing project name, git branch, Open/Hand off/Commit actions, and diff stats. Inspired by Cursor/Windsurf project bars. Persisted via `localStorage`.
-- **AI Question Dialog** — AI discovery questions now render as an interactive form in the chat with selectable option pills per question, custom text input, and a "Let AI Decide" button. No more plain-text questions.
-- **`QuestionDialog` component** (`src/chat/components/QuestionDialog.tsx`) — Parses numbered AI questions with parenthetical options, renders structured form UI.
-- **`ProjectModeBar` component** (`src/chat/components/ProjectModeBar.tsx`) — Top bar with project name, branch, Open/Hand off/Commit buttons, diff stats.
-- **Project Widget in side panel** — New "Project" tab in the right panel showing active project details (name, path, tech stack, git branch, docs list).
-- **Global scrollbar theming** — All scrollbars (sidebar, chat, panels) now use theme CSS variables (`--border`, `--text-tertiary`) via `*::-webkit-scrollbar` rules.
-- **`onicode-project-activate` custom event** — Fired by `/init` and `/openproject` to activate project mode across the app.
+- **Project Mode Bar** — Top bar appears when a project is active (via `/init` or `/openproject`), showing project name, git branch, Open/Hand off/Commit actions, and diff stats.
+- **AI Question Dialog** — AI discovery questions rendered as interactive form with selectable option pills, custom text input, and "Let AI Decide" button.
+- **Project Widget in side panel** — New "Project" tab showing active project details.
+- **Global scrollbar theming** — All scrollbars use theme CSS variables.
+- **`onicode-project-activate` custom event** — Fired by `/init` and `/openproject`.
 
 #### Changed
 
-- **Side panel hidden by default** — Panel starts closed (`widget: null`), only opens when user clicks an icon or AI triggers it. Removed `panelHidden` state and localStorage mode logic.
-- **App layout** — `.app` is now `flex-direction: column` to accommodate the project mode bar above the sidebar+content row. New `.app-body` wrapper for the horizontal layout.
-- **Widget list** — Added `project` widget type to `WidgetType` union and `WIDGETS` array in `RightPanel.tsx`.
-- **System prompt Phase 2** — Now explicitly instructs AI to register the project in Onicode first before coding, to activate project mode.
+- **Side panel hidden by default** — Panel starts closed, only opens on demand.
+- **App layout** — Column layout for project mode bar + horizontal layout for sidebar+content.
 
 #### Fixed
 
-- **Scrollbars ignored theme** — Sidebar and main content scrollbars used browser defaults. Now all scrollbars match the active theme.
-- **Side panel open by default** — Was always showing terminal on load. Now starts hidden, only opens on demand.
+- **Scrollbars ignored theme** — Now all scrollbars match the active theme.
+- **Side panel open by default** — Now starts hidden.
 
 ---
 

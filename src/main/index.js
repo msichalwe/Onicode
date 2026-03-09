@@ -8,7 +8,9 @@ const { registerProjectIPC } = require('./projects');
 const { registerGitIPC } = require('./git');
 const { registerConnectorIPC } = require('./connectors');
 const { registerMemoryIPC } = require('./memory');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions } = require('./aiTools');
+const { logger, registerLoggerIPC } = require('./logger');
+const { registerBrowserIPC } = require('./browser');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager } = require('./aiTools');
 
 let mainWindow = null;
 
@@ -385,6 +387,12 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
 
     const apiKey = providerConfig.apiKey;
 
+    // Auto-generate session title from first user message (fire-and-forget)
+    const userMsgs = messages.filter(m => m.role === 'user');
+    if (userMsgs.length === 1) {
+        generateSessionTitle(userMsgs[0].content, providerConfig).catch(() => { });
+    }
+
     // Route based on token type
     if (providerConfig.id === 'codex' && isOAuthToken(apiKey)) {
         return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel);
@@ -525,7 +533,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
     }
 
     const model = selectedModel || 'gpt-4o';
-    const MAX_ROUNDS = 25;
+    const MAX_ROUNDS = 50;
+    const MAX_AUTO_CONTINUES = 5;
 
     // Separate system/developer instructions from user/assistant messages
     const systemMessages = messages.filter((m) => m.role === 'system');
@@ -540,22 +549,49 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
         content: m.content,
     }));
 
+    let autoContinueCount = 0;
+    const toolsUsed = new Set();
+
     try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
             mainWindow?.webContents.send('ai-agent-step', { round, status: 'streaming' });
 
             const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model);
 
-            // No function calls → we're done
+            // No function calls — check if we should auto-continue
             if (!result.functionCalls || result.functionCalls.length === 0) {
+                const summary = taskManager.getSummary();
+                const hasPendingTasks = summary.total > 0 && !summary.allDone;
+                const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
+
+                if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
+                    autoContinueCount++;
+                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}: ${summary.pending} tasks pending`);
+
+                    let continuePrompt;
+                    if (!hasBuiltAnything) {
+                        continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files. Do not explain — just make the tool calls.`;
+                    } else {
+                        const nextTask = summary.nextTask;
+                        continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.`;
+                    }
+
+                    inputItems.push({ role: 'user', content: continuePrompt });
+                    mainWindow?.webContents.send('ai-agent-step', { round, status: 'continuing', pending: summary.pending });
+                    continue;
+                }
+
                 mainWindow?.webContents.send('ai-stream-done', null);
                 return { success: true };
             }
 
             // Execute each function call
+            autoContinueCount = 0;
             for (const fn of result.functionCalls) {
                 let args = {};
                 try { args = JSON.parse(fn.arguments); } catch { }
+
+                toolsUsed.add(fn.name);
 
                 mainWindow?.webContents.send('ai-tool-call', {
                     id: fn.call_id,
@@ -564,8 +600,9 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
                     round,
                 });
 
-                console.log(`[AI] Tool call (round ${round}): ${fn.name}`, Object.keys(args));
+                logger.toolCall(fn.name, args, round);
                 const toolResult = await executeTool(fn.name, args);
+                logger.toolResult(fn.name, toolResult, round);
 
                 mainWindow?.webContents.send('ai-tool-result', {
                     id: fn.call_id,
@@ -609,7 +646,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
  * Single streaming call to OpenAI API. Returns accumulated response
  * including any tool_calls. Streams text content to renderer in real-time.
  */
-function streamOpenAISingle(messages, providerConfig, includeTools = true) {
+function streamOpenAISingle(messages, providerConfig, includeTools = true, forceToolChoice = false) {
     let endpoint;
     if (providerConfig.id === 'codex') {
         endpoint = 'https://api.openai.com/v1/chat/completions';
@@ -630,7 +667,7 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true) {
     // Add tools for function calling (skip for o-models which may not support tools well)
     if (includeTools && !isOModel) {
         bodyObj.tools = TOOL_DEFINITIONS;
-        bodyObj.tool_choice = 'auto';
+        bodyObj.tool_choice = forceToolChoice ? 'required' : 'auto';
     }
 
     if (isOModel) bodyObj.max_completion_tokens = 16384;
@@ -750,37 +787,149 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true) {
 }
 
 /**
+ * Context compaction — summarize old messages when conversation gets too long.
+ * Keeps the system prompt and last N messages, replaces the middle with a summary.
+ * Inspired by OpenCode's compaction agent.
+ */
+function compactConversation(messages, maxTokenEstimate = 100000) {
+    // Rough token estimate: ~4 chars per token
+    const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0) + JSON.stringify(m.tool_calls || '').length, 0);
+    const estimatedTokens = totalChars / 4;
+
+    if (estimatedTokens < maxTokenEstimate * 0.8) return messages; // Under 80%, no compaction needed
+
+    logger.info('compaction', `Conversation too long (~${Math.round(estimatedTokens)} tokens). Compacting...`);
+
+    // Keep system messages, first user message, and last 10 messages
+    const systemMsgs = messages.filter(m => m.role === 'system');
+    const nonSystem = messages.filter(m => m.role !== 'system');
+    const keepLast = 10;
+
+    if (nonSystem.length <= keepLast + 2) return messages; // Too short to compact
+
+    const firstUserMsg = nonSystem[0];
+    const middleMsgs = nonSystem.slice(1, -keepLast);
+    const lastMsgs = nonSystem.slice(-keepLast);
+
+    // Summarize the middle section
+    const summaryParts = [];
+    let filesModified = new Set();
+    let toolsCalled = {};
+    let keyDecisions = [];
+
+    for (const msg of middleMsgs) {
+        if (msg.role === 'assistant' && msg.content) {
+            // Extract key sentences (first sentence of each paragraph)
+            const sentences = msg.content.split(/\.\s/).slice(0, 3);
+            if (sentences.length > 0) keyDecisions.push(sentences[0]);
+        }
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            for (const tc of msg.tool_calls) {
+                const name = tc.function?.name || 'unknown';
+                toolsCalled[name] = (toolsCalled[name] || 0) + 1;
+                try {
+                    const args = JSON.parse(tc.function?.arguments || '{}');
+                    if (args.file_path) filesModified.add(args.file_path);
+                } catch { }
+            }
+        }
+    }
+
+    const toolSummary = Object.entries(toolsCalled).map(([k, v]) => `${k}(${v}x)`).join(', ');
+    const filesSummary = [...filesModified].slice(0, 20).join(', ');
+
+    const compactionMsg = {
+        role: 'user',
+        content: `[CONTEXT COMPACTION: The conversation was too long and has been summarized. Here is what happened in the compacted section:]\n\nTools used: ${toolSummary || 'none'}\nFiles touched: ${filesSummary || 'none'}\nKey points: ${keyDecisions.slice(0, 10).join('. ') || 'General discussion'}\n\n[End of compacted section. Continue from here.]`,
+    };
+
+    const compacted = [...systemMsgs, firstUserMsg, compactionMsg, ...lastMsgs];
+    logger.info('compaction', `Compacted ${messages.length} messages → ${compacted.length} messages`);
+
+    mainWindow?.webContents.send('ai-agent-step', { round: 0, status: 'compacted', original: messages.length, compacted: compacted.length });
+    return compacted;
+}
+
+/**
  * Agentic OpenAI loop with tool calling.
  * Streams text, executes tools, loops until done or max iterations.
+ * 
+ * Key pattern (inspired by claude-code/opencode):
+ * When the model responds with text-only but tasks are still pending,
+ * inject a continuation prompt to push the model back into tool-calling mode.
+ * This prevents the "init_project + task_add then stop" hallucination pattern.
  */
 async function streamOpenAI(messages, providerConfig) {
-    const MAX_TOOL_ROUNDS = 25;  // Safety limit
+    const MAX_TOOL_ROUNDS = 50;  // Support long 10+ minute sessions
+    const MAX_AUTO_CONTINUES = 5; // Max times we'll push the model to continue
     let conversationMessages = [...messages];
     let round = 0;
+    let autoContinueCount = 0;
+    const toolsUsed = new Set(); // Track which tool types have been called
 
     while (round < MAX_TOOL_ROUNDS) {
         round++;
+
+        // Auto-compact conversation if it's getting too long
+        if (round > 3) {
+            conversationMessages = compactConversation(conversationMessages);
+        }
 
         // Notify renderer of agentic step
         if (round > 1) {
             mainWindow?.webContents.send('ai-agent-step', { round, status: 'thinking' });
         }
 
-        const result = await streamOpenAISingle(conversationMessages, providerConfig, true);
+        // Use forceToolChoice on auto-continuation rounds to guarantee tool calls
+        const forceTools = autoContinueCount > 0;
+        const result = await streamOpenAISingle(conversationMessages, providerConfig, true, forceTools);
 
         if (result.error) {
             mainWindow?.webContents.send('ai-stream-done', result.error);
             return { error: result.error };
         }
 
-        // If no tool calls, we're done — the text was already streamed
+        // ── Text-only response: check if we should auto-continue ──
         if (!result.hasToolCalls) {
+            const summary = taskManager.getSummary();
+            const hasPendingTasks = summary.total > 0 && !summary.allDone;
+            const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
+
+            // Auto-continue if: tasks are pending AND (we haven't built anything yet OR tasks in-progress)
+            if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
+                autoContinueCount++;
+                logger.info('agent-loop', `Auto-continue #${autoContinueCount} (will force tool_choice:required): ${summary.pending} tasks pending, ${summary.done}/${summary.total} done`);
+
+                // Add the assistant's text response to conversation
+                if (result.textContent) {
+                    conversationMessages.push({ role: 'assistant', content: result.textContent });
+                }
+
+                // Build a specific continuation prompt based on what's missing
+                let continuePrompt;
+                if (!hasBuiltAnything) {
+                    continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files (package.json, tsconfig.json, source files, components, etc.). Do not explain — just make the tool calls.`;
+                } else {
+                    const nextTask = summary.nextTask;
+                    continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.`;
+                }
+
+                conversationMessages.push({ role: 'user', content: continuePrompt });
+
+                // Notify renderer that agent is auto-continuing
+                mainWindow?.webContents.send('ai-agent-step', { round, status: 'continuing', pending: summary.pending });
+                continue; // Loop back for another round
+            }
+
+            // Actually done (no pending tasks, or max auto-continues reached)
             currentAIRequest = null;
             mainWindow?.webContents.send('ai-stream-done', null);
             return { success: true };
         }
 
         // ── Tool calling round ──
+        autoContinueCount = 0; // Reset auto-continue counter on successful tool calls
+
         // Add assistant message with tool calls to conversation
         const assistantMsg = { role: 'assistant', content: result.textContent || null };
         assistantMsg.tool_calls = result.toolCalls.map(tc => ({
@@ -799,6 +948,9 @@ async function streamOpenAI(messages, providerConfig) {
                 args = {};
             }
 
+            // Track tool types used
+            toolsUsed.add(tc.name);
+
             // Notify renderer: tool call starting
             mainWindow?.webContents.send('ai-tool-call', {
                 id: tc.id,
@@ -808,7 +960,9 @@ async function streamOpenAI(messages, providerConfig) {
             });
 
             // Execute the tool
+            logger.toolCall(tc.name, args, round);
             const toolResult = await executeTool(tc.name, args);
+            logger.toolResult(tc.name, toolResult, round);
 
             // Notify renderer: tool result
             mainWindow?.webContents.send('ai-tool-result', {
@@ -849,6 +1003,166 @@ ipcMain.handle('ai-abort', () => {
 });
 
 // ══════════════════════════════════════════
+//  Session Title Auto-Generation
+// ══════════════════════════════════════════
+
+/**
+ * Generate a short title for a conversation based on the first user message.
+ * Uses a lightweight AI call (non-streaming, no tools).
+ */
+async function generateSessionTitle(userMessage, providerConfig) {
+    if (!providerConfig?.apiKey && providerConfig?.id !== 'codex') return null;
+    try {
+        const titleMessages = [
+            { role: 'system', content: 'Generate a short title (3-6 words, no quotes) for this conversation based on the user message. Reply with ONLY the title, nothing else.' },
+            { role: 'user', content: userMessage.slice(0, 500) },
+        ];
+
+        let endpoint;
+        if (providerConfig.id === 'codex') {
+            endpoint = 'https://api.openai.com/v1/chat/completions';
+        } else {
+            const base = (providerConfig.baseUrl || '').replace(/\/$/, '');
+            endpoint = `${base}/v1/chat/completions`;
+        }
+
+        const bodyStr = JSON.stringify({
+            model: providerConfig.selectedModel || 'gpt-4o-mini',
+            messages: titleMessages,
+            max_tokens: 20,
+        });
+
+        const url = new URL(endpoint);
+        const mod = url.protocol === 'https:' ? https : http;
+
+        return new Promise((resolve) => {
+            const req = mod.request({
+                hostname: url.hostname,
+                port: url.port || undefined,
+                path: url.pathname,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${providerConfig.apiKey}`,
+                    'Content-Length': Buffer.byteLength(bodyStr),
+                },
+            }, (res) => {
+                let data = '';
+                res.on('data', (c) => { data += c; });
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        const title = json.choices?.[0]?.message?.content?.trim();
+                        if (title) {
+                            mainWindow?.webContents.send('ai-session-title', title);
+                            resolve(title);
+                        } else resolve(null);
+                    } catch { resolve(null); }
+                });
+            });
+            req.on('error', () => resolve(null));
+            req.on('timeout', () => { req.destroy(); resolve(null); });
+            req.setTimeout(5000);
+            req.write(bodyStr);
+            req.end();
+        });
+    } catch { return null; }
+}
+
+// ══════════════════════════════════════════
+//  Permissions System
+// ══════════════════════════════════════════
+
+/**
+ * Permission levels for tools: 'allow' | 'ask' | 'deny'
+ * Default permissions can be overridden per-project via .onicode/config.json
+ */
+const DEFAULT_PERMISSIONS = {
+    read_file: 'allow',
+    edit_file: 'allow',
+    create_file: 'allow',
+    delete_file: 'ask',
+    multi_edit: 'allow',
+    run_command: 'allow',
+    search_files: 'allow',
+    list_directory: 'allow',
+    glob_files: 'allow',
+    explore_codebase: 'allow',
+    webfetch: 'allow',
+    websearch: 'allow',
+    browser_navigate: 'allow',
+    browser_screenshot: 'allow',
+    browser_evaluate: 'allow',
+    browser_click: 'allow',
+    browser_type: 'allow',
+    browser_console_logs: 'allow',
+    browser_close: 'allow',
+    task_add: 'allow',
+    task_update: 'allow',
+    task_list: 'allow',
+    task_clear: 'allow',
+    init_project: 'allow',
+    memory_write: 'allow',
+    memory_append: 'allow',
+    create_restore_point: 'allow',
+    restore_to_point: 'ask',
+    list_restore_points: 'allow',
+    get_context_summary: 'allow',
+    spawn_sub_agent: 'allow',
+    get_agent_status: 'allow',
+    get_system_logs: 'allow',
+    get_changelog: 'allow',
+};
+
+let activePermissions = { ...DEFAULT_PERMISSIONS };
+let agentMode = 'build'; // 'build' (full access) or 'plan' (read-only)
+
+function loadProjectPermissions(projectPath) {
+    try {
+        const configPath = path.join(projectPath, '.onicode', 'config.json');
+        if (fs.existsSync(configPath)) {
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            if (config.permissions) {
+                activePermissions = { ...DEFAULT_PERMISSIONS, ...config.permissions };
+                logger.info('permissions', `Loaded project permissions from ${configPath}`);
+            }
+        }
+    } catch { }
+}
+
+function setAgentMode(mode) {
+    agentMode = mode;
+    if (mode === 'plan') {
+        // Plan mode: deny all writes, ask for commands
+        activePermissions = { ...DEFAULT_PERMISSIONS };
+        activePermissions.edit_file = 'deny';
+        activePermissions.create_file = 'deny';
+        activePermissions.delete_file = 'deny';
+        activePermissions.multi_edit = 'deny';
+        activePermissions.run_command = 'ask';
+        activePermissions.init_project = 'deny';
+    } else {
+        activePermissions = { ...DEFAULT_PERMISSIONS };
+    }
+    mainWindow?.webContents.send('ai-agent-mode', mode);
+    logger.info('agent-mode', `Switched to ${mode} mode`);
+}
+
+function checkPermission(toolName) {
+    return activePermissions[toolName] || 'allow';
+}
+
+// IPC handlers for permissions and agent mode
+ipcMain.handle('agent-set-mode', (_, mode) => {
+    setAgentMode(mode);
+    return { success: true, mode };
+});
+
+ipcMain.handle('agent-get-mode', () => {
+    return { mode: agentMode, permissions: activePermissions };
+});
+
+// ══════════════════════════════════════════
 //  Register Terminal & Project IPC
 // ══════════════════════════════════════════
 
@@ -857,6 +1171,13 @@ registerProjectIPC(ipcMain, () => mainWindow);
 registerGitIPC(ipcMain);
 registerConnectorIPC(ipcMain, () => mainWindow);
 registerMemoryIPC();
+registerLoggerIPC();
+registerBrowserIPC();
+
+// Task manager IPC — allows renderer to query current tasks
+ipcMain.handle('tasks-list', async () => {
+    return taskManager.getSummary();
+});
 
 // ══════════════════════════════════════════
 //  App Lifecycle

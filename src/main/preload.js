@@ -130,6 +130,48 @@ contextBridge.exposeInMainWorld('onicode', {
     memoryDelete: (filename) => ipcRenderer.invoke('memory-delete', filename),
     memoryCompact: (messages, keepRecent) => ipcRenderer.invoke('memory-compact', messages, keepRecent),
 
+    // ── Browser / Puppeteer ──
+    browserLaunch: (opts) => ipcRenderer.invoke('browser-launch', opts),
+    browserClose: () => ipcRenderer.invoke('browser-close'),
+    browserNavigate: (url, opts) => ipcRenderer.invoke('browser-navigate', url, opts),
+    browserScreenshot: (opts) => ipcRenderer.invoke('browser-screenshot', opts),
+    browserEvaluate: (script) => ipcRenderer.invoke('browser-evaluate', script),
+    browserClick: (selector) => ipcRenderer.invoke('browser-click', selector),
+    browserType: (selector, text) => ipcRenderer.invoke('browser-type', selector, text),
+    browserWait: (selector, opts) => ipcRenderer.invoke('browser-wait', selector, opts),
+    browserContent: () => ipcRenderer.invoke('browser-content'),
+    browserConsoleLogs: (opts) => ipcRenderer.invoke('browser-console-logs', opts),
+    browserConsoleClear: () => ipcRenderer.invoke('browser-console-clear'),
+
+    // ── Logger ──
+    loggerGetRecent: (opts) => ipcRenderer.invoke('logger-get-recent', opts),
+    loggerReadDay: (date) => ipcRenderer.invoke('logger-read-day', date),
+    loggerListFiles: () => ipcRenderer.invoke('logger-list-files'),
+
+    // ── Tasks ──
+    tasksList: () => ipcRenderer.invoke('tasks-list'),
+    onTasksUpdated: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-tasks-updated', handler);
+        return () => ipcRenderer.removeListener('ai-tasks-updated', handler);
+    },
+
+    // ── Agent Mode & Permissions ──
+    agentSetMode: (mode) => ipcRenderer.invoke('agent-set-mode', mode),
+    agentGetMode: () => ipcRenderer.invoke('agent-get-mode'),
+    onAgentMode: (callback) => {
+        const handler = (_event, mode) => callback(mode);
+        ipcRenderer.on('ai-agent-mode', handler);
+        return () => ipcRenderer.removeListener('ai-agent-mode', handler);
+    },
+
+    // ── Session Title ──
+    onSessionTitle: (callback) => {
+        const handler = (_event, title) => callback(title);
+        ipcRenderer.on('ai-session-title', handler);
+        return () => ipcRenderer.removeListener('ai-session-title', handler);
+    },
+
     // ── Git ──
     gitIsRepo: (repoPath) => ipcRenderer.invoke('git-is-repo', repoPath),
     gitInit: (repoPath) => ipcRenderer.invoke('git-init', repoPath),
