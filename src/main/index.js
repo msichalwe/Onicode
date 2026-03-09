@@ -10,7 +10,11 @@ const { registerConnectorIPC } = require('./connectors');
 const { registerMemoryIPC } = require('./memory');
 const { logger, registerLoggerIPC } = require('./logger');
 const { registerBrowserIPC } = require('./browser');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager } = require('./aiTools');
+const { registerHooksIPC, executeHook, getHooksSummary } = require('./hooks');
+const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
+const { registerCompactorIPC } = require('./compactor');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses } = require('./aiTools');
+const { conversationStorage, closeDB } = require('./storage');
 
 let mainWindow = null;
 
@@ -75,6 +79,10 @@ ipcMain.handle('get-app-info', () => ({
 
 ipcMain.handle('get-theme', async () => ({ theme: 'sand' }));
 ipcMain.handle('set-theme', async (_event, theme) => ({ success: true, theme }));
+
+ipcMain.handle('open-external', async (_event, url) => {
+    if (url) shell.openExternal(url);
+});
 
 // ══════════════════════════════════════════
 //  JWT + Token Helpers
@@ -387,6 +395,14 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
 
     const apiKey = providerConfig.apiKey;
 
+    // Extract active project path from system prompt for session tracking
+    const systemMsg = messages.find(m => m.role === 'system');
+    let projectPath = null;
+    if (systemMsg?.content) {
+        const pathMatch = systemMsg.content.match(/## Active Project:.*?\nPath:\s*`([^`]+)`/);
+        if (pathMatch) projectPath = pathMatch[1];
+    }
+
     // Auto-generate session title from first user message (fire-and-forget)
     const userMsgs = messages.filter(m => m.role === 'user');
     if (userMsgs.length === 1) {
@@ -395,9 +411,9 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
 
     // Route based on token type
     if (providerConfig.id === 'codex' && isOAuthToken(apiKey)) {
-        return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel);
+        return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel, projectPath);
     } else {
-        return streamOpenAI(messages, providerConfig);
+        return streamOpenAI(messages, providerConfig, projectPath);
     }
 });
 
@@ -412,7 +428,7 @@ function toResponsesAPITools(toolDefs) {
 }
 
 /** Single streaming Responses API call — returns { content, functionCalls } */
-async function streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools = true) {
+async function streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools = true, forceToolChoice = false) {
     const isOModel = model.startsWith('o');
 
     const bodyObj = {
@@ -425,6 +441,9 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
 
     if (includeTools && !isOModel) {
         bodyObj.tools = toResponsesAPITools(TOOL_DEFINITIONS);
+        if (forceToolChoice) {
+            bodyObj.tool_choice = 'required';
+        }
     }
 
     const abortController = new AbortController();
@@ -524,8 +543,126 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
     return { content: textContent, functionCalls: [...functionCalls.values()] };
 }
 
+/**
+ * Build rich project context for auto-continue prompts.
+ * This prevents the AI from losing track of what it's already built.
+ */
+function buildContinueContext() {
+    const fs = require('fs');
+    const parts = [];
+
+    // What files have been created/modified this session
+    const created = [...(fileContext.createdFiles || [])];
+    const modified = [...(fileContext.modifiedFiles?.keys() || [])];
+
+    if (created.length > 0) {
+        parts.push(`Files you ALREADY CREATED this session (they exist on disk, do NOT re-create):\n  ${created.join('\n  ')}`);
+    }
+    if (modified.length > 0) {
+        parts.push(`Files you modified this session:\n  ${modified.filter(f => !fileContext.createdFiles?.has(f)).slice(0, 15).join('\n  ')}`);
+    }
+
+    // Try to find the project directory from created files or fileContext
+    let projectDir = null;
+    if (created.length > 0) {
+        // Extract common directory prefix
+        const first = created[0];
+        const parts2 = first.split('/');
+        // Look for OniProjects pattern
+        const oniIdx = parts2.findIndex(p => p === 'OniProjects');
+        if (oniIdx >= 0 && parts2.length > oniIdx + 1) {
+            projectDir = parts2.slice(0, oniIdx + 2).join('/');
+        } else if (parts2.length >= 3) {
+            // Take directory of first file
+            projectDir = parts2.slice(0, -1).join('/');
+        }
+    }
+
+    // List the actual project directory structure so the AI knows what's there
+    if (projectDir && fs.existsSync(projectDir)) {
+        try {
+            const { registerProjectIPC } = require('./projects');
+            // Use a simple inline directory listing
+            const listDir = (dir, depth = 0, maxDepth = 2) => {
+                if (depth >= maxDepth) return [];
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                return entries
+                    .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== '.git')
+                    .sort((a, b) => {
+                        if (a.isDirectory() && !b.isDirectory()) return -1;
+                        if (!a.isDirectory() && b.isDirectory()) return 1;
+                        return a.name.localeCompare(b.name);
+                    })
+                    .flatMap(e => {
+                        const indent = '  '.repeat(depth);
+                        const fullPath = require('path').join(dir, e.name);
+                        if (e.isDirectory()) {
+                            return [`${indent}${e.name}/`, ...listDir(fullPath, depth + 1, maxDepth)];
+                        }
+                        return [`${indent}${e.name}`];
+                    });
+            };
+            const dirListing = listDir(projectDir);
+            if (dirListing.length > 0) {
+                parts.push(`Current project directory (${projectDir}):\n${dirListing.slice(0, 50).join('\n')}`);
+            }
+        } catch { /* listing failed */ }
+    }
+
+    // Task summary — show the AI what tasks exist and their status
+    const taskSummary = taskManager.getSummary();
+    if (taskSummary.total > 0) {
+        const taskLines = taskSummary.tasks.map(t =>
+            `  [${t.status.toUpperCase()}] #${t.id}: ${t.content}`
+        );
+        parts.push(`Task list (${taskSummary.done}/${taskSummary.total} done):\n${taskLines.join('\n')}`);
+    }
+
+    // Background processes
+    const bgProcs = getBackgroundProcesses();
+    if (bgProcs.length > 0) {
+        parts.push(`Background processes running: ${bgProcs.map(p => `${p.command} (pid: ${p.pid}${p.port ? ', port: ' + p.port : ''})`).join(', ')}`);
+    }
+
+    return parts.join('\n\n');
+}
+
+/** Generate a completion summary when the AI finishes an agentic session with tools */
+function sendCompletionSummary(toolsUsed) {
+    if (toolsUsed.size === 0) return; // No tools were used, no summary needed
+
+    const summary = taskManager.getSummary();
+    const parts = [];
+
+    if (summary.total > 0) {
+        parts.push(`**${summary.done}/${summary.total} tasks completed.**`);
+    }
+
+    const actions = [];
+    if (toolsUsed.has('create_file')) actions.push('created files');
+    if (toolsUsed.has('edit_file') || toolsUsed.has('multi_edit')) actions.push('edited files');
+    if (toolsUsed.has('run_command')) actions.push('ran commands');
+    if (toolsUsed.has('browser_navigate') || toolsUsed.has('browser_screenshot')) actions.push('used browser');
+    if (toolsUsed.has('init_project')) actions.push('initialized project');
+    if (toolsUsed.has('spawn_sub_agent')) actions.push('spawned sub-agents');
+
+    if (actions.length > 0) {
+        parts.push(`Actions: ${actions.join(', ')}.`);
+    }
+
+    const bgProcs = getBackgroundProcesses();
+    if (bgProcs.length > 0) {
+        parts.push(`${bgProcs.length} background process${bgProcs.length > 1 ? 'es' : ''} still running.`);
+    }
+
+    if (parts.length > 0) {
+        const summaryText = '\n\n---\n' + parts.join(' ');
+        mainWindow?.webContents.send('ai-stream-chunk', summaryText);
+    }
+}
+
 /** Stream chat via ChatGPT backend API with agentic tool-calling loop */
-async function streamChatGPTBackend(messages, accessToken, selectedModel) {
+async function streamChatGPTBackend(messages, accessToken, selectedModel, projectPath) {
     const accountId = getAccountId(accessToken);
     if (!accountId) {
         mainWindow?.webContents.send('ai-stream-done', 'Cannot extract account ID from token. Sign in again.');
@@ -535,6 +672,12 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
     const model = selectedModel || 'gpt-4o';
     const MAX_ROUNDS = 50;
     const MAX_AUTO_CONTINUES = 5;
+
+    // Wire provider config for sub-agent use
+    setLastProviderConfig({ id: 'codex', apiKey: accessToken, selectedModel: model });
+    startSession(null, projectPath);
+    setPermissions(activePermissions);
+    setAgentModeRef(agentMode);
 
     // Separate system/developer instructions from user/assistant messages
     const systemMessages = messages.filter((m) => m.role === 'system');
@@ -554,26 +697,34 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
 
     try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
-            mainWindow?.webContents.send('ai-agent-step', { round, status: 'streaming' });
+            // Signal thinking on tool-loop rounds, streaming on first/text rounds
+            if (round > 0) {
+                mainWindow?.webContents.send('ai-agent-step', { round, status: 'thinking' });
+            } else {
+                mainWindow?.webContents.send('ai-agent-step', { round, status: 'streaming' });
+            }
 
-            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model);
+            // Force tool_choice on auto-continue rounds to guarantee the model makes tool calls
+            const forceTools = autoContinueCount > 0;
+            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, true, forceTools);
 
             // No function calls — check if we should auto-continue
             if (!result.functionCalls || result.functionCalls.length === 0) {
                 const summary = taskManager.getSummary();
-                const hasPendingTasks = summary.total > 0 && !summary.allDone;
+                const hasPendingTasks = summary.pending > 0 || summary.inProgress > 0;
                 const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
 
                 if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
                     autoContinueCount++;
                     logger.info('agent-loop', `Auto-continue #${autoContinueCount}: ${summary.pending} tasks pending`);
 
+                    const projectContext = buildContinueContext();
                     let continuePrompt;
                     if (!hasBuiltAnything) {
-                        continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files. Do not explain — just make the tool calls.`;
+                        continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files. Do not explain — just make the tool calls.\n\n${projectContext}`;
                     } else {
                         const nextTask = summary.nextTask;
-                        continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.`;
+                        continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.\n\n${projectContext}`;
                     }
 
                     inputItems.push({ role: 'user', content: continuePrompt });
@@ -581,12 +732,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
                     continue;
                 }
 
+                sendCompletionSummary(toolsUsed);
                 mainWindow?.webContents.send('ai-stream-done', null);
                 return { success: true };
             }
 
             // Execute each function call
             autoContinueCount = 0;
+            mainWindow?.webContents.send('ai-agent-step', { round, status: 'executing' });
             for (const fn of result.functionCalls) {
                 let args = {};
                 try { args = JSON.parse(fn.arguments); } catch { }
@@ -627,12 +780,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel) {
         }
 
         // Hit max rounds
+        sendCompletionSummary(toolsUsed);
         mainWindow?.webContents.send('ai-stream-done', null);
         return { success: true };
 
     } catch (err) {
         currentAIRequest = null;
         if (err.name === 'AbortError') {
+            sendCompletionSummary(toolsUsed);
             mainWindow?.webContents.send('ai-stream-done', null);
             return { success: true };
         }
@@ -787,6 +942,91 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
 }
 
 /**
+ * Wrapper for sub-agent AI calls.
+ * Accepts messages, providerConfig, and optional tool overrides.
+ * Returns { textContent, toolCalls, hasToolCalls } or { error }.
+ */
+function makeSubAgentAICall(messages, providerConfig, toolOverrides) {
+    // Create a temporary modified providerConfig with limited tools
+    const bodyObj = {
+        model: providerConfig.selectedModel || 'gpt-4o-mini',
+        messages,
+        stream: false, // sub-agents don't stream to UI
+    };
+
+    if (toolOverrides && toolOverrides.length > 0) {
+        bodyObj.tools = toolOverrides;
+        bodyObj.tool_choice = 'auto';
+    }
+
+    bodyObj.max_tokens = 8192;
+
+    let endpoint;
+    if (providerConfig.id === 'codex') {
+        endpoint = 'https://api.openai.com/v1/chat/completions';
+    } else {
+        const base = (providerConfig.baseUrl || '').replace(/\/$/, '');
+        endpoint = `${base}/v1/chat/completions`;
+    }
+
+    const bodyStr = JSON.stringify(bodyObj);
+
+    return new Promise((resolve) => {
+        const url = new URL(endpoint);
+        const mod = url.protocol === 'https:' ? https : http;
+
+        const req = mod.request({
+            hostname: url.hostname,
+            port: url.port || undefined,
+            path: url.pathname + url.search,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${providerConfig.apiKey}`,
+                'Content-Length': Buffer.byteLength(bodyStr),
+            },
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    if (json.error) {
+                        resolve({ error: json.error.message || 'AI API error' });
+                        return;
+                    }
+                    const choice = json.choices?.[0];
+                    if (!choice) {
+                        resolve({ error: 'No response from AI' });
+                        return;
+                    }
+                    const textContent = choice.message?.content || '';
+                    const toolCalls = (choice.message?.tool_calls || []).map(tc => ({
+                        id: tc.id,
+                        name: tc.function?.name || '',
+                        arguments: tc.function?.arguments || '{}',
+                    }));
+                    resolve({
+                        textContent,
+                        toolCalls,
+                        hasToolCalls: toolCalls.length > 0,
+                    });
+                } catch (err) {
+                    resolve({ error: `Parse error: ${err.message}` });
+                }
+            });
+        });
+        req.on('error', (err) => resolve({ error: err.message }));
+        req.setTimeout(30000, () => { req.destroy(); resolve({ error: 'Sub-agent AI call timed out' }); });
+        req.write(bodyStr);
+        req.end();
+    });
+}
+
+// Wire sub-agent AI call function
+setAICallFunction(makeSubAgentAICall);
+
+/**
  * Context compaction — summarize old messages when conversation gets too long.
  * Keeps the system prompt and last N messages, replaces the middle with a summary.
  * Inspired by OpenCode's compaction agent.
@@ -800,10 +1040,10 @@ function compactConversation(messages, maxTokenEstimate = 100000) {
 
     logger.info('compaction', `Conversation too long (~${Math.round(estimatedTokens)} tokens). Compacting...`);
 
-    // Keep system messages, first user message, and last 10 messages
+    // Keep system messages, first user message, and last 20 messages (more context)
     const systemMsgs = messages.filter(m => m.role === 'system');
     const nonSystem = messages.filter(m => m.role !== 'system');
-    const keepLast = 10;
+    const keepLast = 20;
 
     if (nonSystem.length <= keepLast + 2) return messages; // Too short to compact
 
@@ -811,16 +1051,17 @@ function compactConversation(messages, maxTokenEstimate = 100000) {
     const middleMsgs = nonSystem.slice(1, -keepLast);
     const lastMsgs = nonSystem.slice(-keepLast);
 
-    // Summarize the middle section
-    const summaryParts = [];
+    // Build comprehensive context from ALL messages (including compacted ones)
+    let filesCreated = new Set();
     let filesModified = new Set();
     let toolsCalled = {};
+    let projectPaths = new Set();
     let keyDecisions = [];
+    let commandsRun = [];
 
     for (const msg of middleMsgs) {
         if (msg.role === 'assistant' && msg.content) {
-            // Extract key sentences (first sentence of each paragraph)
-            const sentences = msg.content.split(/\.\s/).slice(0, 3);
+            const sentences = msg.content.split(/\.\s/).slice(0, 2);
             if (sentences.length > 0) keyDecisions.push(sentences[0]);
         }
         if (msg.role === 'assistant' && msg.tool_calls) {
@@ -829,22 +1070,55 @@ function compactConversation(messages, maxTokenEstimate = 100000) {
                 toolsCalled[name] = (toolsCalled[name] || 0) + 1;
                 try {
                     const args = JSON.parse(tc.function?.arguments || '{}');
-                    if (args.file_path) filesModified.add(args.file_path);
+                    if (args.file_path) {
+                        if (name === 'create_file') filesCreated.add(args.file_path);
+                        else filesModified.add(args.file_path);
+                    }
+                    if (args.project_path) projectPaths.add(args.project_path);
+                    if (args.dir_path) projectPaths.add(args.dir_path);
+                    if (name === 'run_command' && args.command) {
+                        commandsRun.push(args.command.slice(0, 80));
+                    }
                 } catch { }
             }
         }
+        // Also check tool results for file paths
+        if (msg.role === 'tool' && msg.content) {
+            try {
+                const result = JSON.parse(msg.content);
+                if (result.path) filesModified.add(result.path);
+                if (result.project_path) projectPaths.add(result.project_path);
+            } catch { }
+        }
     }
 
+    // Also gather current session file context from the tracker
+    const trackedCreated = [...(fileContext.createdFiles || [])];
+    const trackedModified = [...(fileContext.modifiedFiles?.keys() || [])];
+    const trackedRead = [...(fileContext.readFiles?.keys() || [])];
+
     const toolSummary = Object.entries(toolsCalled).map(([k, v]) => `${k}(${v}x)`).join(', ');
-    const filesSummary = [...filesModified].slice(0, 20).join(', ');
+    const createdList = [...filesCreated].join('\n  - ') || 'none';
+    const modifiedList = [...filesModified].filter(f => !filesCreated.has(f)).slice(0, 30).join('\n  - ') || 'none';
+    const projectList = [...projectPaths].join(', ') || 'unknown';
 
     const compactionMsg = {
         role: 'user',
-        content: `[CONTEXT COMPACTION: The conversation was too long and has been summarized. Here is what happened in the compacted section:]\n\nTools used: ${toolSummary || 'none'}\nFiles touched: ${filesSummary || 'none'}\nKey points: ${keyDecisions.slice(0, 10).join('. ') || 'General discussion'}\n\n[End of compacted section. Continue from here.]`,
+        content: `[CONTEXT COMPACTION: The conversation was summarized to save tokens. IMPORTANT: You are still working in the SAME session. All files you created still exist on disk.]\n\n` +
+            `**Working directory / project paths:** ${projectList}\n\n` +
+            `**Files CREATED (these exist on disk now):**\n  - ${createdList}\n\n` +
+            `**Files MODIFIED:**\n  - ${modifiedList}\n\n` +
+            `**Tools used:** ${toolSummary || 'none'}\n` +
+            (commandsRun.length > 0 ? `**Commands run:** ${commandsRun.slice(-10).join('; ')}\n` : '') +
+            (trackedCreated.length > 0 ? `**Session file tracker — created:** ${trackedCreated.join(', ')}\n` : '') +
+            (trackedModified.length > 0 ? `**Session file tracker — modified:** ${trackedModified.slice(0, 20).join(', ')}\n` : '') +
+            (trackedRead.length > 0 ? `**Session file tracker — read:** ${trackedRead.slice(0, 15).join(', ')}\n` : '') +
+            `**Key points:** ${keyDecisions.slice(-10).join('. ') || 'General work'}\n\n` +
+            `[Continue from where you left off. The files listed above are REAL and exist on disk — do NOT re-create them. Check task_list if unsure what to do next.]`,
     };
 
     const compacted = [...systemMsgs, firstUserMsg, compactionMsg, ...lastMsgs];
-    logger.info('compaction', `Compacted ${messages.length} messages → ${compacted.length} messages`);
+    logger.info('compaction', `Compacted ${messages.length} messages → ${compacted.length} (kept ${keepLast} recent, ${filesCreated.size} created files tracked)`);
 
     mainWindow?.webContents.send('ai-agent-step', { round: 0, status: 'compacted', original: messages.length, compacted: compacted.length });
     return compacted;
@@ -859,13 +1133,97 @@ function compactConversation(messages, maxTokenEstimate = 100000) {
  * inject a continuation prompt to push the model back into tool-calling mode.
  * This prevents the "init_project + task_add then stop" hallucination pattern.
  */
-async function streamOpenAI(messages, providerConfig) {
+async function streamOpenAI(messages, providerConfig, projectPath) {
     const MAX_TOOL_ROUNDS = 50;  // Support long 10+ minute sessions
     const MAX_AUTO_CONTINUES = 5; // Max times we'll push the model to continue
     let conversationMessages = [...messages];
     let round = 0;
     let autoContinueCount = 0;
     const toolsUsed = new Set(); // Track which tool types have been called
+
+    // Wire provider config for sub-agent use
+    setLastProviderConfig(providerConfig);
+
+    // Start or continue agentic session (preserves tasks for same project)
+    startSession(null, projectPath);
+
+    // Sync permissions to aiTools
+    setPermissions(activePermissions);
+    setAgentModeRef(agentMode);
+
+    // Inject project file context at session start so the AI knows what exists
+    const initialContext = buildContinueContext();
+    if (initialContext && round === 0) {
+        // Find the last system message and append project context
+        const lastSystemIdx = conversationMessages.findLastIndex(m => m.role === 'system');
+        if (lastSystemIdx >= 0) {
+            conversationMessages[lastSystemIdx] = {
+                ...conversationMessages[lastSystemIdx],
+                content: conversationMessages[lastSystemIdx].content + '\n\n## Current Session State\n' + initialContext,
+            };
+        }
+    }
+
+    // If this is a new conversation about an existing project, inject previous conversation summary
+    if (projectPath && conversationMessages.length <= 3) {
+        try {
+            const projectId = conversationMessages[0]?.content?.match(/projectId:\s*([^\s,]+)/)?.[1];
+            const { conversationStorage: convStore } = require('./storage');
+            // Try to find latest conversation for this project
+            const stored = localStorage?.getItem?.('onicode-active-project');
+            let projId = projectId;
+            if (!projId) {
+                // Match by project path in system prompt
+                const projMatch = conversationMessages[0]?.content?.match(/Path:\s*`([^`]+)`/);
+                if (projMatch) {
+                    // Search for recent project conversations
+                    const recent = convStore.list(10, 0);
+                    const found = recent.find(c => c.project_name && projectPath.endsWith(c.project_name));
+                    if (found) projId = found.project_id;
+                }
+            }
+            if (projId) {
+                const lastConv = convStore.getLatestForProject(projId);
+                if (lastConv && lastConv.messages) {
+                    const msgs = typeof lastConv.messages === 'string' ? JSON.parse(lastConv.messages) : lastConv.messages;
+                    if (msgs.length > 2) {
+                        // Build a compact summary of the last conversation
+                        const summaryParts = [];
+                        const aiMsgs = msgs.filter(m => m.role === 'ai' || m.role === 'assistant');
+                        const userMsgs = msgs.filter(m => m.role === 'user');
+                        if (userMsgs.length > 0) {
+                            summaryParts.push(`Previous session request: "${userMsgs[0].content?.slice(0, 200)}"`);
+                        }
+                        // Get last AI message (usually a summary of what was done)
+                        if (aiMsgs.length > 0) {
+                            const lastAI = aiMsgs[aiMsgs.length - 1];
+                            summaryParts.push(`Last AI response: "${lastAI.content?.slice(0, 500)}"`);
+                        }
+                        // Get tool steps if available
+                        const toolSteps = msgs.flatMap(m => m.toolSteps || []).filter(s => s.status === 'done');
+                        if (toolSteps.length > 0) {
+                            const toolNames = [...new Set(toolSteps.map(s => s.name))];
+                            summaryParts.push(`Tools used last session: ${toolNames.join(', ')}`);
+                        }
+
+                        if (summaryParts.length > 0) {
+                            const lastSystemIdx = conversationMessages.findLastIndex(m => m.role === 'system');
+                            if (lastSystemIdx >= 0) {
+                                conversationMessages[lastSystemIdx] = {
+                                    ...conversationMessages[lastSystemIdx],
+                                    content: conversationMessages[lastSystemIdx].content +
+                                        '\n\n## Previous Session Context\n' +
+                                        'The user previously worked on this project. Here is context from the last session:\n' +
+                                        summaryParts.join('\n') +
+                                        '\n\nUse this context to understand where they left off. Do NOT repeat completed work.',
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        } catch { /* previous conversation loading failed, proceed without */ }
+    }
 
     while (round < MAX_TOOL_ROUNDS) {
         round++;
@@ -892,7 +1250,7 @@ async function streamOpenAI(messages, providerConfig) {
         // ── Text-only response: check if we should auto-continue ──
         if (!result.hasToolCalls) {
             const summary = taskManager.getSummary();
-            const hasPendingTasks = summary.total > 0 && !summary.allDone;
+            const hasPendingTasks = summary.pending > 0 || summary.inProgress > 0;
             const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
 
             // Auto-continue if: tasks are pending AND (we haven't built anything yet OR tasks in-progress)
@@ -905,13 +1263,14 @@ async function streamOpenAI(messages, providerConfig) {
                     conversationMessages.push({ role: 'assistant', content: result.textContent });
                 }
 
-                // Build a specific continuation prompt based on what's missing
+                // Build context-rich continuation prompt so the AI doesn't lose track
+                const projectContext = buildContinueContext();
                 let continuePrompt;
                 if (!hasBuiltAnything) {
-                    continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files (package.json, tsconfig.json, source files, components, etc.). Do not explain — just make the tool calls.`;
+                    continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files. Do not explain — just make the tool calls.\n\n${projectContext}`;
                 } else {
                     const nextTask = summary.nextTask;
-                    continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.`;
+                    continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.\n\n${projectContext}`;
                 }
 
                 conversationMessages.push({ role: 'user', content: continuePrompt });
@@ -923,7 +1282,10 @@ async function streamOpenAI(messages, providerConfig) {
 
             // Actually done (no pending tasks, or max auto-continues reached)
             currentAIRequest = null;
+            sendCompletionSummary(toolsUsed);
             mainWindow?.webContents.send('ai-stream-done', null);
+            // Auto-extract memories from this conversation (background, non-blocking)
+            try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
             return { success: true };
         }
 
@@ -984,8 +1346,10 @@ async function streamOpenAI(messages, providerConfig) {
     }
 
     // Safety: max rounds reached
+    sendCompletionSummary(toolsUsed);
     mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum tool-calling rounds. Stopping.]*');
     mainWindow?.webContents.send('ai-stream-done', null);
+    try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
     currentAIRequest = null;
     return { success: true };
 }
@@ -1000,6 +1364,82 @@ ipcMain.handle('ai-abort', () => {
         currentAIRequest = null;
     }
     return { success: true };
+});
+
+// ══════════════════════════════════════════
+//  IPC: Agent & Process Runtime
+// ══════════════════════════════════════════
+
+ipcMain.handle('list-agents', () => {
+    return listAgents();
+});
+
+ipcMain.handle('list-background-processes', () => {
+    return getBackgroundProcesses().map(p => ({
+        id: p.id || String(p.pid),
+        command: p.command || 'unknown',
+        status: p.status || 'running',
+        pid: p.pid,
+        port: p.port,
+        startedAt: p.startedAt,
+    }));
+});
+
+ipcMain.handle('kill-background-process', async (_event, processId) => {
+    const procs = getBackgroundProcesses();
+    const proc = procs.find(p => p.id === processId);
+    if (!proc) return { error: 'Process not found' };
+    try {
+        if (proc.pid) {
+            // Kill the process group (negative PID) for background spawns
+            try { process.kill(-proc.pid, 'SIGTERM'); } catch {
+                process.kill(proc.pid, 'SIGTERM');
+            }
+        }
+        return { success: true };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('read-file-content', async (_event, filePath) => {
+    const fs = require('fs');
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const stats = fs.statSync(filePath);
+        return { content, size: stats.size, modified: stats.mtime.toISOString() };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+// ══════════════════════════════════════════
+//  IPC: Task Management (for UI)
+// ══════════════════════════════════════════
+
+ipcMain.handle('list-project-tasks', async (_event, projectPath) => {
+    try {
+        const { taskStorage } = require('./storage');
+        return taskStorage.getProjectTaskSummary(projectPath);
+    } catch {
+        return { pending: [], inProgress: [], done: [], archived: [], skipped: [] };
+    }
+});
+
+ipcMain.handle('archive-completed-tasks', async () => {
+    try {
+        const { taskStorage } = require('./storage');
+        const sessionId = getSessionId();
+        if (sessionId) taskStorage.archiveCompleted(sessionId);
+        // Also update in-memory tasks
+        taskManager.tasks.forEach(t => {
+            if (t.status === 'done' || t.status === 'skipped') t.status = 'archived';
+        });
+        taskManager._notifyRenderer();
+        return { success: true };
+    } catch (err) {
+        return { error: err.message };
+    }
 });
 
 // ══════════════════════════════════════════
@@ -1067,6 +1507,76 @@ async function generateSessionTitle(userMessage, providerConfig) {
             req.end();
         });
     } catch { return null; }
+}
+
+// ══════════════════════════════════════════
+//  Auto Memory Extraction
+// ══════════════════════════════════════════
+
+/**
+ * After each conversation exchange, extract learnings and append to daily memory log.
+ * Runs in background — non-blocking. OpenClaw-style memory building.
+ */
+function extractAndSaveMemory(messages, providerConfig) {
+    if (!providerConfig?.apiKey || messages.length < 4) return; // Need enough context
+    try {
+        const { appendMemory, readMemory } = require('./memory');
+        const today = new Date().toISOString().slice(0, 10);
+
+        // Extract key facts from the conversation
+        const userMsgs = messages.filter(m => m.role === 'user').map(m => m.content.slice(0, 300));
+        const aiMsgs = messages.filter(m => m.role === 'assistant' || m.role === 'ai').map(m => m.content.slice(0, 300));
+
+        // Simple heuristic extraction (no AI call needed — fast and free)
+        const learnings = [];
+
+        // Detect user preferences
+        for (const msg of userMsgs) {
+            const lower = msg.toLowerCase();
+            if (lower.includes('i prefer') || lower.includes('i like') || lower.includes('always use') || lower.includes('never use')) {
+                learnings.push(`User preference: ${msg.slice(0, 150)}`);
+            }
+            if (lower.includes('my name is')) {
+                const match = msg.match(/my name is\s+(\w+)/i);
+                if (match) learnings.push(`User name: ${match[1]}`);
+            }
+            if (lower.match(/use\s+(typescript|python|rust|go|java|react|vue|angular|next|svelte)/i)) {
+                const match = msg.match(/use\s+(typescript|python|rust|go|java|react|vue|angular|next|svelte)/i);
+                if (match) learnings.push(`Tech preference: ${match[1]}`);
+            }
+        }
+
+        // Detect project patterns
+        const toolSteps = messages.flatMap(m => m.toolSteps || []);
+        const filesCreated = toolSteps.filter(s => s.name === 'create_file').map(s => s.args?.file_path).filter(Boolean);
+        const projectsCreated = toolSteps.filter(s => s.name === 'init_project').map(s => s.args?.name).filter(Boolean);
+
+        if (projectsCreated.length > 0) {
+            learnings.push(`Created project(s): ${projectsCreated.join(', ')}`);
+        }
+        if (filesCreated.length > 3) {
+            learnings.push(`Created ${filesCreated.length} files`);
+        }
+
+        // Save to daily log if we found anything
+        if (learnings.length > 0) {
+            const entry = `\n### Session ${new Date().toLocaleTimeString()}\n${learnings.map(l => `- ${l}`).join('\n')}\n`;
+            appendMemory(`${today}.md`, entry);
+        }
+
+        // Also build up MEMORY.md with durable facts (user preferences only)
+        const prefs = learnings.filter(l => l.startsWith('User ') || l.startsWith('Tech '));
+        if (prefs.length > 0) {
+            const existing = readMemory('MEMORY.md') || '# Long-Term Memory\n';
+            // Don't duplicate — check if already present
+            const newPrefs = prefs.filter(p => !existing.includes(p));
+            if (newPrefs.length > 0) {
+                appendMemory('MEMORY.md', '\n' + newPrefs.map(p => `- ${p}`).join('\n'));
+            }
+        }
+    } catch (err) {
+        console.log('[Memory] Auto-extraction error:', err.message);
+    }
 }
 
 // ══════════════════════════════════════════
@@ -1144,6 +1654,9 @@ function setAgentMode(mode) {
     } else {
         activePermissions = { ...DEFAULT_PERMISSIONS };
     }
+    // Sync permissions to aiTools module
+    setPermissions(activePermissions);
+    setAgentModeRef(mode);
     mainWindow?.webContents.send('ai-agent-mode', mode);
     logger.info('agent-mode', `Switched to ${mode} mode`);
 }
@@ -1173,11 +1686,91 @@ registerConnectorIPC(ipcMain, () => mainWindow);
 registerMemoryIPC();
 registerLoggerIPC();
 registerBrowserIPC();
+registerHooksIPC(ipcMain);
+registerCommandsIPC(ipcMain);
+registerCompactorIPC(ipcMain);
 
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {
     return taskManager.getSummary();
 });
+
+// Load tasks for a project (on project activation / app startup)
+ipcMain.handle('load-project-tasks', async (_event, projectPath) => {
+    if (!projectPath) return { success: false, error: 'No project path' };
+    try {
+        taskManager.loadFromProject(projectPath);
+        return { success: true, summary: taskManager.getSummary() };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// ══════════════════════════════════════════
+//  Conversation Storage IPC (SQLite)
+// ══════════════════════════════════════════
+
+ipcMain.handle('conversation-save', async (_event, conv) => {
+    try {
+        conversationStorage.save(conv);
+        return { success: true };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('conversation-get', async (_event, id) => {
+    try {
+        const conv = conversationStorage.get(id);
+        return { success: true, conversation: conv };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('conversation-list', async (_event, limit, offset) => {
+    try {
+        const conversations = conversationStorage.listFull(limit || 50);
+        return { success: true, conversations };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('conversation-delete', async (_event, id) => {
+    try {
+        conversationStorage.delete(id);
+        return { success: true };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('conversation-search', async (_event, query) => {
+    try {
+        const results = conversationStorage.search(query);
+        return { success: true, results };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('conversation-migrate', async (_event, conversations) => {
+    try {
+        const result = conversationStorage.migrateFromLocalStorage(conversations);
+        return { success: true, ...result };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+// ══════════════════════════════════════════
+//  Initialize Permissions Sync
+// ══════════════════════════════════════════
+
+// Sync default permissions to aiTools on startup
+setPermissions(activePermissions);
+setAgentModeRef(agentMode);
 
 // ══════════════════════════════════════════
 //  App Lifecycle
@@ -1196,4 +1789,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
     killAllSessions();
+    killBackgroundProcesses();
+    try { closeDB(); } catch { }
 });

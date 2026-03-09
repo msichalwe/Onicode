@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 
-export type ThemeName = 'sand' | 'midnight' | 'obsidian' | 'ocean';
+export type ThemeName = 'sand' | 'midnight' | 'obsidian' | 'ocean' | 'aurora' | 'monokai' | 'rosepine' | 'nord' | 'catppuccin' | 'default-dark' | 'default-light' | 'neutral';
 
 interface ThemeContextType {
     theme: ThemeName;

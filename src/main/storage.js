@@ -1,0 +1,321 @@
+/**
+ * SQLite Storage Layer — Persistent storage for tasks, conversations, sessions
+ *
+ * Replaces in-memory TaskManager storage and localStorage conversations.
+ * Database: ~/.onicode/onicode.db
+ */
+
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+const { logger } = require('./logger');
+
+const DB_PATH = path.join(os.homedir(), '.onicode', 'onicode.db');
+
+let db = null;
+
+function getDB() {
+    if (db) return db;
+
+    // Ensure directory exists
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    try {
+        const Database = require('better-sqlite3');
+        db = new Database(DB_PATH);
+        db.pragma('journal_mode = WAL');
+        db.pragma('foreign_keys = ON');
+        initSchema();
+        logger.info('storage', `SQLite database opened: ${DB_PATH}`);
+    } catch (err) {
+        logger.error('storage', `Failed to open SQLite: ${err.message}`);
+        // Return a mock that does nothing — graceful degradation
+        db = createFallback();
+        return db;
+    }
+    return db;
+}
+
+function initSchema() {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            priority TEXT NOT NULL DEFAULT 'medium',
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            project_id TEXT,
+            project_path TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            messages TEXT NOT NULL,
+            scope TEXT DEFAULT 'general',
+            project_id TEXT,
+            project_name TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            project_id TEXT,
+            project_path TEXT,
+            tool_calls INTEGER DEFAULT 0,
+            files_created INTEGER DEFAULT 0,
+            files_modified INTEGER DEFAULT 0,
+            commands_run INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            summary TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+    `);
+}
+
+/**
+ * Fallback when SQLite is unavailable — stores in-memory with no persistence
+ */
+function createFallback() {
+    logger.warn('storage', 'Using in-memory fallback (no persistence)');
+    return {
+        _fallback: true,
+        prepare: () => ({
+            run: () => ({ changes: 0 }),
+            get: () => null,
+            all: () => [],
+        }),
+        exec: () => {},
+        pragma: () => {},
+    };
+}
+
+// ══════════════════════════════════════════
+//  Task Storage
+// ══════════════════════════════════════════
+
+const taskStorage = {
+    save(task, sessionId, projectId, projectPath) {
+        const d = getDB();
+        const stmt = d.prepare(`
+            INSERT OR REPLACE INTO tasks (id, session_id, content, status, priority, created_at, completed_at, project_id, project_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(task.id, sessionId, task.content, task.status, task.priority, task.createdAt, task.completedAt, projectId || null, projectPath || null);
+    },
+
+    update(taskId, updates, sessionId) {
+        const d = getDB();
+        const fields = [];
+        const values = [];
+        if (updates.status) { fields.push('status = ?'); values.push(updates.status); }
+        if (updates.content) { fields.push('content = ?'); values.push(updates.content); }
+        if (updates.priority) { fields.push('priority = ?'); values.push(updates.priority); }
+        if (updates.completedAt) { fields.push('completed_at = ?'); values.push(updates.completedAt); }
+        if (fields.length === 0) return;
+        values.push(taskId, sessionId);
+        d.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ? AND session_id = ?`).run(...values);
+    },
+
+    loadSession(sessionId) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY id').all(sessionId);
+    },
+
+    /** Load tasks for a project (across ALL sessions), most recent first */
+    loadProject(projectPath) {
+        const d = getDB();
+        return d.prepare(
+            'SELECT * FROM tasks WHERE project_path = ? ORDER BY created_at DESC'
+        ).all(projectPath);
+    },
+
+    /** Load the latest session's tasks for a project */
+    loadLatestProjectSession(projectPath) {
+        const d = getDB();
+        const row = d.prepare(
+            'SELECT session_id FROM tasks WHERE project_path = ? ORDER BY created_at DESC LIMIT 1'
+        ).get(projectPath);
+        if (!row) return [];
+        return d.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY id').all(row.session_id);
+    },
+
+    /** Archive completed tasks — move done/skipped tasks to an archive flag */
+    archiveCompleted(sessionId) {
+        const d = getDB();
+        d.prepare("UPDATE tasks SET status = 'archived' WHERE session_id = ? AND (status = 'done' OR status = 'skipped')").run(sessionId);
+    },
+
+    clearSession(sessionId) {
+        const d = getDB();
+        d.prepare('DELETE FROM tasks WHERE session_id = ?').run(sessionId);
+    },
+
+    getRecentSessions(limit = 10) {
+        const d = getDB();
+        return d.prepare('SELECT DISTINCT session_id, MIN(created_at) as started, COUNT(*) as task_count FROM tasks GROUP BY session_id ORDER BY started DESC LIMIT ?').all(limit);
+    },
+
+    /** Get all tasks for a project grouped by status */
+    getProjectTaskSummary(projectPath) {
+        const d = getDB();
+        const tasks = d.prepare('SELECT * FROM tasks WHERE project_path = ? ORDER BY created_at DESC').all(projectPath);
+        return {
+            pending: tasks.filter(t => t.status === 'pending'),
+            inProgress: tasks.filter(t => t.status === 'in_progress'),
+            done: tasks.filter(t => t.status === 'done'),
+            archived: tasks.filter(t => t.status === 'archived'),
+            skipped: tasks.filter(t => t.status === 'skipped'),
+        };
+    },
+};
+
+// ══════════════════════════════════════════
+//  Conversation Storage
+// ══════════════════════════════════════════
+
+const conversationStorage = {
+    save(conv) {
+        const d = getDB();
+        const stmt = d.prepare(`
+            INSERT OR REPLACE INTO conversations (id, title, messages, scope, project_id, project_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(conv.id, conv.title, JSON.stringify(conv.messages), conv.scope || 'general', conv.projectId || null, conv.projectName || null, conv.createdAt, conv.updatedAt);
+    },
+
+    get(id) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM conversations WHERE id = ?').get(id);
+        if (!row) return null;
+        return { ...row, messages: JSON.parse(row.messages) };
+    },
+
+    list(limit = 50, offset = 0) {
+        const d = getDB();
+        const rows = d.prepare('SELECT id, title, scope, project_id, project_name, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?').all(limit, offset);
+        return rows;
+    },
+
+    listFull(limit = 50) {
+        const d = getDB();
+        const rows = d.prepare('SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?').all(limit);
+        return rows.map(r => ({ ...r, messages: JSON.parse(r.messages) }));
+    },
+
+    delete(id) {
+        const d = getDB();
+        d.prepare('DELETE FROM conversations WHERE id = ?').run(id);
+    },
+
+    /** Get the most recent conversation for a project */
+    getLatestForProject(projectId) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM conversations WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1').get(projectId);
+        if (!row) return null;
+        return { ...row, messages: JSON.parse(row.messages) };
+    },
+
+    search(query, limit = 20) {
+        const d = getDB();
+        return d.prepare('SELECT id, title, scope, project_id, updated_at FROM conversations WHERE title LIKE ? OR messages LIKE ? ORDER BY updated_at DESC LIMIT ?')
+            .all(`%${query}%`, `%${query}%`, limit);
+    },
+
+    count() {
+        const d = getDB();
+        const row = d.prepare('SELECT COUNT(*) as count FROM conversations').get();
+        return row?.count || 0;
+    },
+
+    /** Migrate conversations from localStorage JSON array */
+    migrateFromLocalStorage(conversations) {
+        const d = getDB();
+        const existingCount = this.count();
+        if (existingCount > 0) return { migrated: 0, message: 'Database already has conversations' };
+
+        const stmt = d.prepare(`
+            INSERT OR IGNORE INTO conversations (id, title, messages, scope, project_id, project_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const migrate = d.transaction((convs) => {
+            let count = 0;
+            for (const conv of convs) {
+                stmt.run(conv.id, conv.title, JSON.stringify(conv.messages), conv.scope || 'general', conv.projectId || null, conv.projectName || null, conv.createdAt, conv.updatedAt);
+                count++;
+            }
+            return count;
+        });
+
+        const migrated = migrate(conversations);
+        logger.info('storage', `Migrated ${migrated} conversations from localStorage to SQLite`);
+        return { migrated };
+    },
+};
+
+// ══════════════════════════════════════════
+//  Session Storage
+// ══════════════════════════════════════════
+
+const sessionStorage = {
+    create(id, projectId, projectPath) {
+        const d = getDB();
+        d.prepare('INSERT INTO sessions (id, started_at, project_id, project_path) VALUES (?, ?, ?, ?)')
+            .run(id, Date.now(), projectId || null, projectPath || null);
+    },
+
+    update(id, updates) {
+        const d = getDB();
+        const fields = [];
+        const values = [];
+        for (const [key, val] of Object.entries(updates)) {
+            const col = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase -> snake_case
+            fields.push(`${col} = ?`);
+            values.push(val);
+        }
+        if (fields.length === 0) return;
+        values.push(id);
+        d.prepare(`UPDATE sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    },
+
+    end(id, summary) {
+        const d = getDB();
+        d.prepare('UPDATE sessions SET ended_at = ?, status = ?, summary = ? WHERE id = ?')
+            .run(Date.now(), 'completed', summary || null, id);
+    },
+
+    getRecent(limit = 10) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?').all(limit);
+    },
+};
+
+// ══════════════════════════════════════════
+//  Close / Cleanup
+// ══════════════════════════════════════════
+
+function closeDB() {
+    if (db && !db._fallback) {
+        try { db.close(); } catch { }
+        db = null;
+    }
+}
+
+module.exports = {
+    getDB,
+    closeDB,
+    taskStorage,
+    conversationStorage,
+    sessionStorage,
+};

@@ -39,11 +39,24 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('ai-tool-result', handler);
     },
 
+    // Open external URL or file path
+    openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
     onAgentStep: (callback) => {
         const handler = (_event, data) => callback(data);
         ipcRenderer.on('ai-agent-step', handler);
         return () => ipcRenderer.removeListener('ai-agent-step', handler);
     },
+
+    // Agent & process runtime
+    listAgents: () => ipcRenderer.invoke('list-agents'),
+    listBackgroundProcesses: () => ipcRenderer.invoke('list-background-processes'),
+    killBackgroundProcess: (processId) => ipcRenderer.invoke('kill-background-process', processId),
+    readFileContent: (filePath) => ipcRenderer.invoke('read-file-content', filePath),
+
+    // Task management (extends existing tasksList + onTasksUpdated)
+    listProjectTasks: (projectPath) => ipcRenderer.invoke('list-project-tasks', projectPath),
+    archiveCompletedTasks: () => ipcRenderer.invoke('archive-completed-tasks'),
 
     onPanelOpen: (callback) => {
         const handler = (_event, data) => callback(data);
@@ -143,6 +156,14 @@ contextBridge.exposeInMainWorld('onicode', {
     browserConsoleLogs: (opts) => ipcRenderer.invoke('browser-console-logs', opts),
     browserConsoleClear: () => ipcRenderer.invoke('browser-console-clear'),
 
+    // ── Conversations (SQLite) ──
+    conversationSave: (conv) => ipcRenderer.invoke('conversation-save', conv),
+    conversationGet: (id) => ipcRenderer.invoke('conversation-get', id),
+    conversationList: (limit, offset) => ipcRenderer.invoke('conversation-list', limit, offset),
+    conversationDelete: (id) => ipcRenderer.invoke('conversation-delete', id),
+    conversationSearch: (query) => ipcRenderer.invoke('conversation-search', query),
+    conversationMigrate: (conversations) => ipcRenderer.invoke('conversation-migrate', conversations),
+
     // ── Logger ──
     loggerGetRecent: (opts) => ipcRenderer.invoke('logger-get-recent', opts),
     loggerReadDay: (date) => ipcRenderer.invoke('logger-read-day', date),
@@ -150,10 +171,18 @@ contextBridge.exposeInMainWorld('onicode', {
 
     // ── Tasks ──
     tasksList: () => ipcRenderer.invoke('tasks-list'),
+    loadProjectTasks: (projectPath) => ipcRenderer.invoke('load-project-tasks', projectPath),
     onTasksUpdated: (callback) => {
         const handler = (_event, data) => callback(data);
         ipcRenderer.on('ai-tasks-updated', handler);
         return () => ipcRenderer.removeListener('ai-tasks-updated', handler);
+    },
+
+    // ── Live File Changes (from AI tool calls) ──
+    onFileChanged: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-file-changed', handler);
+        return () => ipcRenderer.removeListener('ai-file-changed', handler);
     },
 
     // ── Agent Mode & Permissions ──
@@ -188,6 +217,20 @@ contextBridge.exposeInMainWorld('onicode', {
     gitPull: (repoPath) => ipcRenderer.invoke('git-pull', repoPath),
     gitPush: (repoPath) => ipcRenderer.invoke('git-push', repoPath),
     gitShow: (repoPath, ref, filePath) => ipcRenderer.invoke('git-show', repoPath, ref, filePath),
+
+    // ── Hooks ──
+    hooksList: (projectPath) => ipcRenderer.invoke('hooks-list', projectPath),
+    hooksSave: (hooks, scope, projectPath) => ipcRenderer.invoke('hooks-save', hooks, scope, projectPath),
+    hooksTest: (hookType, context) => ipcRenderer.invoke('hooks-test', { hookType, context }),
+
+    // ── Custom Commands ──
+    customCommandsList: (projectPath) => ipcRenderer.invoke('custom-commands-list', projectPath),
+    customCommandsCreate: (name, content, scope, projectPath) => ipcRenderer.invoke('custom-commands-create', name, content, scope, projectPath),
+    customCommandsDelete: (name, scope, projectPath) => ipcRenderer.invoke('custom-commands-delete', name, scope, projectPath),
+
+    // ── Context Compaction ──
+    compactMessages: (messages) => ipcRenderer.invoke('compact-messages', messages),
+    estimateTokens: (messages) => ipcRenderer.invoke('estimate-tokens', messages),
 
     // Platform
     platform: process.platform,

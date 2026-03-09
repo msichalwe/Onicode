@@ -40,12 +40,24 @@ interface OnicodeAPI {
     onStreamChunk: (callback: (chunk: string) => void) => () => void;
     onStreamDone: (callback: (error: string | null) => void) => () => void;
     abortAI: () => Promise<{ success: boolean }>;
+    openExternal: (url: string) => Promise<void>;
 
     // AI Agentic Events
     onToolCall: (callback: (data: { id: string; name: string; args: Record<string, unknown>; round: number }) => void) => () => void;
     onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;
-    onAgentStep: (callback: (data: { round: number; status: string }) => void) => () => void;
+    onAgentStep: (callback: (data: { round: number; status: string; agentId?: string; task?: string }) => void) => () => void;
     onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
+
+    // Agent & Process Runtime
+    listAgents: () => Promise<Array<{ id: string; task: string; status: string; createdAt: number; result?: string }>>;
+    listBackgroundProcesses: () => Promise<Array<{ id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number }>>;
+    killBackgroundProcess: (processId: string) => Promise<{ success?: boolean; error?: string }>;
+    readFileContent: (filePath: string) => Promise<{ content?: string; size?: number; modified?: string; error?: string }>;
+
+    // Task Management (extended)
+    listProjectTasks: (projectPath: string) => Promise<{ pending: Array<unknown>; inProgress: Array<unknown>; done: Array<unknown>; archived: Array<unknown>; skipped: Array<unknown> }>;
+    archiveCompletedTasks: () => Promise<{ success?: boolean; error?: string }>;
+
     onTerminalSession: (callback: (data: {
         id: string;
         command: string;
@@ -188,6 +200,19 @@ interface OnicodeAPI {
     browserConsoleLogs: (opts?: { type?: string; limit?: number }) => Promise<{ success: boolean; logs: Array<{ type: string; text: string; ts: string }> }>;
     browserConsoleClear: () => Promise<{ success: boolean }>;
 
+    // Conversations (SQLite)
+    conversationSave: (conv: {
+        id: string; title: string; messages: Array<{ id: string; role: string; content: string; timestamp: number; toolSteps?: unknown[] }>;
+        scope?: string; projectId?: string; projectName?: string; createdAt: number; updatedAt: number;
+    }) => Promise<{ success?: boolean; error?: string }>;
+    conversationGet: (id: string) => Promise<{ success?: boolean; conversation?: unknown; error?: string }>;
+    conversationList: (limit?: number, offset?: number) => Promise<{ success?: boolean; conversations?: Array<{
+        id: string; title: string; messages: unknown[]; scope?: string; project_id?: string; project_name?: string; created_at: number; updated_at: number;
+    }>; error?: string }>;
+    conversationDelete: (id: string) => Promise<{ success?: boolean; error?: string }>;
+    conversationSearch: (query: string) => Promise<{ success?: boolean; results?: Array<{ id: string; title: string; scope?: string; updated_at: number }>; error?: string }>;
+    conversationMigrate: (conversations: unknown[]) => Promise<{ success?: boolean; migrated?: number; error?: string }>;
+
     // Logger
     loggerGetRecent: (opts?: { level?: string; category?: string; limit?: number; since?: string }) => Promise<{ success: boolean; entries: Array<{ ts: string; level: string; category: string; message: string; data: string | null }> }>;
     loggerReadDay: (date: string) => Promise<{ success: boolean; entries: Array<{ ts: string; level: string; category: string; message: string; data: string | null }> }>;
@@ -195,7 +220,11 @@ interface OnicodeAPI {
 
     // Tasks
     tasksList: () => Promise<TaskSummary>;
+    loadProjectTasks: (projectPath: string) => Promise<{ success: boolean; summary?: TaskSummary; error?: string }>;
     onTasksUpdated: (callback: (data: TaskSummary) => void) => () => void;
+
+    // Live File Changes (from AI tool calls)
+    onFileChanged: (callback: (data: { action: string; path: string; lines?: number; linesAdded?: number; linesRemoved?: number; dir?: string }) => void) => () => void;
 
     // Agent Mode & Permissions
     agentSetMode: (mode: string) => Promise<{ success: boolean; mode: string }>;
@@ -226,10 +255,37 @@ interface OnicodeAPI {
     gitPush: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
     gitShow: (repoPath: string, ref: string, filePath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
 
+    // Hooks
+    hooksList: () => Promise<{ hooks: Record<string, HookDefinition[]> }>;
+    hooksSave: (hooks: Record<string, HookDefinition[]>) => Promise<{ success: boolean; error?: string }>;
+    hooksTest: (hookType: string, context: Record<string, unknown>) => Promise<{ allowed: boolean; reason?: string; outputs: string[] }>;
+
+    // Custom Commands
+    customCommandsList: (projectPath?: string) => Promise<CustomCommand[]>;
+    customCommandsCreate: (name: string, content: string, scope: 'global' | 'project', projectPath?: string) => Promise<{ success: boolean; error?: string }>;
+    customCommandsDelete: (name: string, scope: 'global' | 'project', projectPath?: string) => Promise<{ success: boolean; error?: string }>;
+
+    // Context Compaction
+    compactMessages: (messages: Array<{ role: string; content: string; toolSteps?: unknown[] }>) => Promise<{ messages: Array<{ role: string; content: string }>; compacted: boolean; summary?: string }>;
+    estimateTokens: (messages: Array<{ role: string; content: string }>) => Promise<{ tokens: number; messageCount: number }>;
+
     platform: string;
 }
 
 declare global {
+    interface HookDefinition {
+        matcher?: string;
+        command: string;
+        timeout?: number;
+    }
+
+    interface CustomCommand {
+        name: string;
+        description: string;
+        prompt: string;
+        source: 'global' | 'project';
+    }
+
     interface TaskItem {
         id: number;
         content: string;

@@ -3,12 +3,16 @@
  */
 
 import { SLASH_COMMANDS } from '../commands/registry';
+import { getEnabledSkillsPrompt } from '../commands/skills';
 
 export interface AIContext {
     activeProjectName?: string;
     activeProjectPath?: string;
     projectDocs?: Array<{ name: string; content: string }>;
     customSystemPrompt?: string;
+    agentsMd?: string;
+    hooksSummary?: string;
+    customCommandsSummary?: string;
     fileContextSummary?: {
         filesRead: number;
         filesModified: number;
@@ -164,6 +168,11 @@ When \`task_list\` shows all tasks done, provide a summary.
 - \`restore_to_point(restore_point_id)\` — Roll back to a restore point
 - \`list_restore_points()\` — Show all restore points
 
+### Git (Version Control)
+- \`git_status(cwd?)\` — Check repository status: branch, changed files, ahead/behind
+- \`git_commit(message, cwd?, files?)\` — Stage and commit changes (conventional commits)
+- \`git_push(cwd?, set_upstream?)\` — Push to remote repository
+
 ### Sub-Agents
 - \`spawn_sub_agent(task, context_files?[])\` — Spawn a sub-agent for a sub-task
 - \`get_agent_status(agent_id)\` — Check sub-agent progress`);
@@ -195,14 +204,14 @@ Wait for the user's answers, then proceed to Phase 2. If the user says "just bui
 
 The ENTIRE build sequence in ONE agentic session (do NOT stop between steps):
 
-1. \`init_project({ name: "my-app", projectPath: "~/Documents/OniProjects/my-app" })\` — registers project
+1. \`init_project({ name: "my-app", projectPath: "~/OniProjects/my-app" })\` — registers project
 2. \`task_add\` x 4-6 — creates your build plan checklist
 3. \`task_update({ id: 1, status: "in_progress" })\` — start first task
-4. \`create_file("~/Documents/OniProjects/my-app/package.json", ...)\` — CREATE the actual file
-5. \`create_file("~/Documents/OniProjects/my-app/tsconfig.json", ...)\` — CREATE the actual file
-6. \`create_file("~/Documents/OniProjects/my-app/src/app/page.tsx", ...)\` — CREATE the actual source code
+4. \`create_file("~/OniProjects/my-app/package.json", ...)\` — CREATE the actual file
+5. \`create_file("~/OniProjects/my-app/tsconfig.json", ...)\` — CREATE the actual file
+6. \`create_file("~/OniProjects/my-app/src/app/page.tsx", ...)\` — CREATE the actual source code
 7. \`create_file\` x 10+ for all source files (components, layouts, API routes, styles, config)
-8. \`run_command("npm install", { cwd: "~/Documents/OniProjects/my-app" })\` — install deps
+8. \`run_command("npm install", { cwd: "~/OniProjects/my-app" })\` — install deps
 9. \`task_update({ id: 1, status: "done" })\` — mark done, continue to next task
 10. Repeat steps 3-9 for each task until all done
 11. \`run_command("npm run build")\` — verify build
@@ -217,16 +226,56 @@ The ENTIRE build sequence in ONE agentic session (do NOT stop between steps):
 - Pick the next pending task and EXECUTE it with \`create_file\`/\`run_command\`
 
 **Rules:**
-- All projects go in \`~/Documents/OniProjects/\` unless user specifies otherwise
+- All projects go in \`~/OniProjects/\` unless user specifies otherwise
 - **NEVER** create project files in the Onicode IDE source tree or root directory
 - Work inside the project directory — all \`run_command\` and \`create_file\` calls use the project path
 - The \`onidocs/tasks.md\` is the source of truth for progress
 - After building, run a quick verification (\`ls\`, build command, etc.) to confirm it works
 
+### Long-Running Commands (Dev Servers)
+\`run_command\` is SMART about dev servers. When you run \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`, etc.:
+- The command runs in the **background** — it does NOT block the agent loop
+- The system detects **port readiness** (waits for "ready", "listening on", "localhost:XXXX" in output)
+- If the **port is already in use**, it auto-kills the existing process and retries
+- The result includes \`background: true\`, \`pid\`, \`port\`, and \`url\` when the server is ready
+- **You do NOT need \`nohup\`, \`&\`, or \`sleep\` tricks.** Just run the command normally.
+
+Example flow:
+\`\`\`
+run_command({ command: "npm run dev", cwd: "/path/to/project" })
+→ { success: true, background: true, url: "http://localhost:5173", pid: 12345 }
+browser_navigate({ url: "http://localhost:5173" })
+\`\`\`
+
+### Version Control (Deep Git Integration)
+Every new project created with \`init_project\` automatically gets:
+- \`git init\` with a \`.gitignore\` (node_modules, dist, .env, etc.)
+- An initial commit: "Initial commit — project scaffolded by Onicode"
+- You do NOT need to run \`git init\` manually after \`init_project\`
+
+**You have dedicated git tools — use them aggressively:**
+- \`git_status(cwd?)\` — check what files changed before committing
+- \`git_commit(message, cwd?, files?)\` — stage and commit changes with a conventional commit message
+- \`git_push(cwd?, set_upstream?)\` — push to remote
+
+**Auto-Commit Protocol (MANDATORY):**
+1. After completing each major task or milestone → \`git_commit({ message: "feat: ..." })\`
+2. After a successful build passes → \`git_commit({ message: "build: verified build" })\`
+3. After fixing a critical bug → \`git_commit({ message: "fix: ..." })\`
+4. Before starting a risky change → commit the current stable state first
+5. At the end of a session → \`git_status\` → \`git_commit\` → \`git_push\`
+
+**Commit Message Format:** Use conventional commits (feat:, fix:, refactor:, docs:, chore:, build:, test:)
+
+**Auto-Push Protocol:**
+- After 3+ commits accumulate, push to remote
+- At the end of a session, always push
+- Before switching to a different task/branch, push current work
+
 ### Browser Testing (MANDATORY for Web Projects)
 After building any web project, you MUST verify it works using the browser tools:
-1. Start the dev server: \`run_command("npm run dev", cwd)\`
-2. Navigate to the app: \`browser_navigate({ url: "http://localhost:3000" })\`
+1. Start the dev server: \`run_command("npm run dev", { cwd })\` — it auto-detects readiness
+2. Navigate using the URL from the result: \`browser_navigate({ url: result.url })\`
 3. Check for errors: \`browser_console_logs({ type: "error" })\`
 4. Take a screenshot: \`browser_screenshot({ name: "initial-render" })\`
 5. If errors exist, fix them, restart, and re-test
@@ -247,12 +296,131 @@ When a tool call fails (command error, file not found, build failure):
 After completing a set of changes, call \`get_changelog()\` to see what was modified.
 When working in a project with \`.onidocs/changelog.md\`, append the auto-generated changelog to that file.`);
 
+    // ── Skills ──
+    const skillsPrompt = getEnabledSkillsPrompt();
+    if (skillsPrompt) {
+        parts.push(skillsPrompt);
+    }
+
+    // ── Hooks System ──
+    parts.push(`
+## Hooks System
+
+Onicode supports lifecycle hooks that trigger before/after tool calls. As the AI, you should:
+
+### Pre-Tool Hooks (before tool execution)
+- **Before file edits**: Always create a restore point when editing 3+ files
+- **Before run_command**: Check if the command is destructive (rm -rf, git reset --hard) — warn the user
+- **Before delete_file**: Confirm the file isn't imported/required elsewhere — use search_files first
+
+### Post-Tool Hooks (after tool execution)
+- **After create_file**: Verify the file was created with list_directory
+- **After run_command**: Check exit code — if non-zero, read the error and attempt a fix
+- **After edit_file**: If the edit was in a .ts/.tsx file, consider running the TypeScript compiler to check for errors
+- **After init_project**: Always run explore_codebase to understand what was set up
+
+### Session Hooks
+- **On session start**: If there's an active project, run get_context_summary to resume where you left off
+- **On milestone completion**: Auto-commit, update onidocs, and announce progress
+- **On error cascade (3+ consecutive failures)**: Stop, analyze the pattern, and try a fundamentally different approach`);
+
+    // ── MCP Capabilities ──
+    parts.push(`
+## Built-in Capabilities (MCP-style)
+
+### Sequential Thinking
+For complex multi-step problems, think step by step:
+1. Break the problem into sub-problems
+2. Solve each sub-problem independently
+3. Compose the solutions together
+4. Verify the composed solution works
+
+Use this approach when:
+- Debugging complex issues with multiple potential causes
+- Planning large features that span multiple files
+- Refactoring interconnected code
+- Any task where you're uncertain about the approach
+
+### Codebase Context Engine
+Before making changes to unfamiliar code:
+1. \`explore_codebase(projectPath)\` — get full project structure
+2. \`search_files(query)\` — find related code
+3. \`glob_files(pattern)\` — locate files by pattern
+4. \`read_file\` on key files (entry points, config, types)
+
+### Multi-Agent Orchestration
+For large tasks, use sub-agents to parallelize work:
+- \`spawn_sub_agent({ task: "Research: find all API endpoints", context_files: ["src/api/"] })\`
+- \`spawn_sub_agent({ task: "Analyze: check test coverage gaps" })\`
+- Sub-agents are read-only — they can search and read but not modify files
+- Use them for research, analysis, and planning while you handle execution
+- Check progress with \`get_agent_status(agentId)\`
+
+### Terminal Session Awareness
+You have access to terminal sessions. When you run commands:
+- Each \`run_command\` creates a tracked terminal session with status, output, and exit code
+- Long-running commands (dev servers) run in the background — you get notified when they're ready
+- You can spawn multiple terminal sessions for different purposes (build, test, dev server)
+- Always check previous command output before re-running the same command`);
+
+    // ── Milestone & Iteration Behavior ──
+    parts.push(`
+## Milestone Behavior (Auto-Commit & Self-Iteration)
+
+### Auto-Commit at Milestones
+After completing significant milestones, auto-commit your work:
+- After all project files are created and npm install succeeds
+- After a successful build (npm run build passes)
+- After fixing a critical bug
+- After completing a major feature/task group
+
+Use: \`run_command("git add -A && git commit -m 'feat: <description>'", { cwd: projectPath })\`
+
+### Self-Iteration Protocol
+After completing each task, SELF-CHECK your work:
+1. **Verify the file exists**: \`read_file\` or \`list_directory\`
+2. **Run the build**: \`run_command("npm run build")\` or equivalent
+3. **If the build fails**: Read the error, fix it, rebuild — DO NOT skip to the next task
+4. **After all tasks done**: Run a final verification pass:
+   - \`list_directory\` to confirm all files exist
+   - \`run_command("npm run build")\` to verify compilation
+   - For web apps: \`run_command("npm run dev")\` then \`browser_navigate\` then \`browser_screenshot\`
+
+### Error Recovery Loop
+When a command or tool fails:
+1. Read the full error output
+2. Identify the root cause (missing dependency, syntax error, wrong path)
+3. Fix it immediately — don't just report it
+4. Re-run the failed command to verify the fix
+5. Only after 3 failed attempts at the same fix, explain the blocker
+
+### Update Project Documentation
+After completing a set of changes, update the project's onidocs:
+- \`edit_file\` on \`onidocs/changelog.md\` — append what was built
+- \`edit_file\` on \`onidocs/tasks.md\` — mark completed tasks
+- \`edit_file\` on \`onidocs/architecture.md\` — if structure changed significantly`);
+
     // ── Active Project Context ──
     if (context.activeProjectName) {
         parts.push(`
 ## Active Project: ${context.activeProjectName}
 ${context.activeProjectPath ? `Path: \`${context.activeProjectPath}\`` : ''}
 This is the user's currently selected project. Prefer working within this path.`);
+    }
+
+    // ── AGENTS.md / Project Intelligence (Claude Code's CLAUDE.md equivalent) ──
+    if (context.agentsMd) {
+        parts.push(`\n## Project Intelligence (AGENTS.md)\nThis is the project's configuration and instructions file. Follow these instructions:\n\n${context.agentsMd.slice(0, 4000)}`);
+    }
+
+    // ── Active Hooks ──
+    if (context.hooksSummary) {
+        parts.push(`\n## Active Hooks\nThe following automation hooks are configured and will execute during your workflow:\n${context.hooksSummary}`);
+    }
+
+    // ── Custom Commands Available ──
+    if (context.customCommandsSummary) {
+        parts.push(`\n## Custom Commands Available\nThe user has these custom slash commands configured:\n${context.customCommandsSummary}\n\nWhen the user invokes one of these commands, the expanded prompt will be sent to you. Execute it.`);
     }
 
     // ── Project Docs ──

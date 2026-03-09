@@ -59,13 +59,13 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
                 <button
                     className={`sidebar-btn ${currentView === 'memories' ? 'active' : ''}`}
                     onClick={() => onViewChange('memories')}
-                    title="Memories"
+                    title="Agent Runtime"
                 >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
-                        <path d="M12 6v6l4 2" />
+                        <circle cx="12" cy="12" r="3" />
+                        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
                     </svg>
-                    Memory
+                    Agents
                 </button>
             </nav>
 

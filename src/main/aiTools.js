@@ -1,8 +1,15 @@
 /**
  * AI Tool System — Cascade-like tool definitions and executor
- * 
+ *
  * Provides OpenAI function-calling compatible tool definitions
  * and a tool executor that runs them in the main process.
+ *
+ * Features:
+ * - Permission enforcement (allow/ask/deny per tool)
+ * - Task persistence via SQLite
+ * - Real sub-agent execution
+ * - Session tracking
+ * - File size limits and path sanitization
  */
 
 const fs = require('fs');
@@ -25,6 +32,139 @@ function sendToRenderer(channel, data) {
     if (_mainWindow?.webContents) {
         _mainWindow.webContents.send(channel, data);
     }
+}
+
+// ══════════════════════════════════════════
+//  Permission Enforcement
+// ══════════════════════════════════════════
+
+let _permissions = null; // Set from index.js
+let _agentMode = 'build'; // Set from index.js
+
+function setPermissions(perms) { _permissions = perms; }
+function setAgentModeRef(mode) { _agentMode = mode; }
+
+/**
+ * Check if a tool is allowed to run given current permissions and agent mode.
+ * Returns { allowed: true } or { allowed: false, reason: string }
+ */
+function checkToolPermission(toolName) {
+    if (!_permissions) return { allowed: true };
+    const perm = _permissions[toolName] || 'allow';
+    if (perm === 'allow') return { allowed: true };
+    if (perm === 'deny') return { allowed: false, reason: `Tool "${toolName}" is denied by current permissions (agent mode: ${_agentMode})` };
+    if (perm === 'ask') {
+        // For 'ask' tools, send a request to the renderer and wait for approval
+        // For now, auto-allow but log a warning — full ask UI comes later
+        logger.warn('permissions', `Tool "${toolName}" requires approval (auto-allowing for now)`);
+        sendToRenderer('ai-permission-request', { tool: toolName, mode: _agentMode });
+        return { allowed: true, warned: true };
+    }
+    return { allowed: true };
+}
+
+// ══════════════════════════════════════════
+//  Path Sanitization
+// ══════════════════════════════════════════
+
+const BLOCKED_PATHS = [
+    path.join(os.homedir(), '.ssh'),
+    path.join(os.homedir(), '.gnupg'),
+    path.join(os.homedir(), '.aws'),
+    '/etc/shadow',
+    '/etc/passwd',
+];
+
+function isPathSafe(filePath) {
+    if (!filePath) return false;
+    const resolved = path.resolve(filePath.replace(/^~/, os.homedir()));
+    for (const blocked of BLOCKED_PATHS) {
+        if (resolved.startsWith(blocked)) return false;
+    }
+    return true;
+}
+
+// ══════════════════════════════════════════
+//  Session Tracking
+// ══════════════════════════════════════════
+
+let _currentSessionId = null;
+let _currentProjectId = null;
+let _currentProjectPath = null;
+
+function startSession(projectId, projectPath) {
+    // If same project is still active, keep the session (don't reset tasks)
+    if (_currentProjectPath && _currentProjectPath === projectPath && _currentSessionId) {
+        logger.info('session', `Continuing session ${_currentSessionId} for project ${projectPath}`);
+        return _currentSessionId;
+    }
+
+    _currentSessionId = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    _currentProjectId = projectId || null;
+    _currentProjectPath = projectPath || null;
+
+    // Persist to SQLite if available
+    try {
+        const { sessionStorage } = require('./storage');
+        sessionStorage.create(_currentSessionId, _currentProjectId, _currentProjectPath);
+    } catch { /* storage not yet initialized */ }
+
+    // If we have a project, load tasks from the latest session for that project
+    if (projectPath) {
+        try {
+            const { taskStorage } = require('./storage');
+            const previousTasks = taskStorage.loadLatestProjectSession(projectPath);
+            if (previousTasks.length > 0) {
+                // Carry forward pending/in-progress tasks, keep done tasks for history
+                taskManager.tasks = previousTasks.map(r => ({
+                    id: r.id,
+                    content: r.content,
+                    status: r.status,
+                    priority: r.priority,
+                    createdAt: r.created_at,
+                    completedAt: r.completed_at,
+                }));
+                taskManager.nextId = Math.max(...taskManager.tasks.map(t => t.id), 0) + 1;
+                taskManager._notifyRenderer();
+                logger.info('session', `Loaded ${previousTasks.length} tasks from previous project session`);
+            }
+        } catch (err) {
+            logger.warn('session', `Failed to load project tasks: ${err.message}`);
+        }
+    }
+
+    logger.info('session', `Started session ${_currentSessionId} for ${projectPath || 'general'}`);
+    return _currentSessionId;
+}
+
+function getSessionId() {
+    if (!_currentSessionId) startSession();
+    return _currentSessionId;
+}
+
+function updateSessionStats(toolName) {
+    try {
+        const { sessionStorage } = require('./storage');
+        const updates = {};
+        if (toolName === 'create_file') updates.filesCreated = 1;
+        else if (toolName === 'edit_file' || toolName === 'multi_edit') updates.filesModified = 1;
+        else if (toolName === 'run_command') updates.commandsRun = 1;
+        // For counts, we need to increment — use raw SQL
+        if (Object.keys(updates).length > 0) {
+            const { getDB } = require('./storage');
+            const db = getDB();
+            if (db && !db._fallback) {
+                const field = Object.keys(updates)[0];
+                db.prepare(`UPDATE sessions SET ${field} = ${field} + 1, tool_calls = tool_calls + 1 WHERE id = ?`).run(_currentSessionId);
+            }
+        } else {
+            const { getDB } = require('./storage');
+            const db = getDB();
+            if (db && !db._fallback) {
+                db.prepare('UPDATE sessions SET tool_calls = tool_calls + 1 WHERE id = ?').run(_currentSessionId);
+            }
+        }
+    } catch { /* storage not available */ }
 }
 
 // ══════════════════════════════════════════
@@ -165,6 +305,34 @@ class FileContextTracker {
 const fileContext = new FileContextTracker();
 
 // ══════════════════════════════════════════
+//  Background Process Manager (dev servers, watchers)
+// ══════════════════════════════════════════
+
+const _backgroundProcesses = new Map(); // sessionId -> { child, command, port, cwd }
+
+function killBackgroundProcesses() {
+    for (const [id, entry] of _backgroundProcesses) {
+        try {
+            if (entry.child && !entry.child.killed) {
+                process.kill(-entry.child.pid, 'SIGTERM');
+            }
+        } catch {
+            try { entry.child.kill('SIGTERM'); } catch { /* already dead */ }
+        }
+        logger.info('bg-process', `Killed background process ${id}: ${entry.command}`);
+    }
+    _backgroundProcesses.clear();
+}
+
+function getBackgroundProcesses() {
+    const result = [];
+    for (const [id, entry] of _backgroundProcesses) {
+        result.push({ id, command: entry.command, port: entry.port, cwd: entry.cwd, pid: entry.child?.pid });
+    }
+    return result;
+}
+
+// ══════════════════════════════════════════
 //  Task Manager — AI-managed task list
 // ══════════════════════════════════════════
 
@@ -179,6 +347,22 @@ class TaskManager {
         sendToRenderer('ai-tasks-updated', this.getSummary());
     }
 
+    // Persist a task to SQLite
+    _persist(task) {
+        try {
+            const { taskStorage } = require('./storage');
+            taskStorage.save(task, getSessionId(), _currentProjectId, _currentProjectPath);
+        } catch { /* storage not available */ }
+    }
+
+    // Persist a task update to SQLite
+    _persistUpdate(id, updates) {
+        try {
+            const { taskStorage } = require('./storage');
+            taskStorage.update(id, updates, getSessionId());
+        } catch { /* storage not available */ }
+    }
+
     addTask(content, priority = 'medium') {
         const task = {
             id: this.nextId++,
@@ -189,6 +373,7 @@ class TaskManager {
             completedAt: null,
         };
         this.tasks.push(task);
+        this._persist(task);
         logger.info('task-mgr', `Added task #${task.id}: ${content}`);
         this._notifyRenderer();
         return task;
@@ -203,6 +388,7 @@ class TaskManager {
         }
         if (updates.content) task.content = updates.content;
         if (updates.priority) task.priority = updates.priority;
+        this._persistUpdate(id, { ...updates, completedAt: task.completedAt });
         logger.info('task-mgr', `Updated task #${id}: ${task.status}`);
         this._notifyRenderer();
         return task;
@@ -251,13 +437,63 @@ class TaskManager {
     }
 
     clear() {
+        try {
+            const { taskStorage } = require('./storage');
+            taskStorage.clearSession(getSessionId());
+        } catch { /* storage not available */ }
         this.tasks = [];
         this.nextId = 1;
         this._notifyRenderer();
     }
+
+    /** Load tasks for a project from the latest session */
+    loadFromProject(projectPath) {
+        try {
+            const { taskStorage } = require('./storage');
+            const rows = taskStorage.loadLatestProjectSession(projectPath);
+            this.tasks = rows.map(r => ({
+                id: r.id,
+                content: r.content,
+                status: r.status,
+                priority: r.priority,
+                createdAt: r.created_at,
+                completedAt: r.completed_at,
+            }));
+            this.nextId = this.tasks.length > 0 ? Math.max(...this.tasks.map(t => t.id)) + 1 : 1;
+            this._notifyRenderer();
+            logger.info('task-mgr', `Loaded ${this.tasks.length} tasks for project ${projectPath}`);
+        } catch (err) {
+            logger.warn('task-mgr', `Failed to load project tasks: ${err.message}`);
+        }
+    }
+
+    /** Load tasks from a previous session (for recovery) */
+    loadFromSession(sessionId) {
+        try {
+            const { taskStorage } = require('./storage');
+            const rows = taskStorage.loadSession(sessionId);
+            this.tasks = rows.map(r => ({
+                id: r.id,
+                content: r.content,
+                status: r.status,
+                priority: r.priority,
+                createdAt: r.created_at,
+                completedAt: r.completed_at,
+            }));
+            this.nextId = this.tasks.length > 0 ? Math.max(...this.tasks.map(t => t.id)) + 1 : 1;
+            this._notifyRenderer();
+            logger.info('task-mgr', `Loaded ${this.tasks.length} tasks from session ${sessionId}`);
+        } catch (err) {
+            logger.warn('task-mgr', `Failed to load session: ${err.message}`);
+        }
+    }
 }
 
 const taskManager = new TaskManager();
+
+// Provider config reference for sub-agent calls
+let _lastProviderConfig = null;
+function setLastProviderConfig(config) { _lastProviderConfig = config; }
 
 // ══════════════════════════════════════════
 //  Terminal Session Tracking
@@ -377,10 +613,14 @@ class RestorePointManager {
 const restorePoints = new RestorePointManager();
 
 // ══════════════════════════════════════════
-//  Sub-Agent System
+//  Sub-Agent System — Real Execution
 // ══════════════════════════════════════════
 
 const activeAgents = new Map();
+
+// Reference to the streamOpenAISingle function from index.js (set at init time)
+let _makeAICall = null;
+function setAICallFunction(fn) { _makeAICall = fn; }
 
 function createSubAgent(id, task, parentContext) {
     const agent = {
@@ -391,9 +631,124 @@ function createSubAgent(id, task, parentContext) {
         messages: [],
         result: null,
         parentContext,
+        toolsUsed: [],
     };
     activeAgents.set(id, agent);
     return agent;
+}
+
+/**
+ * Actually execute a sub-agent task.
+ * The sub-agent gets read-only tools + search + terminal.
+ * It runs a mini agentic loop (up to 10 rounds) and returns results.
+ */
+async function executeSubAgent(agentId, task, contextFiles, providerConfig) {
+    const agent = activeAgents.get(agentId);
+    if (!agent) return { error: 'Agent not found' };
+
+    // Build context from files
+    let fileContext = '';
+    if (contextFiles && contextFiles.length > 0) {
+        for (const fp of contextFiles) {
+            try {
+                const expanded = fp.replace(/^~/, os.homedir());
+                if (fs.existsSync(expanded)) {
+                    const content = fs.readFileSync(expanded, 'utf-8');
+                    fileContext += `\n\n--- File: ${fp} ---\n${content.slice(0, 5000)}`;
+                }
+            } catch { /* skip unreadable */ }
+        }
+    }
+
+    const subAgentPrompt = `You are a focused sub-agent. Your task: ${task}
+
+You have access to read_file, search_files, list_directory, glob_files, and explore_codebase tools.
+Complete the task and return a clear, actionable summary.
+${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
+
+    // Sub-agent only gets read-only tools
+    const readOnlyTools = TOOL_DEFINITIONS.filter(t =>
+        ['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase', 'get_context_summary'].includes(t.function.name)
+    );
+
+    if (!_makeAICall) {
+        agent.status = 'error';
+        agent.result = { error: 'AI call function not configured. Sub-agents require a provider connection.' };
+        return agent.result;
+    }
+
+    try {
+        const MAX_SUB_ROUNDS = 10;
+        const messages = [
+            { role: 'system', content: subAgentPrompt },
+            { role: 'user', content: task },
+        ];
+
+        for (let round = 0; round < MAX_SUB_ROUNDS; round++) {
+            const result = await _makeAICall(messages, providerConfig, readOnlyTools);
+
+            if (result.error) {
+                agent.status = 'error';
+                agent.result = { error: result.error };
+                return agent.result;
+            }
+
+            // No tool calls — sub-agent is done
+            if (!result.hasToolCalls && !result.functionCalls?.length) {
+                agent.status = 'done';
+                agent.result = {
+                    content: result.textContent || result.content || '',
+                    toolsUsed: agent.toolsUsed,
+                    rounds: round + 1,
+                };
+                return agent.result;
+            }
+
+            // Execute tool calls
+            const toolCalls = result.toolCalls || result.functionCalls || [];
+            const assistantMsg = { role: 'assistant', content: result.textContent || null };
+            if (toolCalls.length > 0) {
+                assistantMsg.tool_calls = toolCalls.map(tc => ({
+                    id: tc.id || tc.call_id,
+                    type: 'function',
+                    function: { name: tc.name, arguments: tc.arguments },
+                }));
+            }
+            messages.push(assistantMsg);
+
+            for (const tc of toolCalls) {
+                let args;
+                try { args = JSON.parse(tc.arguments); } catch { args = {}; }
+
+                agent.toolsUsed.push(tc.name);
+
+                // Only allow read-only tools for sub-agents
+                if (!['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase', 'get_context_summary'].includes(tc.name)) {
+                    messages.push({
+                        role: 'tool',
+                        tool_call_id: tc.id || tc.call_id,
+                        content: JSON.stringify({ error: `Tool "${tc.name}" not available to sub-agents. Use only read-only tools.` }),
+                    });
+                    continue;
+                }
+
+                const toolResult = await executeTool(tc.name, args);
+                messages.push({
+                    role: 'tool',
+                    tool_call_id: tc.id || tc.call_id,
+                    content: JSON.stringify(toolResult).slice(0, 8000),
+                });
+            }
+        }
+
+        agent.status = 'done';
+        agent.result = { content: 'Sub-agent reached max rounds.', toolsUsed: agent.toolsUsed, rounds: MAX_SUB_ROUNDS };
+        return agent.result;
+    } catch (err) {
+        agent.status = 'error';
+        agent.result = { error: err.message };
+        return agent.result;
+    }
 }
 
 function updateAgent(id, update) {
@@ -937,6 +1292,65 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'index_project',
+            description: 'Index a project directory to build a searchable map of all source files, their exports, imports, and key structures. Returns a condensed project context for better understanding. Use before making complex changes to unfamiliar codebases.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    project_path: { type: 'string', description: 'Path to the project root' },
+                    file_types: { type: 'string', description: 'Comma-separated extensions to index (default: ts,tsx,js,jsx,py,go,rs,java,css,html)' },
+                    max_files: { type: 'integer', description: 'Maximum files to index (default 100)' },
+                },
+                required: ['project_path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_status',
+            description: 'Get git status for a repository — branch, changed files, ahead/behind counts. Use before committing to see what changed.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_commit',
+            description: 'Stage all changes and create a git commit. Use after completing milestones, features, or bug fixes.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    message: { type: 'string', description: 'Commit message (use conventional commits: feat:, fix:, refactor:, docs:, chore:)' },
+                    cwd: { type: 'string', description: 'Repository path' },
+                    files: { type: 'string', description: 'Files to stage (default: -A for all). Can be specific paths separated by spaces.' },
+                },
+                required: ['message'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_push',
+            description: 'Push committed changes to the remote repository. Use after committing to sync with remote.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cwd: { type: 'string', description: 'Repository path' },
+                    set_upstream: { type: 'boolean', description: 'Set upstream tracking branch (default true for first push)' },
+                },
+            },
+        },
+    },
 ];
 
 // ══════════════════════════════════════════
@@ -944,12 +1358,35 @@ const TOOL_DEFINITIONS = [
 // ══════════════════════════════════════════
 
 async function executeTool(name, args) {
+    // ── Permission check ──
+    const permCheck = checkToolPermission(name);
+    if (!permCheck.allowed) {
+        logger.warn('permissions', `Denied: ${name} — ${permCheck.reason}`);
+        return { error: permCheck.reason };
+    }
+
+    // ── Path safety check for file operations ──
+    const fileTools = ['read_file', 'edit_file', 'create_file', 'delete_file', 'multi_edit'];
+    if (fileTools.includes(name) && args.file_path) {
+        if (!isPathSafe(args.file_path)) {
+            return { error: `Access denied: "${args.file_path}" is in a restricted location (.ssh, .gnupg, .aws, etc.)` };
+        }
+    }
+
+    // ── Track session stats ──
+    updateSessionStats(name);
+
     try {
         switch (name) {
             case 'read_file': {
                 const { file_path, start_line, end_line } = args;
                 if (!fs.existsSync(file_path)) {
                     return { error: `File not found: ${file_path}` };
+                }
+                // File size guard — refuse files larger than 10MB
+                const stat = fs.statSync(file_path);
+                if (stat.size > 10 * 1024 * 1024) {
+                    return { error: `File too large (${Math.round(stat.size / 1024 / 1024)}MB). Max 10MB. Use start_line/end_line for large files.` };
                 }
                 const content = fs.readFileSync(file_path, 'utf-8');
                 const lines = content.split('\n');
@@ -985,12 +1422,23 @@ async function executeTool(name, args) {
                 fs.writeFileSync(file_path, newContent);
                 fileContext.trackEdit(file_path, old_string, new_string);
 
+                const linesRemoved = old_string.split('\n').length;
+                const linesAdded = new_string.split('\n').length;
+
+                // Notify renderer for live file panel updates
+                sendToRenderer('ai-file-changed', {
+                    action: 'edit',
+                    path: file_path,
+                    linesAdded: Math.max(0, linesAdded - linesRemoved),
+                    linesRemoved: Math.max(0, linesRemoved - linesAdded),
+                });
+
                 return {
                     success: true,
                     file_path,
                     description: description || 'File edited',
-                    lines_removed: old_string.split('\n').length,
-                    lines_added: new_string.split('\n').length,
+                    lines_removed: linesRemoved,
+                    lines_added: linesAdded,
                 };
             }
 
@@ -1002,8 +1450,18 @@ async function executeTool(name, args) {
                     return { error: `File already exists: ${file_path}. Use edit_file to modify it.` };
                 }
                 fs.writeFileSync(file_path, content);
+                const lineCount = content.split('\n').length;
                 fileContext.trackCreate(file_path, content);
-                return { success: true, file_path, lines: content.split('\n').length };
+
+                // Notify renderer for live file panel updates
+                sendToRenderer('ai-file-changed', {
+                    action: 'create',
+                    path: file_path,
+                    lines: lineCount,
+                    dir: dir,
+                });
+
+                return { success: true, file_path, lines: lineCount };
             }
 
             case 'delete_file': {
@@ -1096,6 +1554,28 @@ async function executeTool(name, args) {
                 const { command, cwd, timeout = 120000 } = args;
                 const execCwd = cwd || os.homedir();
 
+                // ── Detect long-running / dev server commands ──
+                const LONG_RUNNING_PATTERNS = [
+                    /\bnpm\s+run\s+(dev|start|serve)\b/,
+                    /\byarn\s+(dev|start|serve)\b/,
+                    /\bpnpm\s+(dev|start|serve)\b/,
+                    /\bbun\s+(dev|start|serve|run\s+dev)\b/,
+                    /\bnpx\s+(vite|next\s+dev|nuxt\s+dev|remix\s+dev|astro\s+dev)\b/,
+                    /\bnode\s+.*server/,
+                    /\bpython\s+.*manage\.py\s+runserver/,
+                    /\buvicorn\b/,
+                    /\bflask\s+run\b/,
+                    /\bcargo\s+watch\b/,
+                    /\bgo\s+run\b.*server/,
+                ];
+                const isLongRunning = LONG_RUNNING_PATTERNS.some(p => p.test(command));
+
+                // ── Detect port from command ──
+                const portMatch = command.match(/--port\s+(\d+)|:(\d+)|PORT[= ](\d+)|-p\s+(\d+)/);
+                const expectedPort = portMatch
+                    ? parseInt(portMatch[1] || portMatch[2] || portMatch[3] || portMatch[4], 10)
+                    : isLongRunning ? 3000 : null; // Default dev port
+
                 // Auto-open terminal panel in renderer
                 sendToRenderer('ai-panel-open', { type: 'terminal' });
 
@@ -1106,6 +1586,8 @@ async function executeTool(name, args) {
                     cwd: execCwd,
                     startedAt: Date.now(),
                     status: 'running',
+                    isLongRunning,
+                    port: expectedPort,
                 };
                 terminalSessions.push(sessionEntry);
                 sendToRenderer('ai-terminal-session', sessionEntry);
@@ -1118,6 +1600,207 @@ async function executeTool(name, args) {
                     cwd: execCwd,
                 });
 
+                // ── Port-in-use check before starting dev servers ──
+                if (isLongRunning && expectedPort) {
+                    try {
+                        const netModule = require('net');
+                        const portInUse = await new Promise((res) => {
+                            const tester = netModule.createServer()
+                                .once('error', (err) => res(err.code === 'EADDRINUSE'))
+                                .once('listening', () => { tester.close(); res(false); })
+                                .listen(expectedPort);
+                        });
+                        if (portInUse) {
+                            // Kill existing process on the port and inform
+                            try { execSync(`lsof -ti:${expectedPort} | xargs kill -9 2>/dev/null`, { timeout: 3000 }); } catch { /* nothing on port or kill failed */ }
+                            sendToRenderer('ai-terminal-output', {
+                                sessionId: sessionEntry.id,
+                                type: 'stdout',
+                                data: `\x1b[33m⚠ Port ${expectedPort} was in use — freed it.\x1b[0m\n`,
+                            });
+                            // Small delay to let the port release
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+                    } catch { /* port check failed, proceed anyway */ }
+                }
+
+                // ── Long-running command: run in background, wait for port/output readiness ──
+                if (isLongRunning) {
+                    return new Promise((resolve) => {
+                        let stdout = '';
+                        let stderr = '';
+                        let resolved = false;
+
+                        const child = spawn('sh', ['-c', command], {
+                            cwd: execCwd,
+                            env: { ...process.env },
+                            stdio: ['ignore', 'pipe', 'pipe'],
+                            detached: true,
+                        });
+
+                        // Store the child PID so we can clean it up later
+                        sessionEntry.pid = child.pid;
+                        _backgroundProcesses.set(sessionEntry.id, { child, command, port: expectedPort, cwd: execCwd });
+
+                        const readyTimeout = setTimeout(() => {
+                            if (!resolved) {
+                                resolved = true;
+                                sessionEntry.status = 'running';
+                                sendToRenderer('ai-terminal-session', sessionEntry);
+                                resolve({
+                                    command,
+                                    cwd: execCwd,
+                                    exitCode: null,
+                                    success: true,
+                                    background: true,
+                                    pid: child.pid,
+                                    port: expectedPort,
+                                    stdout: stdout.slice(0, 4000),
+                                    stderr: stderr.slice(0, 2000),
+                                    message: `Dev server started in background (PID ${child.pid}). Output is streaming. ${expectedPort ? `Expected on port ${expectedPort}.` : ''}`,
+                                    hint: expectedPort ? `Use browser_navigate("http://localhost:${expectedPort}") to test the app.` : undefined,
+                                });
+                            }
+                        }, 15000); // Max 15s wait for readiness signals
+
+                        // Check for readiness signals in output
+                        const checkReady = (text) => {
+                            if (resolved) return;
+                            const readyPatterns = [
+                                /ready in/i,
+                                /listening on/i,
+                                /started server on/i,
+                                /local:\s+http/i,
+                                /running at/i,
+                                /compiled.*successfully/i,
+                                /webpack compiled/i,
+                                /server running/i,
+                                /available on/i,
+                                /➜\s+Local:/,
+                                /localhost:\d+/,
+                            ];
+                            if (readyPatterns.some(p => p.test(text))) {
+                                clearTimeout(readyTimeout);
+                                resolved = true;
+                                // Extract the actual URL/port from output
+                                const urlMatch = text.match(/https?:\/\/localhost[:\d]*/);
+                                const actualUrl = urlMatch ? urlMatch[0] : (expectedPort ? `http://localhost:${expectedPort}` : null);
+
+                                sessionEntry.status = 'running';
+                                sessionEntry.url = actualUrl;
+                                sendToRenderer('ai-terminal-session', sessionEntry);
+
+                                resolve({
+                                    command,
+                                    cwd: execCwd,
+                                    exitCode: null,
+                                    success: true,
+                                    background: true,
+                                    pid: child.pid,
+                                    port: expectedPort,
+                                    url: actualUrl,
+                                    stdout: stdout.slice(0, 4000),
+                                    stderr: stderr.slice(0, 2000),
+                                    message: `Dev server is ready! ${actualUrl || ''}`,
+                                    hint: actualUrl ? `Use browser_navigate("${actualUrl}") to test the app.` : undefined,
+                                });
+                            }
+                        };
+
+                        // Check for port-in-use error
+                        const checkPortError = (text) => {
+                            if (resolved) return;
+                            if (/EADDRINUSE|address already in use|port.*already|is already being used/i.test(text)) {
+                                clearTimeout(readyTimeout);
+                                resolved = true;
+                                child.kill('SIGTERM');
+                                sessionEntry.status = 'error';
+                                sessionEntry.finishedAt = Date.now();
+                                sessionEntry.duration = sessionEntry.finishedAt - sessionEntry.startedAt;
+                                sendToRenderer('ai-terminal-session', sessionEntry);
+
+                                resolve({
+                                    command,
+                                    cwd: execCwd,
+                                    exitCode: 1,
+                                    success: false,
+                                    stdout: stdout.slice(0, 4000),
+                                    stderr: stderr.slice(0, 2000),
+                                    error: `Port ${expectedPort || 'unknown'} is already in use.`,
+                                    suggestion: `Kill the process using the port first: run_command("lsof -ti:${expectedPort || 3000} | xargs kill -9") then retry.`,
+                                });
+                            }
+                        };
+
+                        child.stdout.on('data', (chunk) => {
+                            const text = chunk.toString();
+                            stdout += text;
+                            sendToRenderer('ai-terminal-output', {
+                                sessionId: sessionEntry.id,
+                                type: 'stdout',
+                                data: text,
+                            });
+                            checkReady(text);
+                        });
+
+                        child.stderr.on('data', (chunk) => {
+                            const text = chunk.toString();
+                            stderr += text;
+                            sendToRenderer('ai-terminal-output', {
+                                sessionId: sessionEntry.id,
+                                type: 'stderr',
+                                data: `\x1b[31m${text}\x1b[0m`,
+                            });
+                            checkReady(text); // Some tools print to stderr
+                            checkPortError(text);
+                        });
+
+                        child.on('close', (code) => {
+                            clearTimeout(readyTimeout);
+                            _backgroundProcesses.delete(sessionEntry.id);
+                            sessionEntry.status = code === 0 ? 'done' : 'error';
+                            sessionEntry.exitCode = code;
+                            sessionEntry.finishedAt = Date.now();
+                            sessionEntry.duration = sessionEntry.finishedAt - sessionEntry.startedAt;
+                            sendToRenderer('ai-terminal-session', sessionEntry);
+                            sendToRenderer('ai-terminal-output', {
+                                sessionId: sessionEntry.id,
+                                type: 'exit',
+                                data: `\x1b[${code === 0 ? '32' : '31'}m${code === 0 ? '✓' : '✗'} exit ${code}\x1b[0m\n\n`,
+                            });
+                            logger.cmdExec(command, execCwd, code, sessionEntry.duration);
+                            if (!resolved) {
+                                resolved = true;
+                                resolve({
+                                    command, cwd: execCwd, exitCode: code ?? 1,
+                                    stdout: stdout.slice(0, 8000), stderr: stderr.slice(0, 4000),
+                                    success: code === 0,
+                                });
+                            }
+                        });
+
+                        child.on('error', (err) => {
+                            clearTimeout(readyTimeout);
+                            _backgroundProcesses.delete(sessionEntry.id);
+                            if (!resolved) {
+                                resolved = true;
+                                sessionEntry.status = 'error';
+                                sessionEntry.finishedAt = Date.now();
+                                sendToRenderer('ai-terminal-session', sessionEntry);
+                                resolve({
+                                    command, cwd: execCwd, exitCode: 1,
+                                    stdout: '', stderr: err.message,
+                                    success: false, error_code: err.code,
+                                });
+                            }
+                        });
+
+                        // Unref so the child doesn't block app exit
+                        child.unref();
+                    });
+                }
+
+                // ── Standard command: run and wait for exit ──
                 return new Promise((resolve) => {
                     let stdout = '';
                     let stderr = '';
@@ -1259,13 +1942,22 @@ async function executeTool(name, args) {
             case 'spawn_sub_agent': {
                 const { task, context_files } = args;
                 const agentId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                const agent = createSubAgent(agentId, task, { context_files });
-                // The actual sub-agent execution is handled by the agentic loop
+                createSubAgent(agentId, task, { context_files });
+
+                // Notify renderer that a sub-agent is running
+                sendToRenderer('ai-agent-step', { round: 0, status: 'sub-agent', agentId, task });
+
+                // Execute the sub-agent synchronously (it has its own mini agentic loop)
+                // We need a provider config — get it from the parent context
+                const result = await executeSubAgent(agentId, task, context_files, _lastProviderConfig);
+
                 return {
                     agent_id: agentId,
                     task,
-                    status: 'created',
-                    message: 'Sub-agent spawned. It will process the task asynchronously.',
+                    status: result.error ? 'error' : 'done',
+                    result: result.content || result.error,
+                    tools_used: result.toolsUsed || [],
+                    rounds: result.rounds || 0,
                 };
             }
 
@@ -1310,28 +2002,31 @@ async function executeTool(name, args) {
 
             case 'init_project': {
                 const { name: projName, projectPath, description: projDesc, techStack } = args;
-                // Expand ~ to home directory
-                const expandedPath = projectPath.replace(/^~/, os.homedir());
+                // Expand ~ to home directory — use ~/OniProjects/ by default (avoids macOS TCC permission issues with ~/Documents/)
+                let expandedPath = projectPath.replace(/^~/, os.homedir());
+                // If the path uses ~/Documents/OniProjects, redirect to ~/OniProjects to avoid macOS sandbox issues
+                const docsOniProjects = path.join(os.homedir(), 'Documents', 'OniProjects');
+                if (expandedPath.startsWith(docsOniProjects)) {
+                    expandedPath = expandedPath.replace(docsOniProjects, path.join(os.homedir(), 'OniProjects'));
+                }
 
                 const result = await new Promise((resolve) => {
-                    const projFs = require('fs');
-                    const projPath = require('path');
 
                     // Ensure project directory exists
-                    if (!projFs.existsSync(expandedPath)) {
-                        projFs.mkdirSync(expandedPath, { recursive: true });
+                    if (!fs.existsSync(expandedPath)) {
+                        fs.mkdirSync(expandedPath, { recursive: true });
                     }
 
                     // Create onidocs directory (no dot prefix — matches project-get and project-init IPC)
-                    const onidocsDir = projPath.join(expandedPath, 'onidocs');
-                    if (!projFs.existsSync(onidocsDir)) {
-                        projFs.mkdirSync(onidocsDir, { recursive: true });
+                    const onidocsDir = path.join(expandedPath, 'onidocs');
+                    if (!fs.existsSync(onidocsDir)) {
+                        fs.mkdirSync(onidocsDir, { recursive: true });
                     }
 
                     // Create src directory
-                    const srcDir = projPath.join(expandedPath, 'src');
-                    if (!projFs.existsSync(srcDir)) {
-                        projFs.mkdirSync(srcDir, { recursive: true });
+                    const srcDir = path.join(expandedPath, 'src');
+                    if (!fs.existsSync(srcDir)) {
+                        fs.mkdirSync(srcDir, { recursive: true });
                     }
 
                     // Create onidocs template files (same as project-init IPC uses)
@@ -1343,30 +2038,30 @@ async function executeTool(name, args) {
                     };
 
                     for (const [fname, content] of Object.entries(docsDefaults)) {
-                        const fpath = projPath.join(onidocsDir, fname);
-                        if (!projFs.existsSync(fpath)) {
-                            projFs.writeFileSync(fpath, content);
+                        const fpath = path.join(onidocsDir, fname);
+                        if (!fs.existsSync(fpath)) {
+                            fs.writeFileSync(fpath, content);
                         }
                     }
 
                     // Create AGENTS.md (project context for AI — like OpenCode's /init)
-                    const agentsMdPath = projPath.join(expandedPath, 'AGENTS.md');
-                    if (!projFs.existsSync(agentsMdPath)) {
-                        projFs.writeFileSync(agentsMdPath, `# AGENTS.md — ${projName}\n\n## Project Overview\n${projDesc || 'A project created with Onicode AI.'}\n\n## Tech Stack\n${techStack || '- To be defined during setup'}\n\n## Directory Structure\nThis file helps the AI coding agent understand the project.\nUpdate this as the project evolves.\n\n## Coding Conventions\n- *Add project-specific patterns here*\n\n## Important Files\n- \`onidocs/architecture.md\` — System architecture\n- \`onidocs/scope.md\` — Project scope and goals\n- \`onidocs/tasks.md\` — Task tracking\n- \`onidocs/changelog.md\` — Version history\n\n## Testing\n- *Describe how to run tests*\n\n## Build & Deploy\n- *Describe build and deploy process*\n\n---\n*Auto-generated by Onicode AI. Commit this file to your repo.*\n`);
+                    const agentsMdPath = path.join(expandedPath, 'AGENTS.md');
+                    if (!fs.existsSync(agentsMdPath)) {
+                        fs.writeFileSync(agentsMdPath, `# AGENTS.md — ${projName}\n\n## Project Overview\n${projDesc || 'A project created with Onicode AI.'}\n\n## Tech Stack\n${techStack || '- To be defined during setup'}\n\n## Directory Structure\nThis file helps the AI coding agent understand the project.\nUpdate this as the project evolves.\n\n## Coding Conventions\n- *Add project-specific patterns here*\n\n## Important Files\n- \`onidocs/architecture.md\` — System architecture\n- \`onidocs/scope.md\` — Project scope and goals\n- \`onidocs/tasks.md\` — Task tracking\n- \`onidocs/changelog.md\` — Version history\n\n## Testing\n- *Describe how to run tests*\n\n## Build & Deploy\n- *Describe build and deploy process*\n\n---\n*Auto-generated by Onicode AI. Commit this file to your repo.*\n`);
                     }
 
                     // Create README.md in project root
-                    const readmePath = projPath.join(expandedPath, 'README.md');
-                    if (!projFs.existsSync(readmePath)) {
-                        projFs.writeFileSync(readmePath, `# ${projName}\n\n${projDesc || 'A project created with Onicode AI.'}\n\n## Getting Started\n\n\`\`\`bash\ncd ${projName}\n# Add setup instructions here\n\`\`\`\n\n## Documentation\n\nSee the \`onidocs/\` folder for detailed project documentation:\n- **architecture.md** — System architecture and tech stack\n- **scope.md** — Project scope and goals\n- **changelog.md** — Version history\n- **tasks.md** — Task tracking\n\n---\n*Created with [Onicode](https://onicode.dev)*\n`);
+                    const readmePath = path.join(expandedPath, 'README.md');
+                    if (!fs.existsSync(readmePath)) {
+                        fs.writeFileSync(readmePath, `# ${projName}\n\n${projDesc || 'A project created with Onicode AI.'}\n\n## Getting Started\n\n\`\`\`bash\ncd ${projName}\n# Add setup instructions here\n\`\`\`\n\n## Documentation\n\nSee the \`onidocs/\` folder for detailed project documentation:\n- **architecture.md** — System architecture and tech stack\n- **scope.md** — Project scope and goals\n- **changelog.md** — Version history\n- **tasks.md** — Task tracking\n\n---\n*Created with [Onicode](https://onicode.dev)*\n`);
                     }
 
                     // Load and save to projects registry
-                    const PROJECTS_FILE = projPath.join(os.homedir(), '.onicode', 'projects.json');
+                    const PROJECTS_FILE = path.join(os.homedir(), '.onicode', 'projects.json');
                     let projects = [];
                     try {
-                        if (projFs.existsSync(PROJECTS_FILE)) {
-                            projects = JSON.parse(projFs.readFileSync(PROJECTS_FILE, 'utf-8'));
+                        if (fs.existsSync(PROJECTS_FILE)) {
+                            projects = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf-8'));
                         }
                     } catch { projects = []; }
 
@@ -1387,12 +2082,34 @@ async function executeTool(name, args) {
                     };
                     projects.push(project);
 
-                    const onicodeDir = projPath.join(os.homedir(), '.onicode');
-                    if (!projFs.existsSync(onicodeDir)) projFs.mkdirSync(onicodeDir, { recursive: true });
-                    projFs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
+                    const onicodeDir = path.join(os.homedir(), '.onicode');
+                    if (!fs.existsSync(onicodeDir)) fs.mkdirSync(onicodeDir, { recursive: true });
+                    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
 
                     resolve({ success: true, project });
                 });
+
+                // ── Auto git init + initial commit ──
+                if (result.success && !result.alreadyRegistered) {
+                    try {
+                        const gitDir = path.join(expandedPath, '.git');
+                        if (!fs.existsSync(gitDir)) {
+                            execSync('git init', { cwd: expandedPath, timeout: 5000 });
+                            // Create .gitignore
+                            const gitignorePath = path.join(expandedPath, '.gitignore');
+                            if (!fs.existsSync(gitignorePath)) {
+                                fs.writeFileSync(gitignorePath, `node_modules/\ndist/\nbuild/\n.next/\n.env\n.env.local\n.DS_Store\n*.log\ncoverage/\n.turbo/\n.cache/\n`);
+                            }
+                            execSync('git add -A && git commit -m "Initial commit — project scaffolded by Onicode"', {
+                                cwd: expandedPath, timeout: 10000,
+                                env: { ...process.env, GIT_AUTHOR_NAME: 'Onicode', GIT_AUTHOR_EMAIL: 'ai@onicode.dev', GIT_COMMITTER_NAME: 'Onicode', GIT_COMMITTER_EMAIL: 'ai@onicode.dev' },
+                            });
+                            logger.info('git', `Initialized git repo and made initial commit at ${expandedPath}`);
+                        }
+                    } catch (err) {
+                        logger.warn('git', `Auto git init failed (non-critical): ${err.message}`);
+                    }
+                }
 
                 // Clear stale tasks from previous init attempts
                 taskManager.clear();
@@ -1430,7 +2147,6 @@ async function executeTool(name, args) {
 
             case 'memory_write': {
                 const { filename, content } = args;
-                const memoryModule = require('./memory');
                 const MEMORIES_DIR = path.join(os.homedir(), '.onicode', 'memories');
                 if (!fs.existsSync(MEMORIES_DIR)) fs.mkdirSync(MEMORIES_DIR, { recursive: true });
                 const filePath = path.join(MEMORIES_DIR, filename);
@@ -1763,6 +2479,104 @@ async function executeTool(name, args) {
                 return result;
             }
 
+            // ── Git Tools ──
+
+            case 'git_status': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                try {
+                    const branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    const statusOut = execSync('git status --porcelain -u', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    const files = statusOut.split('\n').filter(Boolean).map(line => {
+                        const status = line.substring(0, 2);
+                        const filePath = line.substring(3);
+                        let state = 'modified';
+                        if (status.includes('?')) state = 'untracked';
+                        else if (status.includes('A')) state = 'added';
+                        else if (status.includes('D')) state = 'deleted';
+                        else if (status.includes('R')) state = 'renamed';
+                        const staged = status[0] !== ' ' && status[0] !== '?';
+                        return { path: filePath, status: state, staged };
+                    });
+                    let ahead = 0, behind = 0;
+                    try {
+                        const ab = execSync('git rev-list --left-right --count HEAD...@{upstream}', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                        const parts = ab.split('\t');
+                        ahead = parseInt(parts[0]) || 0;
+                        behind = parseInt(parts[1]) || 0;
+                    } catch { /* no upstream */ }
+                    return { success: true, branch, files, ahead, behind, clean: files.length === 0 };
+                } catch (err) {
+                    return { error: `Git status failed: ${err.message?.slice(0, 200)}` };
+                }
+            }
+
+            case 'git_commit': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const message = args.message;
+                const filesToStage = args.files || '-A';
+                try {
+                    // Stage files
+                    execSync(`git add ${filesToStage}`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                    // Check if there's anything to commit
+                    const staged = execSync('git diff --cached --stat', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    if (!staged) {
+                        return { success: false, error: 'Nothing to commit (no staged changes)' };
+                    }
+                    // Commit
+                    const result = execSync(`git commit -m ${JSON.stringify(message)}`, { cwd, encoding: 'utf-8', timeout: 15000 }).trim();
+                    // Parse commit hash
+                    const hashMatch = result.match(/\[[\w/]+ ([a-f0-9]+)\]/);
+                    const hash = hashMatch ? hashMatch[1] : null;
+                    // Get file stats from the commit output
+                    const statsMatch = result.match(/(\d+) files? changed/);
+                    const filesChanged = statsMatch ? parseInt(statsMatch[1]) : 0;
+                    logger.info('git', `Committed: ${message} (${hash || 'no hash'})`);
+                    return {
+                        success: true,
+                        hash,
+                        message,
+                        filesChanged,
+                        output: result.slice(0, 500),
+                    };
+                } catch (err) {
+                    return { error: `Git commit failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_push': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                try {
+                    // Check if remote exists
+                    const remotes = execSync('git remote', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    if (!remotes) {
+                        return { success: false, error: 'No remote configured. Add a remote first: git remote add origin <url>' };
+                    }
+                    // Check current branch
+                    const branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    // Push (with upstream if needed)
+                    let pushCmd = `git push`;
+                    if (args.set_upstream !== false) {
+                        // Check if upstream exists
+                        try {
+                            execSync(`git rev-parse --abbrev-ref ${branch}@{upstream}`, { cwd, encoding: 'utf-8', timeout: 5000 });
+                        } catch {
+                            pushCmd = `git push -u origin ${branch}`;
+                        }
+                    }
+                    const result = execSync(pushCmd, { cwd, encoding: 'utf-8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+                    logger.info('git', `Pushed branch ${branch} to remote`);
+                    return { success: true, branch, output: result.slice(0, 500) };
+                } catch (err) {
+                    const stderr = err.stderr?.toString() || '';
+                    // Git push outputs to stderr even on success
+                    if (stderr.includes('->') || stderr.includes('Everything up-to-date')) {
+                        logger.info('git', `Pushed (via stderr): ${stderr.slice(0, 100)}`);
+                        return { success: true, output: stderr.slice(0, 500) };
+                    }
+                    return { error: `Git push failed: ${stderr.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
             default:
                 return { error: `Unknown tool: ${name}` };
         }
@@ -1786,7 +2600,18 @@ module.exports = {
     updateAgent,
     getAgentStatus,
     listAgents,
-    setMainWindow,
+    setMainWindow: setMainWindow,
     getTerminalSessions,
     taskManager,
+    // New exports for enhanced agentic loop
+    setPermissions,
+    setAgentModeRef,
+    setAICallFunction,
+    setLastProviderConfig,
+    startSession,
+    getSessionId,
+    checkToolPermission,
+    // Background process management
+    killBackgroundProcesses,
+    getBackgroundProcesses,
 };

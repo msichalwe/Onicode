@@ -138,58 +138,75 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 
 ### Theme System
 
-- 4 themes defined as CSS custom properties in `index.css`
+- 12 themes defined as CSS custom properties in `index.css`
 - `useTheme` hook manages state, persists to localStorage, sets `data-theme` on `<html>`
 - Smooth 500ms cross-fade transition via `.theme-transitioning` class
 
-## Critical Issues
+### Hooks System
 
-### ⚠️ ChatView.tsx is BROKEN
+- 10 hook types: PreToolUse, PostToolUse, Stop, SubagentStop, UserPromptSubmit, Notification, PreCompact, SessionStart, ToolError, AIResponse
+- Global config: `~/.onicode/hooks.json`, project config: `.onicode/hooks.json`
+- Shell command execution with env vars (`$TOOL_NAME`, `$FILE_PATH`, etc.)
+- Matcher regex for filtering specific tools
 
-`handleSend`, `handleKeyDown`, and `handleSuggestionClick` functions were removed during a TypeScript declaration-ordering refactor but **not re-added** after `handleCommand`. The file won't compile. These functions must be restored.
+### Custom Commands
 
-### ⚠️ git.js is NOT WIRED
+- Markdown-based: `.onicode/commands/*.md` with `$ARGUMENTS` substitution
+- 5 default templates: review, deploy, test, refactor, explain
+- Auto-detected in slash command system
 
-`src/main/git.js` has full IPC handlers for 15 git operations but is not:
+### Context Compaction
 
-- Imported/registered in `index.js`
-- Exposed in `preload.js`
-- Typed in `window.d.ts`
-- Surfaced in any UI component
+- Auto-summarize old messages when tokens exceed 60k threshold
+- Mechanical summary extraction preserving key decisions and code changes
+- Token estimation via word-based heuristic
+
+### Agent System
+
+- Sub-agent spawning via `spawn_sub_agent` tool with read-only tool access
+- Agent status tracking with real-time IPC events (`ai-agent-step`)
+- Agent runtime widget in right panel showing active agents and terminals
+- Terminal session tracking across AI workflows
 
 ## What's Working
 
 - [x] Electron app scaffold with BrowserWindow + dev port auto-retry
-- [x] AI chat with streaming responses (dual-mode routing)
-- [x] Codex OAuth PKCE flow (main process)
-- [x] 4 premium themes with animated transitions
-- [x] Sidebar navigation (Chat, Projects, Docs, Settings)
+- [x] AI chat with streaming (dual-mode: OpenAI API + ChatGPT OAuth)
+- [x] Codex OAuth PKCE flow (main process HTTP server)
+- [x] 12 themes with animated transitions
+- [x] Sidebar navigation (Chat, Projects, Docs, Agents, Settings)
 - [x] AI provider settings (3 providers, test connection)
-- [x] Slash command system (20 commands, autocomplete)
-- [x] AI system prompt builder (context-aware)
+- [x] Slash command system (20+ commands, autocomplete, custom commands)
+- [x] AI system prompt builder (context-aware, AGENTS.md, hooks, MCP)
 - [x] Terminal backend (real shell sessions via IPC)
-- [x] Terminal widget (in right panel)
+- [x] Terminal widget with session persistence across tab switches
 - [x] File viewer widget (in right panel)
+- [x] Agent runtime widget (in right panel)
 - [x] Project init with onidocs templates
 - [x] Project list, detail, file tree, "Open in" editors
 - [x] Documents view (aggregated from all projects)
-- [x] Conversation history (localStorage)
-- [x] File/URL attachments (UI only)
-- [x] Right panel widget system
+- [x] Conversation history (localStorage + SQLite)
+- [x] File/URL attachments
+- [x] Right panel (Terminal, Project, Files, Agents)
+- [x] Git integration (15 operations, UI in Projects tab)
+- [x] SQLite persistence (tasks, conversations, sessions)
+- [x] Permission enforcement (tool-level allow/ask/deny)
+- [x] Sub-agent execution (real AI calls, read-only tools)
+- [x] Hooks system (10 types, global + project config)
+- [x] Custom commands (.onicode/commands/*.md)
+- [x] Context compaction (auto-summarize at token limit)
+- [x] Memory system (soul.md, user.md, daily logs)
+- [x] Logger, Browser (Puppeteer), Connectors modules
 
 ## What's Missing
 
-- [ ] **Fix ChatView.tsx** — restore removed functions (CRITICAL)
-- [ ] **Wire git.js** — register in index.js, expose in preload.js, type in window.d.ts
-- [ ] **Git UI** — status, branches, commits, diffs in Projects tab
-- [ ] **Project management** — kanban, user stories, milestones
 - [ ] **Connectors** — GitHub OAuth, Gmail OAuth, Slack OAuth (currently placeholder)
 - [ ] **API Key Store** — encrypted vault (currently placeholder)
-- [ ] **SQLite persistence** — conversations, embeddings
 - [ ] **Anthropic provider** — Claude API
 - [ ] **Ollama provider** — local models
 - [ ] **Editor Shell** — VS Code workbench (lazy-loaded)
-- [ ] **AI Engine** — model router, context engine, agent orchestrator
+- [ ] **MCP client** — extensible tool system for external integrations
+- [ ] **Auto-update** — electron-updater for seamless updates
 - [ ] **Mobile companion** — React Native app
 
 ## Coding Conventions
@@ -205,9 +222,9 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 
 ## Next Steps
 
-1. **Fix ChatView.tsx** — Restore `handleSend`, `handleKeyDown`, `handleSuggestionClick` after `handleCommand`
-2. **Wire git.js** — Import in `index.js`, expose in `preload.js`, type in `window.d.ts`
-3. **Git UI** — Add git integration panel in Projects tab
-4. **Project management** — Kanban boards, user stories, milestones
-5. **Connectors** — GitHub OAuth, Gmail OAuth (no manual API key generation)
-6. **SQLite persistence** — Replace localStorage for conversations
+1. **Connectors** — GitHub OAuth, Gmail OAuth (no manual API key generation)
+2. **API Key Store** — AES-256 encrypted vault with OS keychain
+3. **Anthropic provider** — Claude API support
+4. **MCP client** — Extensible tool system for external integrations
+5. **Editor Shell** — VS Code workbench (lazy-loaded)
+6. **Auto-update** — electron-updater for seamless updates

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { marked } from 'marked';
 import { SLASH_COMMANDS } from '../commands/registry';
 import { executeCommand } from '../commands/executor';
 import { buildSystemPrompt } from '../ai/systemPrompt';
@@ -98,6 +99,10 @@ function getApiEndpoint(provider: ProviderConfig): string {
     return `${base}/v1/chat/completions`;
 }
 
+/**
+ * Load conversations — prefer SQLite if available, fallback to localStorage.
+ * On first run with SQLite, migrates existing localStorage conversations.
+ */
 function loadConversations(): Conversation[] {
     try {
         const saved = localStorage.getItem(CONVERSATIONS_KEY);
@@ -109,6 +114,45 @@ function loadConversations(): Conversation[] {
 
 function saveConversations(convs: Conversation[]) {
     localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(convs));
+}
+
+/**
+ * Save a single conversation to SQLite (fire-and-forget).
+ * Falls back to localStorage-only if SQLite is unavailable.
+ */
+function persistToSQLite(conv: Conversation) {
+    if (!isElectron || !window.onicode?.conversationSave) return;
+    window.onicode.conversationSave({
+        id: conv.id,
+        title: conv.title,
+        messages: conv.messages,
+        scope: conv.scope,
+        projectId: conv.projectId,
+        projectName: conv.projectName,
+        createdAt: conv.createdAt,
+        updatedAt: conv.updatedAt,
+    }).catch(() => { /* SQLite save failed, localStorage still has it */ });
+}
+
+/**
+ * Delete a conversation from SQLite.
+ */
+function deleteFromSQLite(convId: string) {
+    if (!isElectron || !window.onicode?.conversationDelete) return;
+    window.onicode.conversationDelete(convId).catch(() => { });
+}
+
+/** Migrate localStorage conversations to SQLite (one-time) */
+async function migrateConversationsToSQLite() {
+    if (!isElectron || !window.onicode?.conversationMigrate) return;
+    try {
+        const convs = loadConversations();
+        if (convs.length === 0) return;
+        const result = await window.onicode.conversationMigrate(convs);
+        if (result.success && result.migrated && result.migrated > 0) {
+            console.log(`[Onicode] Migrated ${result.migrated} conversations to SQLite`);
+        }
+    } catch { /* migration failed, not critical */ }
 }
 
 function generateTitle(content: string): string {
@@ -161,9 +205,23 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const [slashFilter, setSlashFilter] = useState('');
     const [slashIndex, setSlashIndex] = useState(0);
     const [activeToolSteps, setActiveToolSteps] = useState<ToolStep[]>([]);
+    const [agentStatus, setAgentStatus] = useState<{
+        status: string;
+        round: number;
+        pending?: number;
+        agentId?: string;
+        task?: string;
+    } | null>(null);
+
+    const [showScrollBtn, setShowScrollBtn] = useState(false);
+    const [contextInfo, setContextInfo] = useState<{ tokens: number; messages: number } | null>(null);
+    const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
+    const [sessionTimer, setSessionTimer] = useState<number>(0);
+    const sessionStartRef = useRef<number | null>(null);
 
     // ── Refs ──
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const messagesContainerRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const streamContentRef = useRef('');
@@ -171,12 +229,18 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const abortRef = useRef<AbortController | null>(null);
     const sendingRef = useRef(false); // Prevents double-send from StrictMode
 
-    // ── Persistence ──
+    // ── Migrate localStorage to SQLite on first mount ──
+    useEffect(() => {
+        migrateConversationsToSQLite();
+    }, []);
+
+    // ── Persistence (dual-write: localStorage + SQLite) ──
     const persistConversation = useCallback((msgs: Message[], convId: string | null) => {
         if (msgs.length === 0) return convId;
 
         const convs = loadConversations();
         let id = convId;
+        let convToSave: Conversation | null = null;
 
         if (id) {
             const idx = convs.findIndex((c) => c.id === id);
@@ -190,6 +254,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     convs[idx].projectId = activeProject.id;
                     convs[idx].projectName = activeProject.name;
                 }
+                convToSave = convs[idx];
             }
         } else {
             id = generateId();
@@ -206,11 +271,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 newConv.projectName = activeProject.name;
             }
             convs.unshift(newConv);
+            convToSave = newConv;
         }
 
         saveConversations(convs);
         setConversations(convs);
         localStorage.setItem(ACTIVE_CONV_KEY, id);
+
+        // Also persist to SQLite
+        if (convToSave) persistToSQLite(convToSave);
+
         return id;
     }, [scope, activeProject]);
 
@@ -219,7 +289,45 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, []);
 
-    useEffect(() => { scrollToBottom(); }, [messages, streamingContent, scrollToBottom]);
+    useEffect(() => { scrollToBottom(); }, [messages, streamingContent, activeToolSteps, scrollToBottom]);
+
+    // ── Scroll detection for scroll-to-bottom button ──
+    useEffect(() => {
+        const container = messagesContainerRef.current;
+        if (!container) return;
+        const handleScroll = () => {
+            const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+            setShowScrollBtn(distFromBottom > 150);
+        };
+        container.addEventListener('scroll', handleScroll);
+        return () => container.removeEventListener('scroll', handleScroll);
+    }, [messages.length > 0]);
+
+    // ── Context tracking (estimate token count) ──
+    useEffect(() => {
+        if (messages.length === 0) { setContextInfo(null); return; }
+        const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+        const estimatedTokens = Math.round(totalChars / 4);
+        setContextInfo({ tokens: estimatedTokens, messages: messages.length });
+    }, [messages]);
+
+    // ── Session timer (tracks AI working duration) ──
+    useEffect(() => {
+        if (isTyping) {
+            sessionStartRef.current = sessionStartRef.current || Date.now();
+            const interval = setInterval(() => {
+                setSessionTimer(Math.floor((Date.now() - sessionStartRef.current!) / 1000));
+            }, 1000);
+            return () => clearInterval(interval);
+        } else {
+            // Keep final time visible briefly, then reset
+            const timeout = setTimeout(() => {
+                sessionStartRef.current = null;
+                setSessionTimer(0);
+            }, 5000);
+            return () => clearTimeout(timeout);
+        }
+    }, [isTyping]);
 
     // ── Textarea auto-resize ──
     useEffect(() => {
@@ -244,6 +352,27 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
         cmd.name.toLowerCase().includes('/' + slashFilter)
     );
+
+    // ── Listen for show-history event from unified header ──
+    useEffect(() => {
+        const handler = () => setShowHistory(true);
+        window.addEventListener('onicode-show-history', handler);
+        return () => window.removeEventListener('onicode-show-history', handler);
+    }, []);
+
+    // ── Listen for agent step events (thinking, streaming, continuing, sub-agent) ──
+    useEffect(() => {
+        if (!window.onicode?.onAgentStep) return;
+        const unsub = window.onicode.onAgentStep((data) => {
+            setAgentStatus(data as typeof agentStatus);
+        });
+        return unsub;
+    }, []);
+
+    // ── Clear agent status when typing stops ──
+    useEffect(() => {
+        if (!isTyping) setAgentStatus(null);
+    }, [isTyping]);
 
     // ── Auto-open panels when AI requests (e.g. terminal on run_command) ──
     useEffect(() => {
@@ -509,16 +638,98 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             } catch { /* memory load failed, proceed without */ }
         }
 
+        // Load project docs if in project scope
+        let projectDocs: Array<{ name: string; content: string }> | undefined;
+        if (scope === 'project' && activeProject?.id && isElectron) {
+            try {
+                const projResult = await window.onicode!.getProject(activeProject.id);
+                if (projResult.docs) {
+                    projectDocs = projResult.docs.map((d: { name: string; content: string }) => ({
+                        name: d.name,
+                        content: d.content,
+                    }));
+                }
+            } catch { /* proceed without project docs */ }
+        }
+
+        // Load AGENTS.md (project intelligence file — equivalent to CLAUDE.md)
+        let agentsMd: string | undefined;
+        if (activeProject?.path && isElectron) {
+            try {
+                const agentsResult = await window.onicode!.readFile(`${activeProject.path}/.onicode/AGENTS.md`);
+                if (agentsResult.success && agentsResult.content) agentsMd = agentsResult.content;
+            } catch { /* no AGENTS.md */ }
+            if (!agentsMd) {
+                try {
+                    const agentsResult = await window.onicode!.readFile(`${activeProject.path}/AGENTS.md`);
+                    if (agentsResult.success && agentsResult.content) agentsMd = agentsResult.content;
+                } catch { /* no AGENTS.md */ }
+            }
+        }
+
+        // Load hooks summary and custom commands summary
+        let hooksSummary: string | undefined;
+        let customCommandsSummary: string | undefined;
+        if (isElectron) {
+            try {
+                const hooksRes = await window.onicode!.hooksList();
+                if (hooksRes.hooks && Object.keys(hooksRes.hooks).length > 0) {
+                    const lines: string[] = [];
+                    for (const [type, hookList] of Object.entries(hooksRes.hooks)) {
+                        for (const hook of hookList as HookDefinition[]) {
+                            lines.push(`- **${type}**${hook.matcher ? ` (match: /${hook.matcher}/)` : ''}: \`${hook.command}\``);
+                        }
+                    }
+                    hooksSummary = lines.join('\n');
+                }
+            } catch { /* hooks not ready */ }
+            try {
+                const cmds = await window.onicode!.customCommandsList(activeProject?.path);
+                if (cmds.length > 0) {
+                    customCommandsSummary = cmds.map((c: CustomCommand) => `- \`/${c.name}\` — ${c.description} (${c.source})`).join('\n');
+                }
+            } catch { /* commands not ready */ }
+        }
+
         // Build context-aware system prompt
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
         const systemContent = buildSystemPrompt({
+            activeProjectName: activeProject?.name,
+            activeProjectPath: activeProject?.path,
+            projectDocs,
             customSystemPrompt: customPrompt,
             memories,
+            agentsMd,
+            hooksSummary,
+            customCommandsSummary,
         });
+
+        // Auto-compact if context is getting large
+        let messagesToSend = allMessages;
+        if (isElectron && allMessages.length > 15) {
+            try {
+                const tokenEst = await window.onicode!.estimateTokens(
+                    allMessages.map(m => ({ role: m.role, content: m.content }))
+                );
+                if (tokenEst.tokens > 60000) {
+                    const compactResult = await window.onicode!.compactMessages(
+                        allMessages.map(m => ({ role: m.role, content: m.content, toolSteps: m.toolSteps }))
+                    );
+                    if (compactResult.compacted && compactResult.messages) {
+                        messagesToSend = compactResult.messages.map((m, i) => ({
+                            id: `compacted-${i}`,
+                            role: m.role as 'user' | 'ai',
+                            content: m.content,
+                            timestamp: Date.now(),
+                        }));
+                    }
+                }
+            } catch { /* compaction failed, use original messages */ }
+        }
 
         const apiMessages = [
             { role: 'system', content: systemContent },
-            ...allMessages.map((m) => ({
+            ...messagesToSend.map((m) => ({
                 role: m.role === 'ai' ? 'assistant' : 'user',
                 content: m.content,
             })),
@@ -650,6 +861,33 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         return result.handled;
     }, [messages, newChat, stopGeneration, activeConvId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // ── Auto-detect project references and switch to project mode ──
+    const autoDetectProject = useCallback(async (text: string) => {
+        if (!isElectron || scope === 'project') return; // already in project mode
+        const lower = text.toLowerCase();
+        // Match phrases like "continue working on X", "work on X", "open X project", "switch to X"
+        const projectPhrases = /(?:continue|work|working|open|switch|resume|start)\s+(?:on|to|with)?\s+(?:the\s+)?(.+?)(?:\s+project)?$/i;
+        const match = lower.match(projectPhrases);
+        if (!match) return;
+        const query = match[1].trim();
+        if (query.length < 2) return;
+
+        try {
+            const { projects } = await window.onicode!.listProjects();
+            // Fuzzy match: project name contains the query or query contains the project name
+            const found = projects.find((p: { id: string; name: string; path: string }) => {
+                const pName = p.name.toLowerCase();
+                return pName.includes(query) || query.includes(pName);
+            });
+            if (found) {
+                // Auto-activate the project
+                window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                    detail: { id: found.id, name: found.name, path: found.path },
+                }));
+            }
+        } catch { /* project list failed */ }
+    }, [scope]);
+
     // ── Handle send ──
     const handleSend = useCallback(async () => {
         const text = input.trim();
@@ -664,6 +902,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 return;
             }
         }
+
+        // Auto-detect and switch to project if user mentions one
+        autoDetectProject(text);
 
         const userMessage: Message = {
             id: generateId(),
@@ -682,7 +923,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             sendToAI(text, prev, userMessage.attachments);
             return updated;
         });
-    }, [input, attachments, handleCommand, sendToAI]);
+    }, [input, attachments, handleCommand, sendToAI, autoDetectProject]);
 
     // ── Keyboard handler ──
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -745,99 +986,339 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         const convs = loadConversations().filter((c) => c.id !== convId);
         saveConversations(convs);
         setConversations(convs);
+        deleteFromSQLite(convId);
         if (activeConvId === convId) newChat();
     }, [activeConvId, newChat]);
 
-    // ── Render tool steps (grouped, no emojis) ──
+    // ── Toggle expanded step ──
+    const toggleStepExpand = useCallback((stepId: string) => {
+        setExpandedSteps(prev => {
+            const next = new Set(prev);
+            if (next.has(stepId)) next.delete(stepId);
+            else next.add(stepId);
+            return next;
+        });
+    }, []);
+
+    // ── Format elapsed time ──
+    const formatTime = (seconds: number): string => {
+        if (seconds < 60) return `${seconds}s`;
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}m ${s}s`;
+    };
+
+    // ── Render tool steps as rich contextual messages ──
     const renderToolSteps = (steps: ToolStep[]) => {
         if (!steps || steps.length === 0) return null;
 
-        const toolLabel = (name: string) => {
-            return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        // Tool display config
+        const toolIcon = (name: string): string => {
+            const icons: Record<string, string> = {
+                read_file: 'Read', edit_file: 'Edit', multi_edit: 'Edit', create_file: 'Created',
+                delete_file: 'Deleted', list_directory: 'Listed', search_files: 'Searched',
+                run_command: 'Ran', init_project: 'Init', task_add: 'Task', task_update: 'Task',
+                task_list: 'Tasks', task_clear: 'Tasks', browser_navigate: 'Browser', browser_screenshot: 'Screenshot',
+                browser_evaluate: 'Browser JS', browser_click: 'Clicked', browser_type: 'Typed',
+                browser_console_logs: 'Console', browser_close: 'Browser', create_restore_point: 'Checkpoint',
+                restore_to_point: 'Restored', spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
+                glob_files: 'Found', explore_codebase: 'Explored', memory_write: 'Memory',
+                memory_append: 'Memory', webfetch: 'Fetched', websearch: 'Searched',
+                get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
+                git_commit: 'Committed', git_push: 'Pushed', git_status: 'Git Status',
+            };
+            return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
 
-        const formatArgs = (name: string, args: Record<string, unknown>) => {
-            if (name === 'read_file') return String(args.file_path || '').split('/').pop() || '';
-            if (name === 'edit_file') return String(args.file_path || '').split('/').pop() || '';
-            if (name === 'multi_edit') return String(args.file_path || '').split('/').pop() || '';
-            if (name === 'create_file') return String(args.file_path || '').split('/').pop() || '';
-            if (name === 'delete_file') return String(args.file_path || '').split('/').pop() || '';
-            if (name === 'list_directory') return String(args.dir_path || '').split('/').pop() || '';
-            if (name === 'search_files') return `"${args.query}"`;
-            if (name === 'run_command') return `\`${String(args.command || '').slice(0, 60)}\``;
-            if (name === 'create_restore_point') return String(args.name || '');
-            return '';
+        // Build rich detail from step result
+        const getDetail = (step: ToolStep): string => {
+            const a = step.args;
+            const r = step.result as Record<string, unknown> | undefined;
+
+            switch (step.name) {
+                case 'create_file': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const lines = r?.lines ?? (typeof a.content === 'string' ? (a.content as string).split('\n').length : '?');
+                    return `${fname} (${lines} lines)`;
+                }
+                case 'edit_file': case 'multi_edit': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const added = r?.lines_added ?? '?';
+                    const removed = r?.lines_removed ?? '?';
+                    return `${fname} (+${added} -${removed})`;
+                }
+                case 'read_file': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const total = r?.total_lines ?? '';
+                    return `${fname}${total ? ` (${total} lines)` : ''}`;
+                }
+                case 'delete_file':
+                    return String(a.file_path || '').split('/').pop() || '';
+                case 'run_command': {
+                    const cmd = String(a.command || '').slice(0, 80);
+                    const exit = r?.exitCode != null ? ` [exit ${r.exitCode}]` : '';
+                    const bg = r?.background ? ' (background)' : '';
+                    return `\`${cmd}\`${exit}${bg}`;
+                }
+                case 'init_project':
+                    return String(a.name || r?.project_name || '');
+                case 'task_add':
+                    return String(a.content || '').slice(0, 60);
+                case 'task_update': {
+                    const status = a.status || '';
+                    return `#${a.id} → ${status}`;
+                }
+                case 'task_list': {
+                    if (r && typeof r === 'object' && 'total' in r) return `${r.done}/${r.total} done`;
+                    return '';
+                }
+                case 'search_files': case 'websearch':
+                    return `"${String(a.query || '').slice(0, 50)}"`;
+                case 'browser_navigate':
+                    return String(a.url || '').replace(/^https?:\/\//, '').slice(0, 50);
+                case 'browser_screenshot': {
+                    const screenshotPath = r?.path as string;
+                    return screenshotPath ? `${String(a.name || '')}` : String(a.name || '');
+                }
+                case 'list_directory':
+                    return String(a.dir_path || '').split('/').pop() || '';
+                case 'glob_files':
+                    return String(a.pattern || '');
+                case 'explore_codebase':
+                    return String(a.project_path || '').split('/').pop() || '';
+                case 'spawn_sub_agent':
+                    return String(a.task || '').slice(0, 60);
+                case 'create_restore_point':
+                    return String(a.name || '');
+                case 'git_commit':
+                    return String(a.message || '').slice(0, 60);
+                case 'git_push':
+                    return r?.success ? 'success' : '';
+                case 'git_status': {
+                    const files = (r as Record<string, unknown>)?.files;
+                    return Array.isArray(files) ? `${files.length} changed` : '';
+                }
+                default:
+                    return '';
+            }
         };
 
-        // Group consecutive same-name tool calls
-        interface GroupedStep {
-            name: string;
-            steps: ToolStep[];
-            count: number;
-            allDone: boolean;
-            anyRunning: boolean;
-            anyError: boolean;
-        }
+        // Check if a step has expandable content
+        const hasExpandableContent = (step: ToolStep): boolean => {
+            if (step.status !== 'done' || !step.result) return false;
+            const r = step.result as Record<string, unknown>;
+            switch (step.name) {
+                case 'run_command': return !!(r.stdout || r.stderr);
+                case 'edit_file': case 'multi_edit': return true;
+                case 'create_file': return true;
+                case 'search_files': return !!(r.matches && Array.isArray(r.matches) && (r.matches as unknown[]).length > 0);
+                case 'git_status': return !!(r.files && Array.isArray(r.files) && (r.files as unknown[]).length > 0);
+                default: return false;
+            }
+        };
+
+        // Render expandable content for a step
+        const renderExpandedContent = (step: ToolStep) => {
+            const r = step.result as Record<string, unknown>;
+            const a = step.args;
+
+            switch (step.name) {
+                case 'run_command': {
+                    const stdout = String(r.stdout || '').trim();
+                    const stderr = String(r.stderr || '').trim();
+                    const exitCode = r.exitCode as number | null;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">$ {String(a.command || '').slice(0, 120)}</span>
+                                    {exitCode != null && (
+                                        <span className={`tool-step-exit-code ${exitCode === 0 ? 'success' : 'error'}`}>
+                                            exit {exitCode}
+                                        </span>
+                                    )}
+                                </div>
+                                {stdout && <pre className="tool-step-stdout">{stdout.slice(0, 3000)}{stdout.length > 3000 ? '\n... (truncated)' : ''}</pre>}
+                                {stderr && <pre className="tool-step-stderr">{stderr.slice(0, 1500)}{stderr.length > 1500 ? '\n... (truncated)' : ''}</pre>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'edit_file': case 'multi_edit': {
+                    const oldStr = String(a.old_string || '').trim();
+                    const newStr = String(a.new_string || '').trim();
+                    const linesRemoved = r.lines_removed as number || 0;
+                    const linesAdded = r.lines_added as number || 0;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-diff">
+                                <div className="tool-step-diff-header">
+                                    <span>{String(a.file_path || '').split('/').pop()}</span>
+                                    <span className="tool-step-diff-stats">
+                                        <span className="diff-added">+{linesAdded}</span>
+                                        <span className="diff-removed">-{linesRemoved}</span>
+                                    </span>
+                                </div>
+                                {oldStr && (
+                                    <div className="tool-step-diff-block removed">
+                                        {oldStr.split('\n').slice(0, 10).map((line, i) => (
+                                            <div key={i} className="diff-line diff-line-removed">
+                                                <span className="diff-sign">-</span>
+                                                <span>{line}</span>
+                                            </div>
+                                        ))}
+                                        {oldStr.split('\n').length > 10 && <div className="diff-line diff-truncated">... +{oldStr.split('\n').length - 10} more lines</div>}
+                                    </div>
+                                )}
+                                {newStr && (
+                                    <div className="tool-step-diff-block added">
+                                        {newStr.split('\n').slice(0, 10).map((line, i) => (
+                                            <div key={i} className="diff-line diff-line-added">
+                                                <span className="diff-sign">+</span>
+                                                <span>{line}</span>
+                                            </div>
+                                        ))}
+                                        {newStr.split('\n').length > 10 && <div className="diff-line diff-truncated">... +{newStr.split('\n').length - 10} more lines</div>}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'create_file': {
+                    const content = String(a.content || '');
+                    const lines = content.split('\n');
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-diff">
+                                <div className="tool-step-diff-header">
+                                    <span>{String(a.file_path || '').split('/').pop()}</span>
+                                    <span className="tool-step-diff-stats"><span className="diff-added">+{lines.length} lines</span></span>
+                                </div>
+                                <div className="tool-step-diff-block added">
+                                    {lines.slice(0, 15).map((line, i) => (
+                                        <div key={i} className="diff-line diff-line-added">
+                                            <span className="diff-sign">+</span>
+                                            <span>{line}</span>
+                                        </div>
+                                    ))}
+                                    {lines.length > 15 && <div className="diff-line diff-truncated">... +{lines.length - 15} more lines</div>}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'search_files': {
+                    const matches = r.matches as Array<{ file?: string; line?: number; content?: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-search-results">
+                                {matches.slice(0, 8).map((m, i) => (
+                                    <div key={i} className="search-result-line">
+                                        <span className="search-result-file">{String(m.file || '').split('/').pop()}</span>
+                                        {m.line && <span className="search-result-lineno">:{m.line}</span>}
+                                        <span className="search-result-content">{String(m.content || '').slice(0, 80)}</span>
+                                    </div>
+                                ))}
+                                {matches.length > 8 && <div className="diff-line diff-truncated">... +{matches.length - 8} more results</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_status': {
+                    const files = r.files as Array<{ path: string; status: string; staged: boolean }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-git-status">
+                                {files.slice(0, 10).map((f, i) => (
+                                    <div key={i} className={`git-status-file git-status-${f.status}`}>
+                                        <span className="git-status-indicator">{f.staged ? 'S' : ' '}{f.status[0].toUpperCase()}</span>
+                                        <span>{f.path}</span>
+                                    </div>
+                                ))}
+                                {files.length > 10 && <div className="diff-line diff-truncated">... +{files.length - 10} more files</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                default:
+                    return null;
+            }
+        };
+
+        // Group consecutive same-name tool calls (except important ones that always show individually)
+        const alwaysExpand = new Set(['run_command', 'create_file', 'edit_file', 'multi_edit', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status']);
+        interface GroupedStep { name: string; steps: ToolStep[]; count: number; allDone: boolean; anyRunning: boolean; anyError: boolean; }
         const grouped: GroupedStep[] = [];
         for (const step of steps) {
             const last = grouped[grouped.length - 1];
-            if (last && last.name === step.name && step.name !== 'run_command' && step.name !== 'create_file') {
+            if (last && last.name === step.name && !alwaysExpand.has(step.name)) {
                 last.steps.push(step);
                 last.count++;
                 last.allDone = last.allDone && step.status === 'done';
                 last.anyRunning = last.anyRunning || step.status === 'running';
                 last.anyError = last.anyError || step.status === 'error';
             } else {
-                grouped.push({
-                    name: step.name,
-                    steps: [step],
-                    count: 1,
-                    allDone: step.status === 'done',
-                    anyRunning: step.status === 'running',
-                    anyError: step.status === 'error',
-                });
+                grouped.push({ name: step.name, steps: [step], count: 1, allDone: step.status === 'done', anyRunning: step.status === 'running', anyError: step.status === 'error' });
             }
         }
 
         return (
             <div className="tool-steps">
                 {grouped.map((group, gi) => {
-                    // Collapsed group (e.g., "Task Add (x5)")
+                    // Collapsed group
                     if (group.count > 1) {
                         const status = group.anyRunning ? 'running' : group.anyError ? 'error' : group.allDone ? 'done' : 'running';
                         return (
                             <div key={gi} className={`tool-step tool-step-${status}`}>
                                 <div className="tool-step-header">
-                                    <span className="tool-step-name">{toolLabel(group.name)}</span>
+                                    <span className="tool-step-label">{toolIcon(group.name)}</span>
                                     <span className="tool-step-detail">({group.count}x)</span>
                                     <span className={`tool-step-status ${status}`}>
-                                        {status === 'running' ? (
-                                            <span className="tool-spinner" />
-                                        ) : status === 'done' ? '\u2713' : '\u2717'}
+                                        {status === 'running' ? <span className="tool-spinner" /> : status === 'done' ? '\u2713' : '\u2717'}
                                     </span>
                                 </div>
                             </div>
                         );
                     }
 
-                    // Single step
+                    // Single step — rich display
                     const step = group.steps[0];
+                    const detail = getDetail(step);
+                    const hasError = step.result && 'error' in step.result;
+                    const isScreenshot = step.name === 'browser_screenshot' && step.status === 'done' && step.result && 'path' in step.result;
+                    const isExpandable = hasExpandableContent(step);
+                    const isExpanded = expandedSteps.has(step.id);
+
                     return (
-                        <div key={step.id} className={`tool-step tool-step-${step.status}`}>
-                            <div className="tool-step-header">
-                                <span className="tool-step-name">{toolLabel(step.name)}</span>
-                                <span className="tool-step-detail">{formatArgs(step.name, step.args)}</span>
+                        <div key={step.id} className={`tool-step tool-step-${step.status}${hasError ? ' tool-step-has-error' : ''}${isExpanded ? ' tool-step-expanded-active' : ''}`}>
+                            <div
+                                className={`tool-step-header${isExpandable ? ' tool-step-clickable' : ''}`}
+                                onClick={isExpandable ? () => toggleStepExpand(step.id) : undefined}
+                            >
+                                {isExpandable && (
+                                    <span className={`tool-step-chevron${isExpanded ? ' expanded' : ''}`}>&#9656;</span>
+                                )}
+                                <span className="tool-step-label">{toolIcon(step.name)}</span>
+                                {detail && <span className="tool-step-detail">{detail}</span>}
                                 <span className={`tool-step-status ${step.status}`}>
-                                    {step.status === 'running' ? (
-                                        <span className="tool-spinner" />
-                                    ) : step.status === 'done' ? '\u2713' : '\u2717'}
+                                    {step.status === 'running' ? <span className="tool-spinner" /> : step.status === 'done' ? '\u2713' : '\u2717'}
                                 </span>
                             </div>
-                            {step.result && 'error' in step.result && (
-                                <div className="tool-step-error">
-                                    {String(step.result.error)}
+                            {isScreenshot && (
+                                <div className="tool-step-screenshot">
+                                    <img
+                                        src={`file://${String((step.result as Record<string, unknown>).path)}`}
+                                        alt={String(step.args.name || 'Screenshot')}
+                                        className="tool-screenshot-img"
+                                        onClick={() => window.onicode?.openExternal?.(`file://${String((step.result as Record<string, unknown>).path)}`)}
+                                    />
                                 </div>
                             )}
+                            {hasError && (
+                                <div className="tool-step-error">{String((step.result as Record<string, unknown>).error)}</div>
+                            )}
+                            {isExpanded && renderExpandedContent(step)}
                         </div>
                     );
                 })}
@@ -845,28 +1326,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         );
     };
 
-    // ── Render message content (simple markdown) ──
+    // ── Render message content (full markdown via marked) ──
     const renderMessageContent = (content: string) => {
-        const parts = content.split(/(```[\s\S]*?```|`[^`]+`|\*\*[^*]+\*\*)/g);
-        return parts.map((part, i) => {
-            if (part.startsWith('```') && part.endsWith('```')) {
-                const code = part.slice(3, -3);
-                const lines = code.split('\n');
-                const lang = lines[0].trim();
-                const codeContent = lang ? lines.slice(1).join('\n') : code;
-                return (
-                    <pre key={i}>
-                        {lang && <div className="code-lang">{lang}</div>}
-                        <code>{codeContent.trim()}</code>
-                    </pre>
-                );
-            }
-            if (part.startsWith('`') && part.endsWith('`')) return <code key={i}>{part.slice(1, -1)}</code>;
-            if (part.startsWith('**') && part.endsWith('**')) return <strong key={i}>{part.slice(2, -2)}</strong>;
-            return <span key={i}>{part.split('\n').map((line, j) => (
-                <React.Fragment key={j}>{j > 0 && <br />}{line}</React.Fragment>
-            ))}</span>;
-        });
+        const html = marked.parse(content, { breaks: true, gfm: true }) as string;
+        return <div className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />;
     };
 
     // ══════════════════════════════════════════
@@ -958,25 +1421,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 </div>
             ) : (
                 <>
-                    <div className="chat-topbar">
-                        <div className="chat-topbar-brand">
-                            <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
-                                <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="var(--accent)" opacity="0.9" />
-                                <path d="M24 14l8 6v12l-8-4V14z" fill="var(--accent)" opacity="0.6" />
-                            </svg>
-                            <span className="chat-topbar-title">Onicode</span>
-                        </div>
-                        <div className="chat-topbar-actions">
-                            <button className="header-action-btn" onClick={() => setShowHistory(true)} title="History">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <circle cx="12" cy="12" r="10" />
-                                    <polyline points="12 6 12 12 16 14" />
-                                </svg>
-                            </button>
-                            <button className="new-chat-btn" onClick={newChat}>New Chat</button>
-                        </div>
-                    </div>
-                    <div className="messages">
+                    <div className="messages" ref={messagesContainerRef}>
                         {messages.map((message) => (
                             <div key={message.id} className={`message message-${message.role}`}>
                                 <div className={`message-avatar ${message.role}`}>
@@ -1033,7 +1478,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                 </div>
                             </div>
                         ))}
-                        {isTyping && (streamingContent || activeToolSteps.length > 0) && (
+                        {isTyping && (streamingContent || activeToolSteps.length > 0 || agentStatus) && (
                             <div className="message message-ai">
                                 <div className="message-avatar ai">
                                     <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
@@ -1042,12 +1487,31 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                     </svg>
                                 </div>
                                 <div className="message-content-wrapper">
+                                    {(agentStatus || sessionTimer > 0) && (
+                                        <div className={`agent-status ${agentStatus ? `agent-status-${agentStatus.status}` : ''}`}>
+                                            <span className="agent-status-indicator" />
+                                            <span className="agent-status-text">
+                                                {agentStatus?.status === 'thinking' && 'Thinking...'}
+                                                {agentStatus?.status === 'streaming' && (agentStatus.round > 0 ? `Generating (round ${agentStatus.round + 1})...` : 'Generating...')}
+                                                {agentStatus?.status === 'continuing' && `Continuing — ${agentStatus.pending} task${agentStatus.pending !== 1 ? 's' : ''} remaining`}
+                                                {agentStatus?.status === 'sub-agent' && `Sub-agent: ${agentStatus.task || 'working'}...`}
+                                                {agentStatus?.status === 'executing' && 'Executing tools...'}
+                                                {!agentStatus && sessionTimer > 0 && !isTyping && 'Completed'}
+                                            </span>
+                                            {agentStatus && agentStatus.round > 0 && agentStatus.status !== 'continuing' && (
+                                                <span className="agent-status-round">Round {agentStatus.round + 1}</span>
+                                            )}
+                                            {sessionTimer > 0 && (
+                                                <span className="session-timer">{formatTime(sessionTimer)}</span>
+                                            )}
+                                        </div>
+                                    )}
                                     {activeToolSteps.length > 0 && renderToolSteps(activeToolSteps)}
                                     {streamingContent && <div className="message-bubble">{renderMessageContent(streamingContent)}</div>}
                                 </div>
                             </div>
                         )}
-                        {isTyping && !streamingContent && activeToolSteps.length === 0 && (
+                        {isTyping && !streamingContent && activeToolSteps.length === 0 && !agentStatus && (
                             <div className="message message-ai">
                                 <div className="message-avatar ai">
                                     <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
@@ -1066,6 +1530,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         )}
                         <div ref={messagesEndRef} />
                     </div>
+                    {showScrollBtn && (
+                        <button className="scroll-to-bottom-btn" onClick={scrollToBottom} title="Scroll to bottom">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <polyline points="6 9 12 15 18 9" />
+                            </svg>
+                        </button>
+                    )}
                 </>
             )}
 
@@ -1185,6 +1656,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </button>
                     )}
                 </div>
+                {contextInfo && messages.length > 0 && (
+                    <div className="context-tracker">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="M12 6v6l4 2" />
+                        </svg>
+                        <span>~{contextInfo.tokens.toLocaleString()} tokens · {contextInfo.messages} msgs</span>
+                        {contextInfo.tokens > 50000 && <span className="context-warning">compacting soon</span>}
+                    </div>
+                )}
             </div>
         </div>
     );

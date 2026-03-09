@@ -12,7 +12,7 @@ function stripAnsi(str: string): string {
 //  Widget Types (kernel layer)
 // ══════════════════════════════════════════
 
-export type WidgetType = 'terminal' | 'files' | 'browser' | 'project' | 'pdf' | 'excel' | 'word' | 'camera' | 'image';
+export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks';
 
 export interface PanelState {
     widget: WidgetType | null;
@@ -29,10 +29,8 @@ const WIDGETS: WidgetDef[] = [
     { id: 'terminal', label: 'Terminal', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg> },
     { id: 'project', label: 'Project', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" /></svg> },
     { id: 'files', label: 'Files', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg> },
-    { id: 'browser', label: 'Browser', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" /></svg> },
-    { id: 'pdf', label: 'PDF', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg> },
-    { id: 'image', label: 'Image', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg> },
-    { id: 'camera', label: 'Camera', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" /></svg> },
+    { id: 'agents', label: 'Agents', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg> },
+    { id: 'tasks', label: 'Tasks', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg> },
 ];
 
 // ══════════════════════════════════════════
@@ -252,42 +250,133 @@ function TerminalWidget() {
 //  File Viewer Widget
 // ══════════════════════════════════════════
 
+interface TreeNode { name: string; path: string; type: string; children?: TreeNode[] }
+
 function FileViewerWidget({ data }: { data?: Record<string, unknown> }) {
-    const [tree, setTree] = useState<Array<{ name: string; path: string; type: string; children?: unknown[] }>>([]);
-    const targetPath = (data?.path as string) || '';
+    const [tree, setTree] = useState<TreeNode[]>([]);
+    const [refreshKey, setRefreshKey] = useState(0);
+    const [currentPath, setCurrentPath] = useState((data?.path as string) || '');
+    const [rootPath, setRootPath] = useState('');
+    const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+    // viewingFile state removed — files open in floating editor via onicode-open-file event
+
+    // Resolve root path from active project
+    useEffect(() => {
+        const explicit = data?.path as string;
+        if (explicit) { setRootPath(explicit); setCurrentPath(explicit); return; }
+        try {
+            const stored = localStorage.getItem('onicode-active-project');
+            if (stored) { const p = JSON.parse(stored).path; setRootPath(p); setCurrentPath(p); return; }
+        } catch {}
+        setRootPath(''); setCurrentPath('');
+    }, [data?.path]);
 
     useEffect(() => {
-        if (!isElectron || !targetPath) return;
-        window.onicode!.readDir(targetPath, 2).then((res) => {
-            if (res.tree) setTree(res.tree as typeof tree);
-        });
-    }, [targetPath]);
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail?.path) { setRootPath(detail.path); setCurrentPath(detail.path); setExpandedDirs(new Set()); }
+        };
+        window.addEventListener('onicode-project-activate', handler);
+        return () => window.removeEventListener('onicode-project-activate', handler);
+    }, []);
 
-    if (!targetPath) {
+    // Load file tree for current path
+    useEffect(() => {
+        if (!isElectron || !currentPath) return;
+        window.onicode!.readDir(currentPath, 2).then((res) => {
+            if (res.tree) setTree(res.tree as TreeNode[]);
+        });
+    }, [currentPath, refreshKey]);
+
+    // Auto-refresh when AI modifies files
+    useEffect(() => {
+        if (!isElectron || !currentPath || !window.onicode?.onFileChanged) return;
+        const unsub = window.onicode.onFileChanged(() => setRefreshKey(k => k + 1));
+        return unsub;
+    }, [currentPath]);
+
+    const toggleDir = useCallback((dirPath: string) => {
+        setExpandedDirs(prev => {
+            const next = new Set(prev);
+            if (next.has(dirPath)) next.delete(dirPath);
+            else next.add(dirPath);
+            return next;
+        });
+    }, []);
+
+    const openFile = useCallback((filePath: string, fileName: string) => {
+        // Dispatch event to App.tsx to open floating editor
+        window.dispatchEvent(new CustomEvent('onicode-open-file', { detail: { path: filePath, name: fileName } }));
+    }, []);
+
+    const navigateUp = useCallback(() => {
+        if (currentPath === rootPath || !currentPath) return;
+        const parent = currentPath.split('/').slice(0, -1).join('/');
+        if (parent && parent.length >= rootPath.length) {
+            setCurrentPath(parent);
+            setExpandedDirs(new Set());
+        }
+    }, [currentPath, rootPath]);
+
+    if (!rootPath) {
         return (
             <div className="widget-placeholder">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.5">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4">
                     <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
                 </svg>
-                <p>Open a project folder to browse files</p>
-                <span>Use /files &lt;path&gt; to browse</span>
+                <p>No project open</p>
+                <span>Use <code>/init</code> or <code>/openproject</code> to start</span>
             </div>
         );
     }
 
+    const renderItem = (item: TreeNode, depth: number) => {
+        const isDir = item.type === 'directory';
+        const isExpanded = expandedDirs.has(item.path);
+
+        return (
+            <div key={item.path}>
+                <div
+                    className={`file-tree-item ${item.type}`}
+                    style={{ paddingLeft: `${8 + depth * 14}px` }}
+                    onClick={() => isDir ? toggleDir(item.path) : openFile(item.path, item.name)}
+                >
+                    {isDir ? (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', flexShrink: 0 }}>
+                            <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                    ) : (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
+                            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" />
+                        </svg>
+                    )}
+                    <span className="file-tree-name">{item.name}</span>
+                </div>
+                {isDir && isExpanded && item.children && (
+                    <div className="file-tree-children">
+                        {(item.children as TreeNode[]).map(child => renderItem(child, depth + 1))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     return (
         <div className="widget-files">
-            <div className="widget-files-path">{targetPath}</div>
-            {tree.map((item) => (
-                <div key={item.path} className={`file-tree-item file-tree-indent ${item.type}`}>
-                    {item.type === 'directory' ? (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
-                    ) : (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-                    )}
-                    <span>{item.name}</span>
-                </div>
-            ))}
+            <div className="widget-files-header">
+                {currentPath !== rootPath && (
+                    <button className="file-viewer-back" onClick={navigateUp} title="Go up">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+                    </button>
+                )}
+                <span className="widget-files-path">{currentPath.split('/').pop()}</span>
+                <button className="file-viewer-refresh" onClick={() => setRefreshKey(k => k + 1)} title="Refresh">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" /></svg>
+                </button>
+            </div>
+            <div className="widget-files-tree">
+                {tree.map(item => renderItem(item, 0))}
+            </div>
         </div>
     );
 }
@@ -296,20 +385,129 @@ function FileViewerWidget({ data }: { data?: Record<string, unknown> }) {
 //  Browser Widget
 // ══════════════════════════════════════════
 
-function BrowserWidget({ data }: { data?: Record<string, unknown> }) {
-    const [url, setUrl] = useState((data?.url as string) || '');
+// ══════════════════════════════════════════
+//  Agent Runtime Widget
+// ══════════════════════════════════════════
+
+interface AgentEntry { id: string; task: string; status: string; createdAt: number; result?: string; }
+interface BgProcess { id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number; }
+
+function AgentsWidget() {
+    const [agents, setAgents] = useState<AgentEntry[]>([]);
+    const [bgProcesses, setBgProcesses] = useState<BgProcess[]>([]);
+    const [agentStatus, setAgentStatus] = useState<{ round: number; status: string } | null>(null);
+
+    // Poll agents + background processes
+    const refresh = useCallback(async () => {
+        if (!isElectron) return;
+        try {
+            const [agentList, procList] = await Promise.all([
+                window.onicode!.listAgents(),
+                window.onicode!.listBackgroundProcesses(),
+            ]);
+            setAgents(agentList || []);
+            setBgProcesses(procList || []);
+        } catch { /* ignore */ }
+    }, []);
+
+    useEffect(() => {
+        refresh();
+        const interval = setInterval(refresh, 3000);
+        return () => clearInterval(interval);
+    }, [refresh]);
+
+    // Real-time agent step events
+    useEffect(() => {
+        if (!window.onicode?.onAgentStep) return;
+        const unsub = window.onicode.onAgentStep((data) => {
+            setAgentStatus(data as { round: number; status: string });
+            // Also refresh on sub-agent events
+            if (data.agentId) refresh();
+        });
+        return unsub;
+    }, [refresh]);
+
+    // Real-time terminal session events
+    useEffect(() => {
+        if (!window.onicode?.onTerminalSession) return;
+        const unsub = window.onicode.onTerminalSession(() => refresh());
+        return unsub;
+    }, [refresh]);
+
+    const killProcess = async (id: string) => {
+        if (!isElectron) return;
+        await window.onicode!.killBackgroundProcess(id);
+        refresh();
+    };
+
+    const running = agents.filter(a => a.status === 'running').length + bgProcesses.filter(p => p.status === 'running').length;
+    const hasAnything = agents.length > 0 || bgProcesses.length > 0 || agentStatus;
+
     return (
-        <div className="widget-browser">
-            <div className="browser-toolbar">
-                <input className="browser-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Enter URL..." spellCheck={false} />
+        <div className="widget-agents">
+            <div className="agents-header">
+                {running > 0 && <span className="agents-running-badge">{running} active</span>}
+                {agentStatus && (
+                    <span className="agents-current-status">
+                        {agentStatus.status === 'thinking' && 'AI thinking...'}
+                        {agentStatus.status === 'executing' && 'Executing tools...'}
+                        {agentStatus.status === 'streaming' && 'Generating...'}
+                        {agentStatus.status === 'continuing' && 'Auto-continuing...'}
+                        {agentStatus.status === 'sub-agent' && 'Sub-agent working...'}
+                        {agentStatus.round > 0 && ` (round ${agentStatus.round + 1})`}
+                    </span>
+                )}
             </div>
-            <div className="widget-placeholder">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.5">
-                    <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
-                </svg>
-                <p>Mini browser preview</p>
-                <span>Enter a URL above to preview</span>
-            </div>
+
+            {!hasAnything ? (
+                <div className="widget-placeholder">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4">
+                        <circle cx="12" cy="12" r="3" />
+                        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4" />
+                    </svg>
+                    <p>No active agents</p>
+                    <span>Agents, processes, and runtime status appear here during AI workflows</span>
+                </div>
+            ) : (
+                <div className="agents-list">
+                    {agents.length > 0 && (
+                        <div className="agents-section">
+                            <div className="agents-section-label">Sub-Agents</div>
+                            {agents.map(a => (
+                                <div key={a.id} className={`agent-item agent-item-${a.status}`}>
+                                    <span className={`agent-dot ${a.status}`} />
+                                    <div className="agent-item-info">
+                                        <span className="agent-item-id">{a.id.slice(0, 8)}</span>
+                                        <span className="agent-item-task">{a.task}</span>
+                                        {a.result && <span className="agent-item-result">{String(a.result).slice(0, 100)}</span>}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {bgProcesses.length > 0 && (
+                        <div className="agents-section">
+                            <div className="agents-section-label">Background Processes</div>
+                            {bgProcesses.map(p => (
+                                <div key={p.id} className={`agent-item agent-item-${p.status}`}>
+                                    <span className={`agent-dot ${p.status}`} />
+                                    <div className="agent-item-info">
+                                        <code className="agent-item-cmd">{p.command}</code>
+                                        {p.port && <span className="agent-port">:{p.port}</span>}
+                                    </div>
+                                    {p.status === 'running' && (
+                                        <button className="agent-kill-btn" onClick={() => killProcess(p.id)} title="Kill process">
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                                            </svg>
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 }
@@ -324,7 +522,16 @@ function ProjectWidget() {
         gitBranch?: string; hasGit?: boolean;
     } | null>(null);
     const [docs, setDocs] = useState<Array<{ name: string; content: string }>>([]);
-    const [tasks, setTasks] = useState<TaskSummary | null>(null);
+    const [fileTree, setFileTree] = useState<Array<{ name: string; path: string; type: string; children?: unknown[] }>>([]);
+    const [showFiles, setShowFiles] = useState(true);
+
+    // Load file tree for the active project
+    const loadFileTree = useCallback((projectPath: string) => {
+        if (!isElectron || !projectPath) return;
+        window.onicode!.readDir(projectPath, 2).then((res) => {
+            if (res.tree) setFileTree(res.tree as typeof fileTree);
+        }).catch(() => { });
+    }, []);
 
     useEffect(() => {
         try {
@@ -332,6 +539,7 @@ function ProjectWidget() {
             if (stored) {
                 const p = JSON.parse(stored);
                 setProject(p);
+                loadFileTree(p.path);
                 // Load project docs if electron
                 if (isElectron && p.id) {
                     window.onicode!.getProject(p.id).then((result) => {
@@ -344,27 +552,29 @@ function ProjectWidget() {
             }
         } catch { /* ignore */ }
 
-        // Load initial tasks
-        if (isElectron) {
-            window.onicode!.tasksList().then(setTasks).catch(() => { });
-        }
-
-        // Listen for real-time task updates from main process
-        let unsubTasks: (() => void) | undefined;
-        if (isElectron) {
-            unsubTasks = window.onicode!.onTasksUpdated((data) => setTasks(data));
-        }
-
         const handler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
-            if (detail?.name) setProject(detail);
+            if (detail?.name) {
+                setProject(detail);
+                loadFileTree(detail.path);
+            }
         };
         window.addEventListener('onicode-project-activate', handler);
         return () => {
             window.removeEventListener('onicode-project-activate', handler);
-            unsubTasks?.();
         };
-    }, []);
+    }, [loadFileTree]);
+
+    // Auto-refresh file tree when AI creates/edits files
+    useEffect(() => {
+        if (!isElectron || !project?.path || !window.onicode?.onFileChanged) return;
+        const unsub = window.onicode.onFileChanged((change) => {
+            if (change.path?.startsWith(project.path) || change.dir?.startsWith(project.path)) {
+                loadFileTree(project.path);
+            }
+        });
+        return unsub;
+    }, [project?.path, loadFileTree]);
 
     if (!project) {
         return (
@@ -377,17 +587,6 @@ function ProjectWidget() {
             </div>
         );
     }
-
-    const statusIcon = (status: string) => {
-        switch (status) {
-            case 'done': return <span className="task-status-icon task-done">✓</span>;
-            case 'in_progress': return <span className="task-status-icon task-progress">▶</span>;
-            case 'skipped': return <span className="task-status-icon task-skipped">–</span>;
-            default: return <span className="task-status-icon task-pending">○</span>;
-        }
-    };
-
-    const priorityClass = (p: string) => p === 'high' ? 'task-high' : p === 'low' ? 'task-low' : '';
 
     return (
         <div className="project-widget">
@@ -414,27 +613,6 @@ function ProjectWidget() {
                     </span>
                 </div>
             )}
-            {tasks && tasks.total > 0 && (
-                <div className="project-widget-section">
-                    <div className="project-widget-label">
-                        Tasks ({tasks.done}/{tasks.total})
-                    </div>
-                    <div className="project-widget-progress">
-                        <div className="progress-bar">
-                            <div className="progress-fill" style={{ width: `${tasks.total > 0 ? (tasks.done / tasks.total) * 100 : 0}%` }} />
-                        </div>
-                        <span className="progress-text">{Math.round((tasks.done / tasks.total) * 100)}%</span>
-                    </div>
-                    <div className="project-widget-tasks">
-                        {tasks.tasks.map((task: TaskItem) => (
-                            <div key={task.id} className={`project-widget-task ${priorityClass(task.priority)}`}>
-                                {statusIcon(task.status)}
-                                <span className={task.status === 'done' ? 'task-content-done' : ''}>{task.content}</span>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
             {docs.length > 0 && (
                 <div className="project-widget-section">
                     <div className="project-widget-label">Docs</div>
@@ -448,6 +626,200 @@ function ProjectWidget() {
                     </div>
                 </div>
             )}
+            {fileTree.length > 0 && (
+                <div className="project-widget-section">
+                    <div className="project-widget-label project-widget-label-toggle" onClick={() => setShowFiles(f => !f)}>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: showFiles ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}><polyline points="9 18 15 12 9 6" /></svg>
+                        Files ({fileTree.length})
+                    </div>
+                    {showFiles && (
+                        <div className="project-widget-files">
+                            {fileTree.map((item) => (
+                                <div key={item.path} className={`project-file-item ${item.type}`}>
+                                    {item.type === 'directory' ? (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
+                                    ) : (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                    )}
+                                    <span>{item.name}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════
+//  Tasks Widget
+// ══════════════════════════════════════════
+
+interface TaskEntry {
+    id: number;
+    content: string;
+    status: string;
+    priority: string;
+    createdAt?: string;
+    completedAt?: string | null;
+}
+
+function TasksWidget() {
+    const [tasks, setTasks] = useState<TaskEntry[]>([]);
+    const [total, setTotal] = useState(0);
+    const [done, setDone] = useState(0);
+    const [inProgress, setInProgress] = useState(0);
+
+    const applyTaskSummary = useCallback((data: { total: number; done: number; inProgress: number; tasks: TaskEntry[] }) => {
+        setTotal(data.total);
+        setDone(data.done);
+        setInProgress(data.inProgress);
+        setTasks(data.tasks || []);
+    }, []);
+
+    const loadTasks = useCallback(async () => {
+        if (!isElectron || !window.onicode?.tasksList) return;
+        try {
+            const summary = await window.onicode.tasksList();
+            if (summary) applyTaskSummary(summary as { total: number; done: number; inProgress: number; tasks: TaskEntry[] });
+        } catch { /* ignore */ }
+    }, [applyTaskSummary]);
+
+    useEffect(() => {
+        // Load tasks for the active project from SQLite
+        try {
+            const stored = localStorage.getItem('onicode-active-project');
+            if (stored && window.onicode?.loadProjectTasks) {
+                const proj = JSON.parse(stored);
+                window.onicode.loadProjectTasks(proj.path).then((res) => {
+                    if (res.success && res.summary) applyTaskSummary(res.summary as { total: number; done: number; inProgress: number; tasks: TaskEntry[] });
+                });
+            } else {
+                loadTasks();
+            }
+        } catch {
+            loadTasks();
+        }
+
+        // Listen for live updates
+        if (!window.onicode?.onTasksUpdated) return;
+        const unsub = window.onicode.onTasksUpdated((data) => {
+            applyTaskSummary(data as { total: number; done: number; inProgress: number; tasks: TaskEntry[] });
+        });
+
+        // Reload when project changes
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail?.path && window.onicode?.loadProjectTasks) {
+                window.onicode.loadProjectTasks(detail.path).then((res) => {
+                    if (res.success && res.summary) applyTaskSummary(res.summary as { total: number; done: number; inProgress: number; tasks: TaskEntry[] });
+                });
+            }
+        };
+        window.addEventListener('onicode-project-activate', handler);
+
+        return () => {
+            unsub?.();
+            window.removeEventListener('onicode-project-activate', handler);
+        };
+    }, [loadTasks, applyTaskSummary]);
+
+    const archiveCompleted = useCallback(async () => {
+        if (!isElectron) return;
+        await window.onicode!.archiveCompletedTasks();
+        loadTasks();
+    }, [loadTasks]);
+
+    const inProgressTasks = tasks.filter(t => t.status === 'in_progress');
+    const pendingTasks = tasks.filter(t => t.status === 'pending');
+    const doneTasks = tasks.filter(t => t.status === 'done');
+    const skippedTasks = tasks.filter(t => t.status === 'skipped');
+
+    if (total === 0) {
+        return (
+            <div className="widget-placeholder">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4">
+                    <path d="M9 11l3 3L22 4" />
+                    <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+                </svg>
+                <p>No tasks</p>
+                <span>Tasks appear here when the AI creates them during work sessions</span>
+            </div>
+        );
+    }
+
+    return (
+        <div className="widget-tasks">
+            {/* Progress summary */}
+            <div className="tasks-summary">
+                <div className="tasks-summary-text">
+                    <span className="tasks-summary-count">{done}/{total}</span> done
+                    {inProgress > 0 && <span className="tasks-summary-active"> · {inProgress} active</span>}
+                </div>
+                <div className="tasks-progress-bar">
+                    <div className="tasks-progress-fill" style={{ width: `${total > 0 ? Math.round((done / total) * 100) : 0}%` }} />
+                </div>
+            </div>
+
+            <div className="tasks-list">
+                {/* In Progress */}
+                {inProgressTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">In Progress</div>
+                        {inProgressTasks.map(t => (
+                            <div key={t.id} className="task-item task-item-active">
+                                <span className="task-item-icon task-icon-progress" />
+                                <span className="task-item-text">{t.content}</span>
+                                <span className={`task-item-priority priority-${t.priority}`}>{t.priority}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Pending */}
+                {pendingTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">Pending</div>
+                        {pendingTasks.map(t => (
+                            <div key={t.id} className="task-item">
+                                <span className="task-item-icon task-icon-pending" />
+                                <span className="task-item-text">{t.content}</span>
+                                <span className={`task-item-priority priority-${t.priority}`}>{t.priority}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Completed */}
+                {doneTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">
+                            Completed ({doneTasks.length})
+                            <button className="task-archive-btn" onClick={archiveCompleted}>Archive all</button>
+                        </div>
+                        {doneTasks.map(t => (
+                            <div key={t.id} className="task-item task-item-done">
+                                <span className="task-item-icon task-icon-done" />
+                                <span className="task-item-text">{t.content}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Skipped */}
+                {skippedTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">Skipped</div>
+                        {skippedTasks.map(t => (
+                            <div key={t.id} className="task-item task-item-skipped">
+                                <span className="task-item-icon task-icon-skipped" />
+                                <span className="task-item-text">{t.content}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
@@ -456,15 +828,6 @@ function ProjectWidget() {
 //  Placeholder
 // ══════════════════════════════════════════
 
-function PlaceholderWidget({ type }: { type: WidgetType }) {
-    const labels: Record<WidgetType, string> = { terminal: 'Terminal', project: 'Project', files: 'File Viewer', browser: 'Browser', pdf: 'PDF Viewer', excel: 'Spreadsheet', word: 'Document', camera: 'Camera', image: 'Image Viewer' };
-    return (
-        <div className="widget-placeholder">
-            <p>{labels[type]} widget</p>
-            <span>Coming soon</span>
-        </div>
-    );
-}
 
 // ══════════════════════════════════════════
 //  Right Panel
@@ -476,33 +839,51 @@ interface RightPanelProps {
     onChangeWidget: (widget: WidgetType) => void;
 }
 
+// Track which widgets have been opened so they stay mounted (preserves terminal state)
 export default function RightPanel({ panel, onClose, onChangeWidget }: RightPanelProps) {
     const [collapsed, setCollapsed] = useState(false);
+    const [mountedWidgets, setMountedWidgets] = useState<Set<WidgetType>>(new Set());
 
-    if (!panel.widget) return null;
+    // Track mounted widgets so terminal etc. stay alive across tab switches AND panel close/open
+    useEffect(() => {
+        if (panel.widget) {
+            setMountedWidgets(prev => {
+                if (prev.has(panel.widget!)) return prev;
+                const next = new Set(prev);
+                next.add(panel.widget!);
+                return next;
+            });
+        }
+    }, [panel.widget]);
+
+    // When panel is closed (widget is null), hide but keep persistent widgets alive
+    const isVisible = !!panel.widget;
     const activeWidget = WIDGETS.find((w) => w.id === panel.widget);
 
-    const renderWidget = () => {
-        switch (panel.widget) {
-            case 'terminal': return <TerminalWidget />;
+    const renderNonPersistentWidget = (type: WidgetType) => {
+        switch (type) {
             case 'project': return <ProjectWidget />;
             case 'files': return <FileViewerWidget data={panel.data} />;
-            case 'browser': return <BrowserWidget data={panel.data} />;
-            default: return <PlaceholderWidget type={panel.widget!} />;
+            case 'agents': return <AgentsWidget />;
+            case 'tasks': return <TasksWidget />;
+            default: return null;
         }
     };
 
+    // If terminal has been mounted, always render the panel wrapper to keep terminal alive
+    if (!isVisible && !mountedWidgets.has('terminal')) return null;
+
     return (
-        <div className={`right-panel ${collapsed ? 'right-panel-collapsed' : ''}`}>
+        <div className={`right-panel ${collapsed ? 'right-panel-collapsed' : ''}`} style={{ display: isVisible ? undefined : 'none' }}>
             <div className="right-panel-header">
                 <div className="right-panel-tabs">
-                    {WIDGETS.slice(0, 5).map((w) => (
+                    {WIDGETS.map((w) => (
                         <button key={w.id} className={`panel-tab ${panel.widget === w.id ? 'active' : ''}`} onClick={() => onChangeWidget(w.id)} title={w.label}>
                             {w.icon}
                         </button>
                     ))}
                 </div>
-                {!collapsed && <div className="right-panel-title">{activeWidget?.label}</div>}
+                {!collapsed && activeWidget && <div className="right-panel-title">{activeWidget.label}</div>}
                 <div className="right-panel-actions">
                     <button className="panel-collapse" onClick={() => setCollapsed(!collapsed)} title={collapsed ? 'Expand panel' : 'Collapse panel'}>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -521,7 +902,14 @@ export default function RightPanel({ panel, onClose, onChangeWidget }: RightPane
             </div>
             {!collapsed && (
                 <div className="right-panel-body">
-                    {renderWidget()}
+                    {/* Terminal stays mounted once opened — survives tab switches AND panel close/open */}
+                    {mountedWidgets.has('terminal') && (
+                        <div style={{ display: panel.widget === 'terminal' ? 'contents' : 'none' }}>
+                            <TerminalWidget />
+                        </div>
+                    )}
+                    {/* Other widgets render normally */}
+                    {panel.widget && panel.widget !== 'terminal' && renderNonPersistentWidget(panel.widget)}
                 </div>
             )}
         </div>

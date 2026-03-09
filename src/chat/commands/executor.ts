@@ -164,7 +164,7 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
 
             const initParts = args.split(/\s+/);
             const projectName = initParts[0];
-            const projectPath = initParts[1] || '~/Documents/OniProjects';
+            const projectPath = initParts[1] || '~/OniProjects';
 
             if (isElectron) {
                 addAIMessage(ctx, `Creating project **${projectName}**...`);
@@ -206,7 +206,7 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
 
         case '/openproject': {
             if (!args) {
-                addAIMessage(ctx, 'Usage: `/openproject <path>`\n\nExample: `/openproject ~/Documents/OniProjects/my-app`\n\nScans the folder, detects tech stack & git, creates `.onidocs/` if missing, and registers it as an Onicode project.');
+                addAIMessage(ctx, 'Usage: `/openproject <path>`\n\nExample: `/openproject ~/OniProjects/my-app`\n\nScans the folder, detects tech stack & git, creates `.onidocs/` if missing, and registers it as an Onicode project.');
                 return { handled: true };
             }
 
@@ -259,6 +259,43 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
                 }
             } else {
                 addAIMessage(ctx, 'Project scanning requires the Electron desktop app.');
+            }
+            return { handled: true };
+        }
+
+        case '/switch': {
+            if (!args) {
+                if (isElectron) {
+                    const result = await window.onicode!.listProjects();
+                    if (result.projects.length === 0) {
+                        addAIMessage(ctx, 'No projects yet. Use `/init <name>` to create one.');
+                    } else {
+                        const list = result.projects.map((p) =>
+                            `- \`/switch ${p.name}\` — ${p.path}`
+                        ).join('\n');
+                        addAIMessage(ctx, `Usage: \`/switch <project-name>\`\n\n**Available projects:**\n${list}`);
+                    }
+                } else {
+                    addAIMessage(ctx, 'Usage: `/switch <project-name>`');
+                }
+                return { handled: true };
+            }
+
+            if (isElectron) {
+                const result = await window.onicode!.listProjects();
+                const query = args.toLowerCase().trim();
+                const found = result.projects.find((p) => {
+                    const pName = p.name.toLowerCase();
+                    return pName === query || pName.includes(query) || query.includes(pName);
+                });
+                if (found) {
+                    window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                        detail: { id: found.id, name: found.name, path: found.path },
+                    }));
+                    addAIMessage(ctx, `Switched to project **${found.name}** at \`${found.path}\``);
+                } else {
+                    addAIMessage(ctx, `Project "${args}" not found. Use \`/switch\` to see available projects.`);
+                }
             }
             return { handled: true };
         }
@@ -376,7 +413,49 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
             addAIMessage(ctx, `**Onicode** v0.1.0\nElectron desktop AI development environment`);
             return { handled: true };
 
-        default:
+        case '/git':
+            if (isElectron) {
+                const subCmd = args || 'status';
+                const projStr = localStorage.getItem('onicode-active-project');
+                if (!projStr) {
+                    addAIMessage(ctx, 'No active project. Open or create one first.');
+                    return { handled: true };
+                }
+                const proj = JSON.parse(projStr);
+                if (subCmd === 'status') {
+                    const res = await window.onicode!.gitStatus(proj.path);
+                    if (res.success) {
+                        addAIMessage(ctx, `**Git Status** for ${proj.name}\n\n\`\`\`\n${JSON.stringify(res, null, 2)}\n\`\`\``);
+                    } else {
+                        addAIMessage(ctx, `Git error: ${res.error}`);
+                    }
+                }
+            }
+            return { handled: true };
+
+        default: {
+            // Try custom commands (loaded from .onicode/commands/*.md)
+            if (command.startsWith('/') && isElectron) {
+                try {
+                    const projStr = localStorage.getItem('onicode-active-project');
+                    const projPath = projStr ? JSON.parse(projStr).path : undefined;
+                    const cmds = await window.onicode!.customCommandsList(projPath);
+                    const customCmd = cmds.find((c: CustomCommand) => `/${c.name}` === command);
+                    if (customCmd) {
+                        // Replace $ARGUMENTS and return as unhandled so it gets sent to AI
+                        const expandedPrompt = customCmd.prompt.replace(/\$ARGUMENTS/g, args || '');
+                        // Add the expanded prompt as a user message that will be processed by AI
+                        ctx.setMessages(prev => [...prev, {
+                            id: Math.random().toString(36).substring(2, 12),
+                            role: 'user' as const,
+                            content: `[/${customCmd.name}] ${expandedPrompt}`,
+                            timestamp: Date.now(),
+                        }]);
+                        return { handled: true };
+                    }
+                } catch { /* custom commands not available */ }
+            }
             return { handled: false };
+        }
     }
 }
