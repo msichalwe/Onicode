@@ -173,12 +173,40 @@ async function screenshot(opts = {}) {
         }
 
         const stats = fs.statSync(filePath);
+
+        // Extract visible text + DOM structure so the AI can analyze what's on screen
+        let pageAnalysis = {};
+        try {
+            pageAnalysis = await activePage.evaluate(() => {
+                const title = document.title || '';
+                const bodyText = document.body?.innerText?.slice(0, 3000) || '';
+                // Get key UI elements
+                const headings = [...document.querySelectorAll('h1, h2, h3')].slice(0, 10).map(el => el.textContent?.trim());
+                const buttons = [...document.querySelectorAll('button, [role="button"], a.btn')].slice(0, 15).map(el => el.textContent?.trim());
+                const inputs = [...document.querySelectorAll('input, textarea, select')].slice(0, 10).map(el => ({
+                    type: el.getAttribute('type') || el.tagName.toLowerCase(),
+                    placeholder: el.getAttribute('placeholder') || '',
+                    value: el.value?.slice(0, 50) || '',
+                }));
+                const images = [...document.querySelectorAll('img')].slice(0, 5).map(el => ({
+                    alt: el.getAttribute('alt') || '',
+                    src: el.getAttribute('src')?.slice(0, 100) || '',
+                }));
+                const errors = [...document.querySelectorAll('.error, [class*="error"], [role="alert"]')].slice(0, 5).map(el => el.textContent?.trim());
+                // Check for common empty states
+                const isEmpty = bodyText.trim().length < 50;
+                return { title, bodyText: bodyText.slice(0, 2000), headings, buttons, inputs, images, errors, isEmpty };
+            });
+        } catch { /* page analysis failed, proceed with screenshot only */ }
+
         return {
             success: true,
             path: filePath,
             name,
             size: stats.size,
             url: activePage.url(),
+            pageContent: pageAnalysis,
+            ANALYSIS_GUIDE: 'Use the pageContent field to understand what is displayed. Check headings, buttons, bodyText, and errors to verify the UI matches expectations. If bodyText is empty or shows error messages, the app may not be rendering correctly — check console_logs for errors.',
         };
     } catch (err) {
         return { error: `Screenshot failed: ${err.message}` };

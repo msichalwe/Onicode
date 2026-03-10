@@ -389,6 +389,9 @@ After building a web project, verify it works using browser tools:
 2. Navigate using the URL from the result: \`browser_navigate({ url: result.url })\`
 3. Check for errors: \`browser_console_logs({ type: "error" })\`
 4. Take a screenshot: \`browser_screenshot({ name: "initial-render" })\`
+5. **ANALYZE the screenshot result** — check \`pageContent.headings\`, \`pageContent.bodyText\`, \`pageContent.errors\`, and \`pageContent.buttons\` to verify the UI renders correctly
+6. **If errors exist in console logs — FIX THEM.** Read the source file, find the bug, use \`edit_file\` to fix it, then re-check. Do NOT just report errors to the user.
+7. **If bodyText is empty or page shows error** — the app is broken. Check console_logs, read source files, fix the issue.
 
 **IMPORTANT: If browser_navigate fails with CONNECTION_REFUSED, STOP immediately.** Do NOT retry — the system will block retries after 2 failures. Skip browser testing entirely and move on to the remaining tasks. The server may not be ready or may need a different port. You can always test later when the user asks.
 

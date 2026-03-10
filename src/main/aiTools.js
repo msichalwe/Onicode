@@ -1246,7 +1246,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'browser_screenshot',
-            description: 'Take a screenshot of the current browser page or a specific element. Returns the screenshot file path.',
+            description: 'Take a screenshot AND extract page content (headings, buttons, text, errors, inputs). Use the returned pageContent to analyze what the user sees — check headings, bodyText, buttons, and errors fields. If bodyText is empty, the app may not be rendering.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1305,7 +1305,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'browser_console_logs',
-            description: 'Get captured browser console logs (console.log, console.error, page errors, request failures). Use this to debug web apps.',
+            description: 'Get browser console logs (errors, warnings, info). IMPORTANT: When you see errors, ACT on them — read the relevant source file, fix the bug with edit_file, then re-check. Do NOT just report errors to the user.',
             parameters: {
                 type: 'object',
                 properties: {

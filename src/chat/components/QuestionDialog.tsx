@@ -75,11 +75,26 @@ export function parseQuestions(content: string): ParsedQuestion[] | null {
 }
 
 /**
- * Check if an AI message looks like a discovery question set
+ * Check if an AI message looks like a discovery question set.
+ * Must be a short, question-focused message — NOT a status report with numbered items.
  */
 export function isQuestionMessage(content: string): boolean {
+    // Don't treat long messages (status reports, changelogs) as question dialogs
+    if (content.length > 1500) return false;
+
+    // Must contain actual question marks — numbered lists without "?" are status reports
+    const questionMarkCount = (content.match(/\?/g) || []).length;
+    if (questionMarkCount < 2) return false;
+
+    // Reject if message contains tool result indicators (status reports, changelogs, etc.)
+    if (/\b(completed|done|applied|created|updated|built|passed|failed|error|fixed)\b/i.test(content.slice(0, 200))) return false;
+
     const questions = parseQuestions(content);
-    return questions !== null && questions.length >= 2;
+    if (!questions || questions.length < 2) return false;
+
+    // At least half of the parsed "questions" must actually end with "?"
+    const actualQuestions = questions.filter(q => q.text.includes('?') || q.options.length > 0);
+    return actualQuestions.length >= 2;
 }
 
 export default function QuestionDialog({ questions, onSubmit }: QuestionDialogProps) {
