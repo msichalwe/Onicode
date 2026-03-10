@@ -37,6 +37,7 @@ src/
     git.js                  # Git operations via IPC (15 handlers, fully wired)
     aiTools.js              # AI tool definitions (45+ tools), executor, task manager, file context tracker
     orchestrator.js         # Multi-agent orchestration: roles, work graph, file locks, parallel execution
+    contextEngine.js        # Fast context engine: dependency graph, file outlines, pre-retrieval, composite tools
     lsp.js                  # Code intelligence via TypeScript compiler API
     codeIndex.js            # TF-IDF semantic search indexer
     storage.js              # SQLite persistence layer (tasks, conversations, sessions)
@@ -229,11 +230,12 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Unified Memory System (global + project + daily + cross-session)
 - [x] Permission System (3 modes: auto-allow, ask-destructive, plan-only)
 - [x] Fuzzy edit matching (Levenshtein-based fallback)
-- [x] Auto-backup before edits (restore points)
+- [x] Auto-backup before edits
 - [x] System prompt caching
 - [x] Semantic compaction (AI-powered conversation summarization)
 - [x] Browser widget (Puppeteer preview with URL navigation + screenshots)
-- [x] 49+ AI tools total (46 base + 3 orchestrator + MCP dynamic tools)
+- [x] 51+ AI tools total (43 base + 3 orchestrator + 5 context engine + MCP dynamic tools)
+- [x] Context Engine (dependency graph, file outlines, pre-retrieval pipeline, multi-signal ranking)
 - [x] MCP client (stdio JSON-RPC, tool discovery, dynamic tool injection, Settings UI)
 
 ## What's Missing

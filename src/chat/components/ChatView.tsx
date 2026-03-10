@@ -1400,8 +1400,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 run_command: 'Ran', init_project: 'Init', task_add: 'Task', task_update: 'Task',
                 task_list: 'Tasks', milestone_create: 'Milestone', browser_navigate: 'Browser', browser_screenshot: 'Screenshot',
                 browser_evaluate: 'Browser JS', browser_click: 'Clicked', browser_type: 'Typed',
-                browser_console_logs: 'Console', browser_close: 'Browser', create_restore_point: 'Checkpoint',
-                restore_to_point: 'Restored', spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
+                browser_console_logs: 'Console', browser_close: 'Browser',
+                spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
                 glob_files: 'Found', explore_codebase: 'Explored', memory_write: 'Memory',
                 memory_append: 'Memory', webfetch: 'Fetched', websearch: 'Searched',
                 get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
@@ -1412,6 +1412,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 git_checkout: 'Checkout', git_stash: 'Stash', git_pull: 'Pull',
                 git_stage: 'Staged', git_unstage: 'Unstaged', git_merge: 'Merged',
                 git_reset: 'Reset', git_tag: 'Tag', git_remotes: 'Remotes', git_show: 'Show',
+                find_implementation: 'Found', impact_analysis: 'Impact', prepare_edit_context: 'Context',
+                smart_read: 'Smart Read', batch_search: 'Batch Search',
             };
             return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
@@ -1474,8 +1476,6 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     return String(a.project_path || '').split('/').pop() || '';
                 case 'spawn_sub_agent':
                     return String(a.task || '').slice(0, 60);
-                case 'create_restore_point':
-                    return String(a.name || '');
                 case 'git_commit':
                     return String(a.message || '').slice(0, 60);
                 case 'git_push':
@@ -1572,6 +1572,30 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'git_show': {
                     const ref = String(a.ref || r?.hash || 'HEAD').slice(0, 10);
                     return ref;
+                }
+                case 'find_implementation': {
+                    const desc = String(a.description || '').slice(0, 50);
+                    const total = r?.total ?? '?';
+                    return `"${desc}" (${total} results)`;
+                }
+                case 'impact_analysis': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    return r?.impactSummary ? `${fname}: ${r.impactSummary}` : fname || '';
+                }
+                case 'prepare_edit_context': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const outline = Array.isArray(r?.outline) ? (r.outline as unknown[]).length : '?';
+                    return `${fname} (${outline} symbols)`;
+                }
+                case 'smart_read': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const mode = r?.mode || '';
+                    return `${fname} [${mode}]`;
+                }
+                case 'batch_search': {
+                    const total = r?.total ?? '?';
+                    const qCount = Array.isArray(a.queries) ? (a.queries as unknown[]).length : '?';
+                    return `${qCount} queries → ${total} results`;
                 }
                 default:
                     return '';
@@ -1915,7 +1939,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'find_implementation', 'impact_analysis', 'prepare_edit_context', 'smart_read', 'batch_search']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },

@@ -1072,6 +1072,13 @@ module.exports = {
     // Smart context helper
     rankSearchResults,
 
+    // Shared constants & utilities (for contextEngine)
+    walkDir,
+    SKIP_DIRS,
+    INDEXABLE_EXTENSIONS,
+    MAX_FILES,
+    MAX_FILE_SIZE,
+
     // AI tool integration
     getCodeIndexToolDefinitions,
     executeCodeIndexTool,

@@ -281,6 +281,7 @@ class FileContextTracker {
         this.createdFiles = new Set();
         this.deletedFiles = new Set();
         this.changelog = [];           // Ordered list of { ts, action, path, detail }
+        this._accessCount = new Map(); // path -> count (for hot files ranking)
     }
 
     trackRead(filePath, content) {
@@ -290,6 +291,7 @@ class FileContextTracker {
             lastRead: Date.now(),
             size: content.length,
         });
+        this._accessCount.set(filePath, (this._accessCount.get(filePath) || 0) + 1);
         logger.debug('file-ctx', `Read: ${filePath} (${lines} lines)`);
     }
 
@@ -396,12 +398,29 @@ class FileContextTracker {
         return lines.join('\n');
     }
 
+    /**
+     * Get the most frequently accessed files this session, scored by access count + recency.
+     */
+    getHotFiles(limit = 10) {
+        const now = Date.now();
+        const scored = [];
+        for (const [filePath, count] of this._accessCount) {
+            const readInfo = this.readFiles.get(filePath);
+            const recencyBonus = readInfo ? Math.max(0, 1 - ((now - readInfo.lastRead) / 600000)) : 0; // decay over 10 min
+            const score = (count * 2) + recencyBonus;
+            scored.push({ filePath, score, count, lastRead: readInfo?.lastRead || 0 });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.slice(0, limit);
+    }
+
     reset() {
         this.readFiles.clear();
         this.modifiedFiles.clear();
         this.createdFiles.clear();
         this.deletedFiles.clear();
         this.changelog = [];
+        this._accessCount.clear();
     }
 }
 
@@ -669,113 +688,6 @@ function getTerminalSessions() {
     }
     return terminalSessions.slice(-50); // Last 50 sessions
 }
-
-// ══════════════════════════════════════════
-//  Restore Points
-// ══════════════════════════════════════════
-
-const RESTORE_DIR = path.join(
-    os.homedir(),
-    '.onicode', 'restore-points'
-);
-
-class RestorePointManager {
-    constructor() {
-        if (!fs.existsSync(RESTORE_DIR)) {
-            fs.mkdirSync(RESTORE_DIR, { recursive: true });
-        }
-    }
-
-    create(name, filePaths) {
-        const id = `rp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const rpDir = path.join(RESTORE_DIR, id);
-        fs.mkdirSync(rpDir, { recursive: true });
-
-        const manifest = {
-            id,
-            name,
-            createdAt: Date.now(),
-            files: [],
-        };
-
-        for (const fp of filePaths) {
-            try {
-                if (fs.existsSync(fp)) {
-                    const content = fs.readFileSync(fp, 'utf-8');
-                    const relName = fp.replace(/[/\\:]/g, '__');
-                    fs.writeFileSync(path.join(rpDir, relName), content);
-                    manifest.files.push({ original: fp, backup: relName, exists: true });
-                } else {
-                    manifest.files.push({ original: fp, backup: null, exists: false });
-                }
-            } catch (err) {
-                manifest.files.push({ original: fp, backup: null, error: err.message });
-            }
-        }
-
-        fs.writeFileSync(path.join(rpDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-        return manifest;
-    }
-
-    list() {
-        try {
-            const dirs = fs.readdirSync(RESTORE_DIR).filter(d =>
-                fs.statSync(path.join(RESTORE_DIR, d)).isDirectory()
-            );
-            return dirs.map(d => {
-                try {
-                    const m = JSON.parse(fs.readFileSync(path.join(RESTORE_DIR, d, 'manifest.json'), 'utf-8'));
-                    return { id: m.id, name: m.name, createdAt: m.createdAt, fileCount: m.files.length };
-                } catch {
-                    return { id: d, name: 'Unknown', createdAt: 0, fileCount: 0 };
-                }
-            }).sort((a, b) => b.createdAt - a.createdAt);
-        } catch {
-            return [];
-        }
-    }
-
-    restore(id) {
-        const rpDir = path.join(RESTORE_DIR, id);
-        if (!fs.existsSync(rpDir)) return { error: 'Restore point not found' };
-
-        const manifest = JSON.parse(fs.readFileSync(path.join(rpDir, 'manifest.json'), 'utf-8'));
-        const results = [];
-
-        for (const file of manifest.files) {
-            try {
-                if (file.backup && file.exists) {
-                    const content = fs.readFileSync(path.join(rpDir, file.backup), 'utf-8');
-                    const dir = path.dirname(file.original);
-                    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-                    fs.writeFileSync(file.original, content);
-                    results.push({ path: file.original, restored: true });
-                } else if (!file.exists) {
-                    // File didn't exist before, delete it if it exists now
-                    if (fs.existsSync(file.original)) {
-                        fs.unlinkSync(file.original);
-                        results.push({ path: file.original, deleted: true });
-                    }
-                }
-            } catch (err) {
-                results.push({ path: file.original, error: err.message });
-            }
-        }
-
-        return { success: true, restored: results, name: manifest.name };
-    }
-
-    delete(id) {
-        const rpDir = path.join(RESTORE_DIR, id);
-        if (fs.existsSync(rpDir)) {
-            fs.rmSync(rpDir, { recursive: true, force: true });
-            return { success: true };
-        }
-        return { error: 'Not found' };
-    }
-}
-
-const restorePoints = new RestorePointManager();
 
 // ══════════════════════════════════════════
 //  Sub-Agent System — Real Execution
@@ -1050,50 +962,6 @@ const TOOL_DEFINITIONS = [
                     timeout: { type: 'integer', description: 'Timeout in milliseconds (default 30000)' },
                 },
                 required: ['command'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'create_restore_point',
-            description: 'Create a snapshot/restore point of the current state of specified files. Use this before making significant changes so the user can roll back.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    name: { type: 'string', description: 'Descriptive name for the restore point' },
-                    file_paths: {
-                        type: 'array',
-                        items: { type: 'string' },
-                        description: 'Array of absolute file paths to snapshot',
-                    },
-                },
-                required: ['name', 'file_paths'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'restore_to_point',
-            description: 'Restore files back to a previously created restore point.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    restore_point_id: { type: 'string', description: 'ID of the restore point to restore' },
-                },
-                required: ['restore_point_id'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'list_restore_points',
-            description: 'List all available restore points.',
-            parameters: {
-                type: 'object',
-                properties: {},
             },
         },
     },
@@ -2507,27 +2375,6 @@ async function executeTool(name, args) {
                 });
             }
 
-            case 'create_restore_point': {
-                const { name, file_paths } = args;
-                const rp = restorePoints.create(name, file_paths);
-                return {
-                    success: true,
-                    id: rp.id,
-                    name: rp.name,
-                    files_backed_up: rp.files.filter(f => f.exists).length,
-                    total_files: rp.files.length,
-                };
-            }
-
-            case 'restore_to_point': {
-                const { restore_point_id } = args;
-                return restorePoints.restore(restore_point_id);
-            }
-
-            case 'list_restore_points': {
-                return { restore_points: restorePoints.list() };
-            }
-
             case 'get_context_summary': {
                 return fileContext.getSummary();
             }
@@ -3889,7 +3736,6 @@ module.exports = {
     TOOL_DEFINITIONS,
     executeTool,
     fileContext,
-    restorePoints,
     activeAgents,
     createSubAgent,
     updateAgent,

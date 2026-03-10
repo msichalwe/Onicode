@@ -173,142 +173,134 @@ When \`task_list\` shows all tasks done:
 
 ### Key Principles
 - **Task IDs are stable.** Once created, a task's ID won't change. Always reference tasks by the ID returned from \`task_add\`.
-- **Always read before editing.** Use \`read_file\` to understand current state before changes.
-- **Create restore points** before significant multi-file changes.
+- **Use smart retrieval tools FIRST.** Do NOT use serial \`read_file\` or \`search_files\` to discover code. Instead:
+  - \`find_implementation("auth middleware")\` — finds relevant files in ONE call (replaces 3-5 search_files)
+  - \`smart_read(file, "login handler")\` — reads only the relevant function (replaces reading the whole file)
+  - \`batch_search(["query1", "query2"], path)\` — runs multiple searches in parallel
+  - \`prepare_edit_context(file)\` — gets outline, imports, dependents, tests BEFORE editing
+  - \`impact_analysis(file)\` — shows what depends on a file before refactoring
 - **Make minimal, focused edits** using \`edit_file\` with exact string matching.
 - **Verify your work** by running build/test/lint commands after changes.
-- **Search first.** Use \`search_files\` to locate things.
 - **Be proactive.** Fix issues you see while working.
-- **Check system logs** with \`get_system_logs\` when debugging issues.
 - **Never re-add tasks** that already exist — call \`task_list\` first to check.
-- **Track changes** — use \`get_changelog\` to see what you've changed this session.
 
 ### Edit Protocol
-1. \`read_file\` to see current content
+1. \`prepare_edit_context\` or \`smart_read\` to see current content + context
 2. \`edit_file\` with exact \`old_string\` and \`new_string\`
 3. For multiple edits to one file, use \`multi_edit\`
-4. For new files, use \`create_file\`
-
-### Restore Points
-- Before large refactors, create a restore point
-- Name them descriptively: "Before auth refactor", "Pre-migration"`);
+4. For new files, use \`create_file\``);
 
     // ── Available Tools Reference ──
     parts.push(`
 ## Your Tools
 
+### ⚡ Smart Retrieval (PREFERRED — use these FIRST)
+These are your FASTEST tools. They replace slow serial search/read loops.
+- \`find_implementation(description)\` — **USE THIS to find code.** Combines text search, symbol lookup, and import graph in ONE call. Returns ranked files with outlines and snippets. Replaces 3-5 serial search_files calls.
+- \`smart_read(file_path, focus?)\` — **USE THIS to read files.** Returns only the relevant function/section instead of the whole file. For files >100 lines, ALWAYS prefer this over read_file.
+- \`batch_search(queries[], search_path, file_pattern?)\` — Run multiple searches in parallel, returns merged ranked results. Use instead of calling search_files multiple times.
+- \`prepare_edit_context(file_path)\` — Get full context BEFORE editing: outline, imports, dependents, git history, tests. Call this before editing any file you haven't read yet.
+- \`impact_analysis(file_path, symbol_name?)\` — Analyze what depends on a file/symbol before refactoring. Shows importers, dependents, tests.
+
+**RETRIEVAL RULES (MANDATORY):**
+1. To find code → \`find_implementation\` FIRST (not search_files or list_directory)
+2. To read a file → \`smart_read\` with focus (not read_file for the whole thing)
+3. To search multiple patterns → \`batch_search\` (not serial search_files calls)
+4. Before editing → \`prepare_edit_context\` (not read_file)
+5. Only fall back to \`read_file\` for short files (<100 lines) or when you need the EXACT full content
+
 ### File Operations
-- \`read_file(file_path, start_line?, end_line?)\` — Read file with line numbers
+- \`read_file(file_path, start_line?, end_line?)\` — Read file with line numbers (prefer smart_read for large files)
 - \`edit_file(file_path, old_string, new_string, description?)\` — Find-and-replace edit
 - \`multi_edit(file_path, edits[], description?)\` — Multiple edits to one file
 - \`create_file(file_path, content)\` — Create a new file
 - \`delete_file(file_path)\` — Delete a file
 - \`list_directory(dir_path, max_depth?, include_hidden?)\` — List directory contents
-- \`search_files(query, search_path, file_pattern?, case_sensitive?, max_results?)\` — Grep search
+- \`search_files(query, search_path, file_pattern?, case_sensitive?, max_results?)\` — Grep search (prefer find_implementation or batch_search)
 
 ### Terminal
 - \`run_command(command, cwd?, timeout?)\` — Execute any shell command
 
-### Browser / Puppeteer (for testing web apps — use these on EVERY web project)
+### Browser / Puppeteer (for testing web apps — use on EVERY web project)
 - \`browser_navigate(url, wait_until?)\` — Open a URL in headless browser
 - \`browser_screenshot(name, selector?, full_page?)\` — Take screenshot + extract page content analysis
 - \`browser_evaluate(script)\` — Run JS in the browser context
 - \`browser_click(selector)\` — Click an element
 - \`browser_type(selector, text)\` — Type into an input
-- \`browser_wait(selector, timeout?)\` — Wait for element to appear (useful after navigation/interaction)
-- \`browser_console_logs(type?, limit?)\` — Get captured console logs, errors, failed requests
+- \`browser_wait(selector, timeout?)\` — Wait for element to appear
+- \`browser_console_logs(type?, limit?)\` — Get captured console logs/errors
 - \`browser_close()\` — Close the browser and free resources
 
-### Task & Milestone Management (persisted to SQLite — survives app restarts)
-- \`task_add(content, priority?, milestone_id?)\` — Add a task to your work plan, optionally grouped under a milestone
+### Task & Milestone Management (persisted to SQLite)
+- \`task_add(content, priority?, milestone_id?)\` — Add a task
 - \`task_update(id, status?, content?)\` — Update task status (pending/in_progress/done/skipped)
-- \`task_list(status?)\` — List tasks, see what's done and what remains
-- \`milestone_create(title, description?)\` — Create a milestone to group tasks into sprints/phases. Returns a milestone ID to use in task_add.
-- **IMPORTANT: NEVER delete or clear completed tasks.** They serve as a record of work done. The user can archive them manually.
+- \`task_list(status?)\` — List tasks
+- \`milestone_create(title, description?)\` — Create a milestone for grouping tasks
+- **NEVER delete completed tasks.** They serve as work records.
 
 ### Web Research
-- \`webfetch(url, max_length?)\` — Fetch and read web page content (docs, READMEs, API refs). Strips HTML to text.
-- \`websearch(query, max_results?)\` — Search the web via DuckDuckGo. Returns titles, URLs, snippets. No API key needed.
-
-### File Discovery
-- \`glob_files(pattern, search_path, max_results?)\` — Find files by glob pattern (e.g., "**/*.ts"). Uses git ls-files when available (respects .gitignore).
-
-### Codebase Exploration
-- \`explore_codebase(project_path, focus?)\` — Fast read-only analysis of a project: structure, dependencies, entrypoints, config, tech stack detection. Use before making changes to understand the codebase.
-- \`index_project(project_path, file_types?, max_files?)\` — Deep index of all source files: exports, imports, components, functions, line counts. Builds a project map for targeted edits.
+- \`webfetch(url, max_length?)\` — Fetch web page content (docs, API refs)
+- \`websearch(query, max_results?)\` — Search the web via DuckDuckGo
 
 ### Code Intelligence (LSP)
-- \`find_symbol(name, project_path?)\` — Find where a symbol (function, class, type, variable) is defined. Returns file path, line, kind, signature.
-- \`find_references(name, file_path?, project_path?)\` — Find all usages of a symbol across the codebase. Returns locations with code previews.
-- \`list_symbols(file_path)\` — List all symbols in a file: functions, classes, interfaces, types, variables, exports.
-- \`get_type_info(file_path, line, column)\` — Get type information, documentation, and signature for a symbol at a position.
-
-**Code Intelligence Protocol:**
-1. Before editing unfamiliar code → \`list_symbols(file)\` to understand structure
-2. Before renaming → \`find_references(name)\` to find all usages
-3. When debugging → \`find_symbol(name)\` to jump to definitions
-4. For large codebases → prefer LSP tools over grep for precision
+- \`find_symbol(name, project_path?)\` — Find where a symbol is defined
+- \`find_references(name, file_path?, project_path?)\` — Find all usages of a symbol
+- \`list_symbols(file_path)\` — List all symbols in a file
+- \`get_type_info(file_path, line, column)\` — Get type info and docs for a symbol
 
 ### Semantic Search
-- \`semantic_search(query, project_path?)\` — Find code related to a concept (e.g., "authentication logic", "database connection"). Uses TF-IDF indexing with camelCase/snake_case splitting. Returns ranked file list with relevance scores.
-- \`index_codebase(project_path?)\` — Build/rebuild the semantic search index. Auto-indexes on first search, but call explicitly after major changes.
+- \`semantic_search(query, project_path?)\` — Find code by concept (TF-IDF)
+- \`index_codebase(project_path?)\` — Build/rebuild search index
 
-**Search Strategy:**
-1. For exact text → \`search_files(pattern)\` (grep/ripgrep)
-2. For concepts/intent → \`semantic_search(query)\` (TF-IDF)
-3. For symbol definitions → \`find_symbol(name)\` (LSP)
-4. For file structure → \`list_directory()\` or \`glob_files()\`
-5. Combine tools for large codebases: semantic_search to narrow, then read_file to confirm
+### File Discovery
+- \`glob_files(pattern, search_path, max_results?)\` — Find files by glob pattern
+- \`explore_codebase(project_path, focus?)\` — Quick project analysis (structure, deps, tech stack)
+- \`index_project(project_path)\` — Deep file index with exports/imports
 
 ### Logging & Context
-- \`get_system_logs(level?, category?, limit?)\` — View system logs (tool calls, command outputs, errors)
-- \`get_changelog(format?)\` — Auto-generated changelog of file changes this session (markdown or json)
-- \`get_context_summary()\` — See files read/modified/created/deleted with line counts
+- \`get_system_logs(level?, category?, limit?)\` — View system logs
+- \`get_changelog(format?)\` — Session changelog
+- \`get_context_summary()\` — Files read/modified/created summary
 
 ### Memory (Persistent Cross-Session)
-- \`memory_read(filename?)\` — Read a memory file, or list all files if no filename given
-- \`memory_write(filename, content)\` — Save durable facts/decisions to persistent memory
-- \`memory_append(filename, content)\` — Append to daily logs or notes
+- \`memory_read(filename?)\` — Read a memory file
+- \`memory_write(filename, content)\` — Save facts/decisions
+- \`memory_append(filename, content)\` — Append to logs
 
 **Memory Architecture:**
-- \`MEMORY.md\` — Long-term facts: user preferences, project decisions, recurring patterns. Persists across ALL sessions.
-- \`user.md\` — User profile: name, language, framework, code style. Auto-populated from onboarding + your observations.
-- \`soul.md\` — Your personality and behavior rules. User can customize.
-- \`YYYY-MM-DD.md\` — Daily session logs. Today's and yesterday's are auto-injected. Append session activity here.
-- \`projects/<project-id>.md\` — Per-project memory. Write project-specific patterns, architecture decisions, tech stack notes here.
+- \`MEMORY.md\` — Long-term facts, persists across ALL sessions
+- \`user.md\` — User profile
+- \`soul.md\` — AI personality rules
+- \`YYYY-MM-DD.md\` — Daily session logs (today + yesterday auto-injected)
+- \`projects/<id>.md\` — Per-project memory
 
 **Memory Protocol (MANDATORY):**
-1. At session start: your memories are already injected below — read them to resume context.
-2. When you learn something durable (user preference, project pattern, key decision) → \`memory_append("MEMORY.md", "- <fact>")\`
-3. When working on a project → \`memory_append("projects/<project-id>.md", "- <project-specific learning>")\`
-4. At session end or after major milestones → \`memory_append("<today>.md", "### <summary of work done>")\`
-5. NEVER overwrite MEMORY.md entirely — always append. Only use memory_write for soul.md/user.md updates.
+1. At session start: memories already injected — read them
+2. Durable learning → \`memory_append("MEMORY.md", "- <fact>")\`
+3. Project learning → \`memory_append("projects/<id>.md", "- <fact>")\`
+4. End of session → \`memory_append("<today>.md", "### <summary>")\`
+5. NEVER overwrite MEMORY.md — always append
 
 ### Project
-- \`init_project(name, projectPath, description?, techStack?)\` — Register and create project with AGENTS.md + onidocs/ (MANDATORY first step)
-
-### Restore Points
-- \`create_restore_point(name, file_paths[])\` — Snapshot files before big changes
-- \`restore_to_point(restore_point_id)\` — Roll back to a restore point
-- \`list_restore_points()\` — Show all restore points
+- \`init_project(name, projectPath, description?, techStack?)\` — Register and create project (MANDATORY first step)
 
 ### Git (Version Control)
-- \`git_status(cwd?)\` — Check repository status: branch, changed files, ahead/behind
-- \`git_diff(cwd?, file_path?, staged?)\` — View changes (working or staged)
-- \`git_log(cwd?, count?)\` — Recent commit history
-- \`git_branches(cwd?)\` — List all branches with current marker
+- \`git_status(cwd?)\` — Repository status: branch, changed files, ahead/behind
+- \`git_diff(cwd?, file_path?, staged?)\` — View changes
+- \`git_log(cwd?, count?)\` — Recent commits
+- \`git_branches(cwd?)\` — List branches
 - \`git_checkout(branch, create?, cwd?)\` — Switch/create branches
-- \`git_commit(message, cwd?, files?)\` — Stage and commit changes (conventional commits)
-- \`git_push(cwd?, set_upstream?)\` — Push to remote repository
-- \`git_pull(cwd?)\` — Pull latest from remote
-- \`git_stash(action, message?, cwd?)\` — Stash management (push/pop/list/drop)
-- \`git_stage(files, cwd?)\` — Stage files for commit (array of paths, or "." for all)
-- \`git_unstage(files, cwd?)\` — Unstage files (array of paths)
-- \`git_merge(branch, cwd?, no_ff?)\` — Merge a branch into current branch
-- \`git_reset(mode?, target?, cwd?)\` — Reset HEAD (soft/mixed/hard)
-- \`git_tag(action, name?, message?, cwd?)\` — Tag management (list/create/delete)
-- \`git_remotes(cwd?)\` — List remote repositories with URLs
-- \`git_show(ref?, cwd?)\` — Show commit details (message, diff, stats)
+- \`git_commit(message, cwd?, files?)\` — Stage and commit
+- \`git_push(cwd?, set_upstream?)\` — Push to remote
+- \`git_pull(cwd?)\` — Pull from remote
+- \`git_stash(action, message?, cwd?)\` — Stash management
+- \`git_stage(files, cwd?)\` — Stage files
+- \`git_unstage(files, cwd?)\` — Unstage files
+- \`git_merge(branch, cwd?, no_ff?)\` — Merge branch
+- \`git_reset(mode?, target?, cwd?)\` — Reset HEAD
+- \`git_tag(action, name?, message?, cwd?)\` — Tag management
+- \`git_remotes(cwd?)\` — List remotes
+- \`git_show(ref?, cwd?)\` — Show commit details
 
 ### Multi-Agent System
 - \`orchestrate(description, nodes[], max_parallel?)\` — Launch parallel specialist agents with dependency graph. Nodes have: id, task, role, deps, file_scope, context_files.

@@ -14,12 +14,13 @@ const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath } = require('./aiTools');
+const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath } = require('./aiTools');
 const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
 const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITIONS, executeOrchestratorTool } = require('./orchestrator');
 const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
+const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
 
 let mainWindow = null;
 
@@ -30,6 +31,7 @@ function getAllToolDefinitions() {
         ...getLSPToolDefinitions(),
         ...getCodeIndexToolDefinitions(),
         ...ORCHESTRATOR_TOOL_DEFINITIONS,
+        ...getContextEngineToolDefinitions(),
         ...getMCPToolDefinitions(),
     ];
 }
@@ -51,6 +53,10 @@ async function executeAnyTool(name, args) {
     // Orchestrator tools
     if (['orchestrate', 'spawn_specialist', 'get_orchestration_status'].includes(name)) {
         return executeOrchestratorTool(name, args, _lastProviderConfig);
+    }
+    // Context engine tools
+    if (['find_implementation', 'impact_analysis', 'prepare_edit_context', 'smart_read', 'batch_search'].includes(name)) {
+        return executeContextEngineTool(name, args, _currentProjectPath);
     }
     // Default: aiTools executor
     return executeTool(name, args);
@@ -486,7 +492,12 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
 
     // Reload hooks for current project (ensures project-level hooks are fresh)
     _currentProjectPath = projectPath;
-    if (projectPath) loadHooks(projectPath);
+    if (projectPath) {
+        loadHooks(projectPath);
+        // Start file watcher + warm dependency graph (fire-and-forget)
+        startWatching(projectPath);
+        buildDependencyGraph(projectPath);
+    }
 
     // Auto-generate session title from first user message (fire-and-forget)
     const userMsgs = messages.filter(m => m.role === 'user');
@@ -861,6 +872,25 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const initialContext = buildContinueContext();
     if (initialContext) {
         instructions += '\n\n## Current Session State\n' + initialContext;
+    }
+
+    // ── Pre-retrieval: gather context BEFORE the model is called ──
+    if (projectPath && chatMessages.length > 0) {
+        try {
+            const lastUserMsg = [...chatMessages].reverse().find(m => m.role === 'user');
+            if (lastUserMsg?.content) {
+                const workingSet = [...(fileContext.readFiles?.keys() || []), ...(fileContext.modifiedFiles?.keys() || [])];
+                // Fire with 2s timeout
+                const preResult = await Promise.race([
+                    preRetrieve(lastUserMsg.content, projectPath, workingSet),
+                    new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+                ]);
+                const preContext = assemblePreRetrievedContext(preResult);
+                if (preContext) {
+                    instructions += '\n\n' + preContext;
+                }
+            }
+        } catch { /* pre-retrieval failed, continue without it */ }
     }
 
     // Convert to Responses API input format
@@ -1580,6 +1610,30 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         } catch { /* context injection failed, proceed without */ }
     }
 
+    // ── Pre-retrieval: gather context BEFORE the model is called ──
+    if (projectPath && conversationMessages.length > 0) {
+        try {
+            const lastUserMsg = [...conversationMessages].reverse().find(m => m.role === 'user');
+            if (lastUserMsg?.content) {
+                const workingSet = [...(fileContext.readFiles?.keys() || []), ...(fileContext.modifiedFiles?.keys() || [])];
+                const preResult = await Promise.race([
+                    preRetrieve(lastUserMsg.content, projectPath, workingSet),
+                    new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+                ]);
+                const preContext = assemblePreRetrievedContext(preResult);
+                if (preContext) {
+                    const lastSystemIdx = conversationMessages.findLastIndex(m => m.role === 'system');
+                    if (lastSystemIdx >= 0) {
+                        conversationMessages[lastSystemIdx] = {
+                            ...conversationMessages[lastSystemIdx],
+                            content: conversationMessages[lastSystemIdx].content + '\n\n' + preContext,
+                        };
+                    }
+                }
+            }
+        } catch { /* pre-retrieval failed, continue without */ }
+    }
+
     try {
     while (round < MAX_TOOL_ROUNDS) {
         round++;
@@ -2177,9 +2231,6 @@ const DEFAULT_PERMISSIONS = {
     memory_read: 'allow',
     memory_write: 'allow',
     memory_append: 'allow',
-    create_restore_point: 'allow',
-    restore_to_point: 'allow',
-    list_restore_points: 'allow',
     get_context_summary: 'allow',
     spawn_sub_agent: 'allow',
     get_agent_status: 'allow',
@@ -2302,6 +2353,7 @@ registerCompactorIPC(ipcMain);
 registerLSPIPC(ipcMain);
 registerCodeIndexIPC(ipcMain);
 registerOrchestratorIPC(ipcMain);
+registerContextEngineIPC(ipcMain);
 registerMCPIPC(ipcMain, () => mainWindow);
 
 // Task manager IPC — allows renderer to query current tasks
@@ -2557,5 +2609,6 @@ app.on('before-quit', () => {
     killAllSessions();
     killBackgroundProcesses();
     disconnectAllMCP();
+    stopWatching();
     try { closeDB(); } catch { }
 });
