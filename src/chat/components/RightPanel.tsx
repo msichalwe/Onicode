@@ -443,10 +443,21 @@ const ROLE_BADGES: Record<string, { icon: string; color: string }> = {
     planner: { icon: '📋', color: '#fb923c' },
 };
 
+interface SubAgentToolCall {
+    id: string;
+    name: string;
+    agentId: string;
+    role?: string;
+    status: 'running' | 'done';
+    round: number;
+}
+
 function AgentsWidget() {
     const [agents, setAgents] = useState<AgentEntry[]>([]);
     const [bgProcesses, setBgProcesses] = useState<BgProcess[]>([]);
     const [agentStatus, setAgentStatus] = useState<{ round: number; status: string; role?: string } | null>(null);
+    const [subAgentTools, setSubAgentTools] = useState<SubAgentToolCall[]>([]);
+    const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set());
     const [orchestrations, setOrchestrations] = useState<Array<{
         id: string; description: string; status: string; nodeCount: number;
         summary?: { total: number; done: number; running: number; failed: number; nodes: Array<{ id: string; task: string; role: string; status: string }> };
@@ -536,6 +547,45 @@ function AgentsWidget() {
         const unsub = window.onicode.onTerminalSession(() => refresh());
         return unsub;
     }, [refresh]);
+
+    // Track sub-agent tool calls (those with agentId)
+    useEffect(() => {
+        if (!window.onicode?.onToolCall) return;
+        const unsubCall = window.onicode.onToolCall((data) => {
+            const d = data as Record<string, unknown>;
+            if (!d.agentId) return; // Only track sub-agent tool calls
+            setSubAgentTools(prev => [...prev, {
+                id: String(d.id),
+                name: String(d.name),
+                agentId: String(d.agentId),
+                role: d.role ? String(d.role) : undefined,
+                status: 'running',
+                round: Number(d.round || 0),
+            }]);
+        });
+        const unsubResult = window.onicode.onToolResult((data) => {
+            const d = data as Record<string, unknown>;
+            if (!d.agentId) return;
+            setSubAgentTools(prev => prev.map(t =>
+                t.id === String(d.id) ? { ...t, status: 'done' as const } : t
+            ));
+        });
+        // Clear sub-agent tools when streaming ends
+        const unsubDone = window.onicode.onStreamDone(() => {
+            setSubAgentTools([]);
+            setExpandedAgents(new Set());
+        });
+        return () => { unsubCall(); unsubResult(); unsubDone(); };
+    }, []);
+
+    const toggleAgentExpand = (agentId: string) => {
+        setExpandedAgents(prev => {
+            const next = new Set(prev);
+            if (next.has(agentId)) next.delete(agentId);
+            else next.add(agentId);
+            return next;
+        });
+    };
 
     const killProcess = async (id: string) => {
         if (!isElectron) return;
@@ -649,20 +699,44 @@ function AgentsWidget() {
                             {agents.map(a => {
                                 const role = (a as AgentEntry & { role?: string }).role;
                                 const badge = role ? ROLE_BADGES[role] : null;
+                                const agentTools = subAgentTools.filter(t => t.agentId === a.id);
+                                const isExpanded = expandedAgents.has(a.id);
+                                const runningTools = agentTools.filter(t => t.status === 'running').length;
+                                const doneTools = agentTools.filter(t => t.status === 'done').length;
                                 return (
                                     <div key={a.id} className={`agent-item agent-item-${a.status}`}>
                                         <span className={`agent-dot ${a.status}`} />
                                         <div className="agent-item-info">
-                                            <div className="agent-item-header">
+                                            <div className="agent-item-header" onClick={() => agentTools.length > 0 && toggleAgentExpand(a.id)} style={{ cursor: agentTools.length > 0 ? 'pointer' : 'default' }}>
                                                 {badge && (
                                                     <span className="agent-role-badge" style={{ color: badge.color }}>
                                                         {badge.icon} {role}
                                                     </span>
                                                 )}
                                                 <span className="agent-item-id">{a.id.slice(0, 12)}</span>
+                                                {agentTools.length > 0 && (
+                                                    <span className="agent-tool-count" style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.7 }}>
+                                                        {doneTools}/{agentTools.length} tools
+                                                        {runningTools > 0 && <span className="agent-dot running" style={{ width: 6, height: 6, display: 'inline-block', marginLeft: 4 }} />}
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                                                            style={{ marginLeft: 4, transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>
+                                                            <polyline points="9 18 15 12 9 6" />
+                                                        </svg>
+                                                    </span>
+                                                )}
                                             </div>
                                             <span className="agent-item-task">{a.task}</span>
-                                            {a.result && <span className="agent-item-result">{String(a.result).slice(0, 100)}</span>}
+                                            {isExpanded && agentTools.length > 0 && (
+                                                <div className="agent-tools-list" style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--border-primary)', fontSize: '0.75rem' }}>
+                                                    {agentTools.map(t => (
+                                                        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', opacity: t.status === 'done' ? 0.6 : 1 }}>
+                                                            <span className={`agent-dot ${t.status === 'done' ? 'done' : 'running'}`} style={{ width: 5, height: 5 }} />
+                                                            <code style={{ fontSize: '0.7rem' }}>{t.name}</code>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {a.result && !isExpanded && <span className="agent-item-result">{String(a.result).slice(0, 100)}</span>}
                                         </div>
                                     </div>
                                 );

@@ -321,11 +321,52 @@ These are your FASTEST tools. They replace slow serial search/read loops.
 - \`git_show(ref?, cwd?)\` — Show commit details
 
 ### Multi-Agent System
-- \`orchestrate(description, nodes[], max_parallel?)\` — Launch parallel specialist agents with dependency graph. Nodes have: id, task, role, deps, file_scope, context_files.
+- \`orchestrate(description, nodes[], max_parallel?)\` — Launch parallel specialist agents with dependency graph. Nodes have: id, task, role, deps, file_scope, context_files. Max 7 parallel agents.
 - \`spawn_specialist(task, role, file_scope?[], context_files?[])\` — Launch a single specialist agent (researcher/implementer/reviewer/tester/planner)
 - \`get_orchestration_status(orchestration_id)\` — Get orchestration results and status
-- \`spawn_sub_agent(task, context_files?[])\` — Simple read-only sub-agent (legacy)
-- \`get_agent_status(agent_id)\` — Check any agent's progress`);
+- \`get_agent_status(agent_id)\` — Check any agent's progress
+
+### When to Use Multi-Agent Orchestration
+**USE orchestrate when:**
+- You need to understand 3+ files before editing (spawn researchers to read them in parallel)
+- A task involves creating/editing files across 3+ distinct areas (spawn parallel implementers with non-overlapping file_scope)
+- You need to research the codebase structure, patterns, imports, types before implementing (researcher agents)
+- After implementation, you want a code review + test pass (reviewer + tester agents)
+
+**USE spawn_specialist when:**
+- You need a single focused task: one research question, one code review, one test run
+- You want a researcher to deeply explore one area while you work on another
+
+**Orchestration pattern for large tasks:**
+1. First, spawn 2-3 researcher agents in parallel to gather context from different parts of the codebase
+2. Wait for researchers to complete (orchestrate handles this automatically)
+3. Use their findings to plan implementation
+4. Spawn implementer agents with non-overlapping file_scope for parallel coding
+5. Optionally spawn a reviewer agent after implementation
+
+**Example orchestration for "add auth to the app":**
+\`\`\`json
+{
+  "description": "Add authentication system",
+  "nodes": [
+    { "id": "research-existing", "task": "Read all existing auth-related files, middleware, and route guards. Report file paths, patterns used, and what exists.", "role": "researcher", "context_files": ["src/app.ts"] },
+    { "id": "research-deps", "task": "Check package.json for auth libraries, find how the API layer works, what ORM/DB is used.", "role": "researcher", "context_files": ["package.json"] },
+    { "id": "impl-auth", "task": "Create auth service, login/register routes, JWT middleware based on researcher findings.", "role": "implementer", "deps": ["research-existing", "research-deps"], "file_scope": ["src/auth/**", "src/middleware/**"] },
+    { "id": "impl-ui", "task": "Create login/register UI components and protected route wrapper.", "role": "implementer", "deps": ["research-existing"], "file_scope": ["src/components/auth/**", "src/pages/auth/**"] },
+    { "id": "review", "task": "Review all auth changes for security issues.", "role": "reviewer", "deps": ["impl-auth", "impl-ui"] }
+  ],
+  "max_parallel": 3
+}
+\`\`\`
+
+**Roles:**
+- **researcher** (read-only): explore files, search code, web search. Use for context gathering.
+- **implementer** (write): create/edit files, run commands. Give non-overlapping file_scope to avoid conflicts.
+- **reviewer** (read-only): review code quality, find bugs. Run after implementation.
+- **tester** (write): write/run tests, browser testing. Run after implementation.
+- **planner** (read-only): analyze codebase, create task plans, milestones.`);
+
+
 
     // ── Slash Commands ──
     parts.push(`

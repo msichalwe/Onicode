@@ -598,7 +598,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         (window as any)[globalChunkKey] = streamContentRef;
 
         // Listen for tool calls from the agentic loop
+        // Filter out sub-agent tool calls (those with agentId) — they show in the Agents widget instead
         const removeToolCallListener = window.onicode!.onToolCall((data) => {
+            if ((data as Record<string, unknown>).agentId) return; // Sub-agent tool call — don't show in main chat
             const step: ToolStep = {
                 id: data.id,
                 name: data.name,
@@ -612,6 +614,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         // Listen for tool results
         const removeToolResultListener = window.onicode!.onToolResult((data) => {
+            if ((data as Record<string, unknown>).agentId) return; // Sub-agent result — handled by Agents widget
             toolStepsRef.current = toolStepsRef.current.map(s =>
                 s.id === data.id ? { ...s, result: data.result, status: 'done' as const } : s
             );
@@ -1423,7 +1426,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 task_list: 'Tasks', milestone_create: 'Milestone', browser_navigate: 'Browser', browser_screenshot: 'Screenshot',
                 browser_evaluate: 'Browser JS', browser_click: 'Clicked', browser_type: 'Typed',
                 browser_console_logs: 'Console', browser_close: 'Browser',
+                orchestrate: 'Orchestration', spawn_specialist: 'Specialist',
                 spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
+                get_orchestration_status: 'Orchestration',
                 glob_files: 'Found', explore_codebase: 'Explored', memory_write: 'Memory',
                 memory_append: 'Memory', webfetch: 'Fetched', websearch: 'Searched',
                 get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
@@ -1497,7 +1502,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'explore_codebase':
                     return String(a.project_path || '').split('/').pop() || '';
                 case 'spawn_sub_agent':
+                case 'spawn_specialist':
                     return String(a.task || '').slice(0, 60);
+                case 'orchestrate':
+                    return String(a.description || '').slice(0, 60);
+                case 'get_orchestration_status':
+                    return String(a.orchestration_id || '');
                 case 'git_commit':
                     return String(a.message || '').slice(0, 60);
                 case 'git_push':
@@ -1644,6 +1654,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'git_show': return !!(r.diff || r.output || r.message);
                 case 'git_tag': return !!(r.tags && Array.isArray(r.tags) && (r.tags as unknown[]).length > 0);
                 case 'git_remotes': return !!(r.remotes && Array.isArray(r.remotes) && (r.remotes as unknown[]).length > 0);
+                case 'orchestrate': return !!(r.summary || r.report);
+                case 'spawn_specialist': return !!(r.result || r.content);
                 default: return false;
             }
         };
@@ -1953,6 +1965,58 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </div>
                     );
                 }
+                case 'orchestrate': {
+                    const summary = r.summary as { total?: number; done?: number; failed?: number; nodes?: Array<{ id: string; task: string; role: string; status: string; rounds?: number }> };
+                    const report = String(r.report || '');
+                    const duration = r.duration_ms ? Math.round(Number(r.duration_ms) / 1000) : null;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">Orchestration: {String(a.description || '')}</span>
+                                    {duration != null && <span className="tool-step-exit-code success">{duration}s</span>}
+                                </div>
+                                {summary?.nodes && (
+                                    <div style={{ padding: '4px 8px' }}>
+                                        {summary.nodes.map((n, i) => {
+                                            const badge = { researcher: '🔍', implementer: '🔨', reviewer: '👁️', tester: '🧪', planner: '📋' }[n.role] || '⚡';
+                                            const statusIcon = n.status === 'done' ? '✅' : n.status === 'failed' ? '❌' : n.status === 'skipped' ? '⏭️' : '⏳';
+                                            return (
+                                                <div key={i} style={{ padding: '2px 0', fontSize: '0.8rem', display: 'flex', gap: 6, alignItems: 'center' }}>
+                                                    <span>{statusIcon}</span>
+                                                    <span>{badge} {n.role}</span>
+                                                    <span style={{ opacity: 0.7 }}>{n.task.slice(0, 50)}</span>
+                                                    {n.rounds && <span style={{ opacity: 0.5, fontSize: '0.7rem' }}>({n.rounds} rounds)</span>}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                                {report && <pre className="tool-step-stdout" style={{ maxHeight: 300, overflow: 'auto' }}>{report.slice(0, 5000)}</pre>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'spawn_specialist': {
+                    const result = String(r.result || r.content || '');
+                    const role = String(r.role || a.role || '');
+                    const rounds = r.rounds as number;
+                    const status = String(r.status || '');
+                    const badge = { researcher: '🔍', implementer: '🔨', reviewer: '👁️', tester: '🧪', planner: '📋' }[role] || '⚡';
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">{badge} {role} — {String(a.task || '').slice(0, 80)}</span>
+                                    <span className={`tool-step-exit-code ${status === 'done' ? 'success' : 'error'}`}>
+                                        {status} ({rounds || 0} rounds)
+                                    </span>
+                                </div>
+                                {result && <pre className="tool-step-stdout" style={{ maxHeight: 300, overflow: 'auto' }}>{result.slice(0, 5000)}</pre>}
+                            </div>
+                        </div>
+                    );
+                }
                 default:
                     return null;
             }
@@ -1961,7 +2025,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },

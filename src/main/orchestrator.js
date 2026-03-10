@@ -530,7 +530,7 @@ ${fileContextStr ? `\n## Context Files\n${fileContextStr}` : ''}`;
                 messages.push({
                     role: 'tool',
                     tool_call_id: tc.id || tc.call_id,
-                    content: JSON.stringify(toolResult).slice(0, 12000),
+                    content: JSON.stringify(toolResult).slice(0, 16000),
                 });
             }
         }
@@ -718,9 +718,9 @@ async function orchestrate(plan, providerConfig) {
             });
         }
 
-        // Build merged report
+        // Build merged report (pass full graph so we can include result content)
         const summary = graph.getSummary();
-        const report = buildMergedReport(orchestrationId, orchestration.description, summary);
+        const report = buildMergedReport(orchestrationId, orchestration.description, summary, graph);
 
         orchestration.status = 'done';
         orchestration.completedAt = Date.now();
@@ -751,8 +751,12 @@ async function orchestrate(plan, providerConfig) {
 
 /**
  * Build a merged markdown report from all agent results.
+ * @param {string} orchestrationId
+ * @param {string} description
+ * @param {Object} summary - From graph.getSummary()
+ * @param {WorkGraph} graph - Full graph for accessing result content
  */
-function buildMergedReport(orchestrationId, description, summary) {
+function buildMergedReport(orchestrationId, description, summary, graph) {
     const parts = [`# Orchestration Report: ${description}\n`];
     parts.push(`**ID:** ${orchestrationId}`);
     parts.push(`**Status:** ${summary.done}/${summary.total} nodes completed, ${summary.failed} failed\n`);
@@ -774,11 +778,17 @@ function buildMergedReport(orchestrationId, description, summary) {
             if (node.rounds > 0) parts.push(`- **Rounds:** ${node.rounds}`);
             if (node.duration) parts.push(`- **Duration:** ${Math.round(node.duration / 1000)}s`);
 
-            // Find the full node in the graph to get the result
-            const fullNode = summary.nodes.find(n => n.id === node.id);
-            if (fullNode) {
-                // Result content is stored in the graph but summary only has metadata
-                // The lead agent will have access to the full results via getOrchestrationResult
+            // Include actual result content from the graph
+            if (graph) {
+                const fullNode = graph.nodes.get(node.id);
+                if (fullNode?.result) {
+                    // Truncate long results to keep the report manageable
+                    const content = String(fullNode.result).slice(0, 3000);
+                    parts.push(`\n**Result:**\n${content}`);
+                }
+                if (fullNode?.error) {
+                    parts.push(`\n**Error:** ${fullNode.error}`);
+                }
             }
             parts.push('');
         }

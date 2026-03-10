@@ -810,6 +810,8 @@ function sendCompletionSummary(toolsUsed, startSnapshot) {
     if (toolsUsed.has('browser_navigate') || toolsUsed.has('browser_screenshot')) actions.push('used browser');
     if (toolsUsed.has('init_project')) actions.push('initialized project');
     if (toolsUsed.has('spawn_sub_agent')) actions.push('spawned sub-agents');
+    if (toolsUsed.has('orchestrate')) actions.push('orchestrated multi-agent workflow');
+    if (toolsUsed.has('spawn_specialist')) actions.push('spawned specialist agents');
 
     if (actions.length > 0) {
         parts.push(`Actions: ${actions.join(', ')}.`);
@@ -1159,6 +1161,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 if (counts.task_add) parts.push(`Added ${counts.task_add} tasks`);
                 if (counts.run_command) parts.push(`Ran ${counts.run_command} commands`);
                 if (counts.search_files || counts.batch_search) parts.push(`Searched ${(counts.search_files || 0) + (counts.batch_search || 0)} queries`);
+                if (counts.orchestrate) parts.push(`Orchestrated ${counts.orchestrate} multi-agent task${counts.orchestrate > 1 ? 's' : ''}`);
+                if (counts.spawn_specialist) parts.push(`Spawned ${counts.spawn_specialist} specialist${counts.spawn_specialist > 1 ? 's' : ''}`);
                 if (parts.length === 0) {
                     const uniqueTools = [...new Set(_roundToolNames)].slice(0, 4);
                     parts.push(uniqueTools.join(', '));
@@ -1398,13 +1402,157 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
  * Wrapper for sub-agent AI calls.
  * Accepts messages, providerConfig, and optional tool overrides.
  * Returns { textContent, toolCalls, hasToolCalls } or { error }.
+ *
+ * Dual-mode: detects OAuth JWT tokens and routes to the ChatGPT Responses API,
+ * otherwise uses the standard OpenAI Chat Completions API.
  */
 function makeSubAgentAICall(messages, providerConfig, toolOverrides) {
-    // Create a temporary modified providerConfig with limited tools
+    // OAuth tokens → ChatGPT Responses API
+    if (providerConfig.id === 'codex' && isOAuthToken(providerConfig.apiKey)) {
+        return makeSubAgentOAuthCall(messages, providerConfig, toolOverrides);
+    }
+    // Standard sk- keys and gateways → Chat Completions API
+    return makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides);
+}
+
+/**
+ * Sub-agent call via ChatGPT Responses API (for OAuth JWT tokens).
+ * Converts Chat Completions message format to Responses API input format.
+ */
+async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
+    const accessToken = providerConfig.apiKey;
+    const accountId = getAccountId(accessToken);
+    if (!accountId) return { error: 'Cannot extract account ID from OAuth token. Re-authenticate in Settings.' };
+
+    const model = providerConfig.selectedModel || 'gpt-4o';
+
+    // Extract system prompt → instructions (Responses API separates these)
+    const systemMsgs = messages.filter(m => m.role === 'system');
+    const instructions = systemMsgs.map(m => m.content).join('\n\n') || 'You are a specialist AI agent.';
+
+    // Convert Chat Completions messages to Responses API input items
+    const inputItems = [];
+    for (const msg of messages) {
+        if (msg.role === 'system') continue; // Already in instructions
+
+        if (msg.role === 'user') {
+            inputItems.push({ role: 'user', content: msg.content });
+        } else if (msg.role === 'assistant') {
+            if (msg.tool_calls && msg.tool_calls.length > 0) {
+                // Assistant text before tool calls
+                if (msg.content) {
+                    inputItems.push({ role: 'assistant', content: msg.content });
+                }
+                // Convert tool_calls to function_call items
+                for (const tc of msg.tool_calls) {
+                    inputItems.push({
+                        type: 'function_call',
+                        call_id: tc.id || tc.call_id,
+                        name: tc.function?.name || tc.name || '',
+                        arguments: tc.function?.arguments || tc.arguments || '{}',
+                    });
+                }
+            } else {
+                inputItems.push({ role: 'assistant', content: msg.content || '' });
+            }
+        } else if (msg.role === 'tool') {
+            inputItems.push({
+                type: 'function_call_output',
+                call_id: msg.tool_call_id,
+                output: msg.content || '',
+            });
+        }
+    }
+
+    // Build tools in Responses API format
+    let tools;
+    if (toolOverrides && toolOverrides.length > 0) {
+        tools = toResponsesAPITools(toolOverrides);
+    }
+
+    const bodyObj = {
+        model,
+        instructions,
+        input: inputItems,
+        stream: false, // Sub-agents don't stream to UI
+        store: false,
+    };
+    if (tools && tools.length > 0) {
+        bodyObj.tools = tools;
+        bodyObj.tool_choice = 'auto';
+    }
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout
+
+        const response = await net.fetch('https://chatgpt.com/backend-api/codex/responses', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`,
+                'chatgpt-account-id': accountId,
+                'OpenAI-Beta': 'responses=experimental',
+                'originator': 'codex_cli_rs',
+            },
+            body: JSON.stringify(bodyObj),
+            signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errText = await response.text().catch(() => '');
+            if (response.status === 401) return { error: 'OAuth token expired. Re-authenticate in Settings.' };
+            if (response.status === 429) return { error: 'Rate limited. Try again in a moment.' };
+            let errorMsg = `ChatGPT backend error: ${response.status}`;
+            try { const errJson = JSON.parse(errText); errorMsg = errJson.error?.message || errJson.detail || errorMsg; } catch {}
+            return { error: errorMsg };
+        }
+
+        const json = await response.json();
+
+        // Parse non-streaming Responses API format
+        let textContent = '';
+        const toolCalls = [];
+
+        const output = json.output || [];
+        for (const item of output) {
+            if (item.type === 'message' && item.content) {
+                for (const part of item.content) {
+                    if (part.type === 'output_text' && part.text) {
+                        textContent += part.text;
+                    }
+                }
+            } else if (item.type === 'function_call') {
+                toolCalls.push({
+                    id: item.id || item.call_id,
+                    call_id: item.call_id,
+                    name: item.name,
+                    arguments: item.arguments || '{}',
+                });
+            }
+        }
+
+        return {
+            textContent,
+            toolCalls,
+            hasToolCalls: toolCalls.length > 0,
+        };
+    } catch (err) {
+        if (err.name === 'AbortError') return { error: 'Sub-agent AI call timed out (90s)' };
+        return { error: err.message };
+    }
+}
+
+/**
+ * Sub-agent call via standard OpenAI Chat Completions API (for sk- keys and gateways).
+ */
+function makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides) {
     const bodyObj = {
         model: providerConfig.selectedModel || 'gpt-4o-mini',
         messages,
-        stream: false, // sub-agents don't stream to UI
+        stream: false,
     };
 
     if (toolOverrides && toolOverrides.length > 0) {
@@ -1412,7 +1560,7 @@ function makeSubAgentAICall(messages, providerConfig, toolOverrides) {
         bodyObj.tool_choice = 'auto';
     }
 
-    bodyObj.max_tokens = 8192;
+    bodyObj.max_tokens = 16384;
 
     let endpoint;
     if (providerConfig.id === 'codex') {
@@ -1470,7 +1618,7 @@ function makeSubAgentAICall(messages, providerConfig, toolOverrides) {
             });
         });
         req.on('error', (err) => resolve({ error: err.message }));
-        req.setTimeout(30000, () => { req.destroy(); resolve({ error: 'Sub-agent AI call timed out' }); });
+        req.setTimeout(90000, () => { req.destroy(); resolve({ error: 'Sub-agent AI call timed out (90s)' }); });
         req.write(bodyStr);
         req.end();
     });
@@ -2007,6 +2155,8 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             if (counts.task_add) parts.push(`Added ${counts.task_add} tasks`);
             if (counts.run_command) parts.push(`Ran ${counts.run_command} commands`);
             if (counts.search_files || counts.batch_search) parts.push(`Searched ${(counts.search_files || 0) + (counts.batch_search || 0)} queries`);
+            if (counts.orchestrate) parts.push(`Orchestrated ${counts.orchestrate} multi-agent task${counts.orchestrate > 1 ? 's' : ''}`);
+            if (counts.spawn_specialist) parts.push(`Spawned ${counts.spawn_specialist} specialist${counts.spawn_specialist > 1 ? 's' : ''}`);
             if (parts.length === 0) {
                 const uniqueTools = [...new Set(_roundToolNames)].slice(0, 4);
                 parts.push(uniqueTools.join(', '));
@@ -2387,6 +2537,9 @@ const DEFAULT_PERMISSIONS = {
     memory_append: 'allow',
     get_context_summary: 'allow',
     spawn_sub_agent: 'allow',
+    orchestrate: 'allow',
+    spawn_specialist: 'allow',
+    get_orchestration_status: 'allow',
     get_agent_status: 'allow',
     get_system_logs: 'allow',
     get_changelog: 'allow',
