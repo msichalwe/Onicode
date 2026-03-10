@@ -2541,6 +2541,7 @@ const DEFAULT_PERMISSIONS = {
     spawn_specialist: 'allow',
     get_orchestration_status: 'allow',
     get_agent_status: 'allow',
+    verify_project: 'allow',
     get_system_logs: 'allow',
     get_changelog: 'allow',
     git_diff: 'allow',

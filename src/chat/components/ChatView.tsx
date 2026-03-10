@@ -1441,6 +1441,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 git_reset: 'Reset', git_tag: 'Tag', git_remotes: 'Remotes', git_show: 'Show',
                 find_implementation: 'Found', impact_analysis: 'Impact', prepare_edit_context: 'Context',
                 smart_read: 'Smart Read', batch_search: 'Batch Search',
+                verify_project: 'Verified',
             };
             return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
@@ -1500,6 +1501,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'glob_files':
                     return String(a.pattern || '');
                 case 'explore_codebase':
+                    return String(a.project_path || '').split('/').pop() || '';
+                case 'verify_project':
                     return String(a.project_path || '').split('/').pop() || '';
                 case 'spawn_sub_agent':
                 case 'spawn_specialist':
@@ -1656,6 +1659,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'git_remotes': return !!(r.remotes && Array.isArray(r.remotes) && (r.remotes as unknown[]).length > 0);
                 case 'orchestrate': return !!(r.summary || r.report);
                 case 'spawn_specialist': return !!(r.result || r.content);
+                case 'verify_project': return !!(r.issues || r.summary);
                 default: return false;
             }
         };
@@ -2017,6 +2021,43 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </div>
                     );
                 }
+                case 'verify_project': {
+                    const summary = r.summary as { critical?: number; high?: number; medium?: number; low?: number; total_issues?: number; verdict?: string } | undefined;
+                    const issues = (r.issues || []) as Array<{ severity: string; type: string; file?: string; message: string }>;
+                    const filesScanned = r.files_scanned as number;
+                    const severityColor: Record<string, string> = { critical: '#ff4444', high: '#ff8800', medium: '#ffcc00', low: '#888' };
+                    const verdictColor = summary?.critical ? '#ff4444' : summary?.high ? '#ff8800' : '#44cc44';
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">Verify: {String(a.project_path || '').split('/').pop()}</span>
+                                    <span className="tool-step-exit-code" style={{ color: verdictColor }}>
+                                        {filesScanned} files · {summary?.total_issues || 0} issues
+                                    </span>
+                                </div>
+                                {summary?.verdict && (
+                                    <div style={{ padding: '6px 8px', fontWeight: 'bold', color: verdictColor, fontSize: '0.85rem' }}>
+                                        {summary.verdict}
+                                    </div>
+                                )}
+                                {issues.length > 0 && (
+                                    <div style={{ padding: '4px 8px' }}>
+                                        {issues.slice(0, 20).map((issue, i) => (
+                                            <div key={i} style={{ padding: '2px 0', fontSize: '0.8rem', display: 'flex', gap: 6 }}>
+                                                <span style={{ color: severityColor[issue.severity] || '#888', fontWeight: 'bold', minWidth: 60 }}>
+                                                    {issue.severity.toUpperCase()}
+                                                </span>
+                                                {issue.file && <span style={{ opacity: 0.6 }}>{issue.file}:</span>}
+                                                <span>{issue.message.slice(0, 200)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    );
+                }
                 default:
                     return null;
             }
@@ -2025,7 +2066,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },

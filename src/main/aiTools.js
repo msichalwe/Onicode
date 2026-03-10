@@ -1480,6 +1480,21 @@ const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'verify_project',
+            description: 'Run automated quality checks on a project: cross-reference integrity (IDs match between files), import resolution, route/navigation target validation, unused exports detection, and dead code analysis. MANDATORY to run after building any project before marking it complete. Returns a list of issues found.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    project_path: { type: 'string', description: 'Root path of the project to verify' },
+                    checks: { type: 'string', description: 'Comma-separated checks to run: "cross-refs,imports,routes,exports,all" (default: "all")' },
+                },
+                required: ['project_path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'git_status',
             description: 'Get git status for a repository — branch, changed files, ahead/behind counts. Use before committing to see what changed.',
             parameters: {
@@ -3438,6 +3453,345 @@ async function executeTool(name, args) {
                     total_lines: totalLines,
                     by_extension: byExt,
                     index: index.slice(0, max_files),
+                };
+            }
+
+            // ── Project Verification ──
+
+            case 'verify_project': {
+                const { project_path, checks = 'all' } = args;
+                const expandedPath = project_path.replace(/^~/, os.homedir());
+                if (!fs.existsSync(expandedPath)) {
+                    return { error: `Project path not found: ${project_path}` };
+                }
+
+                const enabledChecks = checks === 'all'
+                    ? ['cross-refs', 'imports', 'routes', 'exports']
+                    : checks.split(',').map(c => c.trim());
+
+                const issues = [];
+                const skipDirs = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__', '.cache', '.turbo', '.venv', 'vendor', 'target']);
+
+                // Collect all source files
+                const sourceFiles = [];
+                function collectFiles(dir, depth = 0) {
+                    if (depth > 6) return;
+                    try {
+                        const entries = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            if (entry.name.startsWith('.')) continue;
+                            const fullPath = path.join(dir, entry.name);
+                            if (entry.isDirectory()) {
+                                if (!skipDirs.has(entry.name)) collectFiles(fullPath, depth + 1);
+                                continue;
+                            }
+                            const ext = path.extname(entry.name);
+                            if (['.ts', '.tsx', '.js', '.jsx', '.py', '.vue', '.svelte'].includes(ext)) {
+                                try {
+                                    const stat = fs.statSync(fullPath);
+                                    if (stat.size < 500 * 1024) {
+                                        const content = fs.readFileSync(fullPath, 'utf-8');
+                                        sourceFiles.push({
+                                            path: path.relative(expandedPath, fullPath),
+                                            fullPath,
+                                            content,
+                                            ext,
+                                        });
+                                    }
+                                } catch (_) { /* skip unreadable */ }
+                            }
+                        }
+                    } catch (_) { /* skip unreadable dirs */ }
+                }
+                collectFiles(expandedPath);
+
+                // Check 1: Cross-Reference Integrity
+                if (enabledChecks.includes('cross-refs')) {
+                    // Find all exported arrays/objects with IDs
+                    const idCollections = new Map(); // collectionName -> Set<id>
+                    const idReferences = []; // { from, field, referencedId, collection? }
+
+                    for (const file of sourceFiles) {
+                        const lines = file.content.split('\n');
+
+                        // Find arrays of objects with `id` fields
+                        let currentArrayName = null;
+                        let bracketDepth = 0;
+                        let inArray = false;
+
+                        for (const line of lines) {
+                            // Detect array declarations: export const SCENES: Scene[] = [
+                            const arrayMatch = line.match(/(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::\s*\w+(?:\[\])?\s*)?=\s*\[/);
+                            if (arrayMatch) {
+                                currentArrayName = arrayMatch[1];
+                                inArray = true;
+                                bracketDepth = 1;
+                                if (!idCollections.has(currentArrayName)) {
+                                    idCollections.set(currentArrayName, new Set());
+                                }
+                                continue;
+                            }
+
+                            if (inArray) {
+                                for (const ch of line) {
+                                    if (ch === '[') bracketDepth++;
+                                    if (ch === ']') bracketDepth--;
+                                }
+                                if (bracketDepth <= 0) {
+                                    inArray = false;
+                                    currentArrayName = null;
+                                }
+
+                                // Extract IDs: id: "some_id" or id: 'some_id'
+                                const idMatch = line.match(/\bid\s*:\s*["']([^"']+)["']/);
+                                if (idMatch && currentArrayName) {
+                                    idCollections.get(currentArrayName).add(idMatch[1]);
+                                }
+                            }
+
+                            // Find ID references: nextSceneId, sceneId, endingId, routeId, targetId, etc.
+                            const refPatterns = [
+                                /next\w*Id\s*:\s*["']([^"']+)["']/g,
+                                /(?:scene|ending|route|target|parent|redirect)\w*(?:Id)?\s*:\s*["']([^"']+)["']/gi,
+                                /(?:to|href|redirect|navigate)\s*:\s*["']([^"']+)["']/g,
+                            ];
+                            const seenRefs = new Set();
+                            for (const pattern of refPatterns) {
+                                let match;
+                                while ((match = pattern.exec(line)) !== null) {
+                                    const field = match[0].split(':')[0].trim();
+                                    const refKey = `${file.path}:${field}:${match[1]}`;
+                                    if (seenRefs.has(refKey)) continue;
+                                    seenRefs.add(refKey);
+                                    idReferences.push({
+                                        from: file.path,
+                                        field,
+                                        referencedId: match[1],
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Check if referenced IDs exist in the expected collection
+                    const allKnownIds = new Set();
+                    for (const ids of idCollections.values()) {
+                        for (const id of ids) allKnownIds.add(id);
+                    }
+
+                    // Build a mapping of field names to expected collection names
+                    // e.g., "nextSceneId" → should resolve against collections containing "scene"
+                    function inferExpectedCollection(fieldName) {
+                        const lower = fieldName.toLowerCase().replace(/next|id|_/g, '');
+                        const collectionNames = [...idCollections.keys()];
+                        for (const cn of collectionNames) {
+                            const cnLower = cn.toLowerCase();
+                            if (cnLower.includes(lower) || lower.includes(cnLower.replace(/s$/, ''))) {
+                                return cn;
+                            }
+                        }
+                        return null;
+                    }
+
+                    for (const ref of idReferences) {
+                        // Skip non-ID-like values (URLs, paths, etc.)
+                        if (ref.referencedId.startsWith('/') || ref.referencedId.startsWith('http') || ref.referencedId.includes('.')) continue;
+
+                        if (!allKnownIds.has(ref.referencedId)) {
+                            issues.push({
+                                severity: 'critical',
+                                type: 'broken-cross-reference',
+                                file: ref.from,
+                                message: `"${ref.field}: ${ref.referencedId}" references an ID that doesn't exist in any data collection. Known collections: ${[...idCollections.keys()].join(', ')} (${allKnownIds.size} total IDs)`,
+                            });
+                        } else {
+                            // Check if the ID resolves in the EXPECTED collection (not just any collection)
+                            const expectedCollection = inferExpectedCollection(ref.field);
+                            if (expectedCollection && idCollections.has(expectedCollection)) {
+                                const expectedIds = idCollections.get(expectedCollection);
+                                if (!expectedIds.has(ref.referencedId)) {
+                                    // Find which collection it DOES exist in
+                                    const actualCollections = [...idCollections.entries()]
+                                        .filter(([_, ids]) => ids.has(ref.referencedId))
+                                        .map(([name]) => name);
+                                    issues.push({
+                                        severity: 'critical',
+                                        type: 'cross-reference-mismatch',
+                                        file: ref.from,
+                                        message: `"${ref.field}: ${ref.referencedId}" — field name suggests it should exist in "${expectedCollection}" but the ID was only found in: ${actualCollections.join(', ')}. This means the app's lookup function for ${expectedCollection} will NOT find this ID, causing a silent failure.`,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Report collections found
+                    for (const [name, ids] of idCollections) {
+                        if (ids.size > 0) {
+                            issues.push({
+                                severity: 'info',
+                                type: 'collection-found',
+                                message: `Collection "${name}" has ${ids.size} IDs: ${[...ids].slice(0, 10).join(', ')}${ids.size > 10 ? '...' : ''}`,
+                            });
+                        }
+                    }
+                }
+
+                // Check 2: Import Resolution
+                if (enabledChecks.includes('imports')) {
+                    for (const file of sourceFiles) {
+                        const importRegex = /(?:import|from)\s+['"]([^'"]+)['"]/g;
+                        let match;
+                        while ((match = importRegex.exec(file.content)) !== null) {
+                            const importPath = match[1];
+                            // Skip node_modules imports
+                            if (!importPath.startsWith('.') && !importPath.startsWith('@/') && !importPath.startsWith('~/')) continue;
+
+                            let resolvedImport = importPath;
+                            if (importPath.startsWith('@/')) {
+                                resolvedImport = importPath.replace('@/', 'src/');
+                            }
+
+                            // Check if the import target exists
+                            const possiblePaths = [
+                                path.join(expandedPath, resolvedImport),
+                                path.join(expandedPath, resolvedImport + '.ts'),
+                                path.join(expandedPath, resolvedImport + '.tsx'),
+                                path.join(expandedPath, resolvedImport + '.js'),
+                                path.join(expandedPath, resolvedImport + '.jsx'),
+                                path.join(expandedPath, resolvedImport, 'index.ts'),
+                                path.join(expandedPath, resolvedImport, 'index.tsx'),
+                                path.join(expandedPath, resolvedImport, 'index.js'),
+                            ];
+
+                            const exists = possiblePaths.some(p => fs.existsSync(p));
+                            if (!exists) {
+                                issues.push({
+                                    severity: 'high',
+                                    type: 'broken-import',
+                                    file: file.path,
+                                    message: `Import "${importPath}" could not be resolved to an existing file`,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Check 3: Route/Navigation Target Validation
+                if (enabledChecks.includes('routes')) {
+                    const definedRoutes = new Set();
+                    const referencedRoutes = [];
+
+                    for (const file of sourceFiles) {
+                        // Next.js App Router: detect page.tsx files as routes
+                        if (file.path.endsWith('page.tsx') || file.path.endsWith('page.jsx') || file.path.endsWith('page.ts') || file.path.endsWith('page.js')) {
+                            const routePath = '/' + path.dirname(file.path).replace(/^src\/app\/?/, '').replace(/^app\/?/, '');
+                            definedRoutes.add(routePath === '/.' ? '/' : routePath);
+                        }
+
+                        // React Router route definitions
+                        const routeDefRegex = /path\s*[:=]\s*["']([^"']+)["']/g;
+                        let match;
+                        while ((match = routeDefRegex.exec(file.content)) !== null) {
+                            definedRoutes.add(match[1]);
+                        }
+
+                        // Route references: href, to, navigate, redirect, push
+                        const routeRefRegex = /(?:href|to|navigate|redirect|push)\s*(?:\(|=|:)\s*["']([^"']+)["']/g;
+                        while ((match = routeRefRegex.exec(file.content)) !== null) {
+                            if (match[1].startsWith('/') && !match[1].startsWith('//')) {
+                                referencedRoutes.push({ file: file.path, route: match[1] });
+                            }
+                        }
+                    }
+
+                    for (const ref of referencedRoutes) {
+                        const baseRoute = ref.route.split('?')[0].split('#')[0];
+                        if (!definedRoutes.has(baseRoute) && definedRoutes.size > 0) {
+                            issues.push({
+                                severity: 'medium',
+                                type: 'undefined-route',
+                                file: ref.file,
+                                message: `Route "${ref.route}" is referenced but no matching page/route definition was found. Known routes: ${[...definedRoutes].join(', ')}`,
+                            });
+                        }
+                    }
+                }
+
+                // Check 4: Unused Exports
+                if (enabledChecks.includes('exports')) {
+                    const allExports = []; // { file, name, isDefault }
+                    const allImportedNames = new Set();
+
+                    for (const file of sourceFiles) {
+                        // Collect exports
+                        const exportRegex = /export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum)\s+(\w+)/g;
+                        let match;
+                        while ((match = exportRegex.exec(file.content)) !== null) {
+                            allExports.push({ file: file.path, name: match[1] });
+                        }
+
+                        // Collect imported names
+                        const importNameRegex = /import\s+(?:\{([^}]+)\}|(\w+))\s+from/g;
+                        while ((match = importNameRegex.exec(file.content)) !== null) {
+                            if (match[1]) {
+                                match[1].split(',').forEach(name => {
+                                    const cleaned = name.trim().split(/\s+as\s+/)[0].trim();
+                                    if (cleaned) allImportedNames.add(cleaned);
+                                });
+                            }
+                            if (match[2]) allImportedNames.add(match[2]);
+                        }
+
+                        // Also check for usage in JSX (component references)
+                        const jsxUsageRegex = /<(\w+)/g;
+                        while ((match = jsxUsageRegex.exec(file.content)) !== null) {
+                            if (match[1][0] === match[1][0].toUpperCase()) {
+                                allImportedNames.add(match[1]);
+                            }
+                        }
+                    }
+
+                    for (const exp of allExports) {
+                        if (!allImportedNames.has(exp.name)) {
+                            // Skip common entry points and config
+                            const skipNames = ['default', 'metadata', 'generateMetadata', 'generateStaticParams', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'middleware', 'config', 'revalidate'];
+                            if (!skipNames.includes(exp.name) && !exp.file.includes('page.') && !exp.file.includes('layout.') && !exp.file.includes('route.')) {
+                                issues.push({
+                                    severity: 'low',
+                                    type: 'unused-export',
+                                    file: exp.file,
+                                    message: `Export "${exp.name}" is never imported/used by any other file`,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Summary
+                const critical = issues.filter(i => i.severity === 'critical').length;
+                const high = issues.filter(i => i.severity === 'high').length;
+                const medium = issues.filter(i => i.severity === 'medium').length;
+                const low = issues.filter(i => i.severity === 'low').length;
+                const info = issues.filter(i => i.severity === 'info').length;
+
+                return {
+                    project: project_path,
+                    files_scanned: sourceFiles.length,
+                    checks_run: enabledChecks,
+                    summary: {
+                        critical,
+                        high,
+                        medium,
+                        low,
+                        info,
+                        total_issues: critical + high + medium + low,
+                        verdict: critical > 0 ? 'FAIL — critical issues found, project will not work correctly' :
+                                 high > 0 ? 'WARN — high-severity issues found, some features may be broken' :
+                                 medium > 0 ? 'OK — minor issues found' : 'PASS — no issues detected',
+                    },
+                    issues: issues.filter(i => i.severity !== 'info').slice(0, 30),
+                    collections: issues.filter(i => i.severity === 'info').slice(0, 10),
                 };
             }
 

@@ -91,7 +91,15 @@ Emit **one** brief text update per task transition. Do NOT emit multiple status 
 **NEVER create binary files (.ico, .png, .jpg, .woff, etc.) with empty content.** Use SVG text format for icons, or skip binary assets entirely. The create_file tool only works with text content.
 
 ### The golden rule:
-**If you haven't called \`create_file\` at least 5 times during a project build, you haven't built anything.**`);
+**If you haven't called \`create_file\` at least 5 times during a project build, you haven't built anything.**
+
+### The quality rule:
+**A project that builds but doesn't work is NOT done.** TypeScript compiling with zero errors does NOT mean the app functions correctly. You MUST verify that:
+- All data cross-references resolve (IDs referenced in one file exist in the target file)
+- All UI features actually work (not just render)
+- At least one complete user journey works from start to finish
+- Every feature visible in the UI has a working implementation behind it
+See "Code Quality Verification Protocol" below for the full checklist.`);
 
     // ── Frontend & Design Expertise ──
     parts.push(`
@@ -275,6 +283,9 @@ These are your FASTEST tools. They replace slow serial search/read loops.
 - \`explore_codebase(project_path, focus?)\` — Quick project analysis (structure, deps, tech stack)
 - \`index_project(project_path)\` — Deep file index with exports/imports
 
+### Project Verification (MANDATORY after building)
+- \`verify_project(project_path, checks?)\` — **Run this after every project build.** Automated quality checks: cross-reference integrity (IDs match between files), import resolution, route validation, unused exports. Returns issues by severity. Checks: "cross-refs,imports,routes,exports,all" (default: "all"). Fix all critical/high issues before marking project complete.
+
 ### Logging & Context
 - \`get_system_logs(level?, category?, limit?)\` — View system logs
 - \`get_changelog(format?)\` — Session changelog
@@ -419,8 +430,12 @@ The ENTIRE build sequence in ONE agentic session (do NOT stop between steps):
 8. Repeat until ALL tasks done
 9. \`run_command("npm install")\` — install deps (ONCE, not per task)
 10. \`run_command("npm run build")\` — verify build (ONCE at the end)
+11. \`verify_project(projectPath)\` — **MANDATORY automated quality check.** Finds broken cross-references, missing imports, dead routes, unused exports. Fix ALL critical/high issues.
+12. **BROWSER TEST** — For web apps: start dev server, navigate, test at least one full user journey
+13. **FIX any issues found** — Don't skip broken paths. If an ending can't be reached, fix the data.
 
 **⚠️ CRITICAL: Steps 3-7 are where the ACTUAL BUILDING happens. If you skip them, NOTHING gets built.**
+**⚠️ CRITICAL: Steps 11-13 are where QUALITY happens. A build that passes but doesn't work is UNACCEPTABLE.**
 **If you respond after step 1 with text like "Starting implementation now..." and NO create_file calls, you have FAILED.**
 
 ### Follow-Up Feature Requests (user says "add X", "change Y", "I don't like Z"):
@@ -555,6 +570,14 @@ ${context.autoCommitEnabled !== false ? `**Auto-Commit Protocol (MANDATORY):**
 - Navigation/routing works
 - Forms accept input
 - Key interactions respond correctly
+
+**Deep Functional Testing (MANDATORY for interactive/stateful apps):**
+- For games/interactive fiction: Play through at least ONE complete path from start to an ending/completion state. Verify the ending actually renders.
+- For multi-step flows (wizards, onboarding): Complete the ENTIRE flow, not just step 1. Verify the final state.
+- For CRUD apps: Create at least one record, verify it appears in the list, edit it, delete it.
+- For data-driven apps: Verify data transformations produce expected results (use \`browser_evaluate\` to inspect state).
+- If an app has multiple outcomes/endings/results, verify at least 2 different paths.
+- **The goal is to verify the app WORKS end-to-end, not just that it renders.** A game that renders but can never reach an ending is broken.
 
 ### Agent Loop & Error Recovery
 When a tool call fails (command error, file not found, build failure):
@@ -721,6 +744,56 @@ When a command or tool fails:
 3. Fix it immediately — don't just report it
 4. Re-run the failed command to verify the fix
 5. Only after 3 failed attempts at the same fix, explain the blocker
+
+### Code Quality Verification Protocol (MANDATORY — run AFTER build passes, BEFORE marking complete)
+A passing build does NOT mean the app works. You MUST verify logical correctness:
+
+**Step 1: Cross-Reference Integrity**
+For any project with multiple data structures that reference each other:
+- Verify EVERY referenced ID exists in its target collection. Example: if choices reference \`nextSceneId: "ending_x"\`, the scene \`"ending_x"\` MUST exist in the scenes array.
+- For routing: every \`href\`, \`to\`, \`redirect\`, \`nextSceneId\` must point to an existing page/scene/route
+- For imports: every imported symbol must exist in the source module
+- For state machines: every transition target must be a valid state
+- **This is the #1 cause of "builds but doesn't work" bugs.** Two data structures with cross-references that don't resolve = silent runtime failure.
+
+**Step 2: Feature Completeness**
+- Every UI element with interaction hints MUST have working handlers. If you show \`[1] [2] [3]\` keyboard hints, add \`keydown\` listeners.
+- Every type/interface property you define MUST be used somewhere. Don't define \`required?: Partial<Record<StatKey, number>>\` if no data ever uses it.
+- Every visual component (buttons, forms, grids, controls) MUST trigger the expected behavior. A movement grid that doesn't affect gameplay is a broken feature.
+- **Rule: If a feature appears in the UI, it must work. If it doesn't work yet, don't render it.**
+
+**Step 3: Graph/Flow Connectivity (for apps with routes, stories, state machines)**
+- Every node/page/scene MUST be reachable from the starting point
+- No accidental dead-ends (states with no outgoing transitions unless they're intentional terminals)
+- Every terminal/ending state MUST be properly detected and rendered (not silently falling back to the start)
+- Trace at least 2 different paths mentally: one "happy path" and one "edge path"
+
+**Step 4: End-to-End Functional Verification**
+After build passes, verify the app WORKS, not just compiles:
+- For games/stories: Can the player actually reach and SEE an ending? Trace one complete path.
+- For forms/CRUD: Can the user submit a form and see the result? Create and read at least one record.
+- For multi-step flows: Complete the entire flow, not just step 1.
+- For dashboards: Does data actually appear? Are charts populated?
+- Use \`browser_evaluate\` to inspect app state at critical points during testing.
+
+**Common code generation failures to watch for:**
+- Data arrays with cross-references where target IDs don't exist (e.g., choices point to scene IDs not in the scenes array)
+- Separate data structures that should be unified or explicitly connected (e.g., SCENES and ENDINGS that need a bridge)
+- UI controls rendered but never wired to event handlers
+- Type definitions with optional properties that are never populated anywhere
+- Fallback/default returns that silently mask errors (e.g., \`return SCENES[0]\` when scene not found — should show an error state instead)
+- Terminal/ending states that can't be reached because the detection logic doesn't match the data structure
+
+### Pre-Completion Checklist (MANDATORY — verify before saying "done")
+Before declaring any project complete, mentally verify each item:
+1. Every exported function is actually called/used somewhere
+2. Every type/interface property is populated in at least one place
+3. Every UI interaction triggers the expected state change
+4. Every navigation target (route, scene, page, link) exists and renders correctly
+5. All data cross-references resolve (IDs match between arrays/objects)
+6. At least one full user journey works end-to-end (start → middle → completion/ending)
+7. No "placeholder" features in the final product — if it's in the UI, it works
+8. Build passes AND the app functions correctly (these are two separate checks)
 
 ### Update Project Documentation
 After completing a set of changes, update the project's onidocs:
