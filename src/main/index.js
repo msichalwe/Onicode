@@ -931,10 +931,11 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
                 // Detect if the AI is announcing intent to act without making tool calls
                 // e.g., "I'll fix that now", "Let me update the styles", "On it — I'll..."
-                const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now)\b/i.test(aiTextContent)
+                // Triggers when AI used discovery/read tools but hasn't built anything yet
+                const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now|implementing|adding|creating|wiring|building)\b/i.test(aiTextContent)
                     && aiTextContent.length < 500 // Short intent messages, not long explanations
-                    && round < 3 // Only on early rounds (AI stalling at start)
-                    && toolsUsed.size === 0; // Hasn't used any tools yet this session
+                    && round < 10 // Early/mid rounds (AI stalling before building)
+                    && !hasBuiltAnything; // Hasn't created files or run commands yet
 
                 // If the AI is asking discovery questions after init_project, let the response
                 // end naturally so the user can answer. Don't force auto-continue.
@@ -993,7 +994,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     } else if (!hasBuiltAnything) {
                         continuePrompt = `MANDATORY: You have ${summary.pending} pending${summary.inProgress > 0 ? ` + ${summary.inProgress} in-progress` : ''} tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                     } else {
-                        continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW.${nextTask ? `\nNext task to work on: "${nextTask.content}" (status: ${nextTask.status})` : ''}\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task is in_progress, FINISH IT before starting new tasks\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
+                        continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW — do NOT repeat any status updates you already gave.${nextTask ? `\nNext task: "${nextTask.content}" (${nextTask.status})` : ''}\n\n⏱️ ${roundsLeft} rounds left. Batch 3-5 file ops per round. Mark tasks done immediately.\n${roundsLeft < 15 ? '⚠️ LOW ROUNDS — finish remaining tasks NOW.\n' : ''}\n${projectContext}`;
                     }
 
                     inputItems.push({ role: 'user', content: continuePrompt });
@@ -1013,6 +1014,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             // Execute each function call
             autoContinueCount = 0;
             _consecutiveTextOnlyRounds = 0; // Reset — AI made tool calls
+
+            // ── Break message bubble when AI emitted text before tool calls ──
+            // This creates the "text update → tool group → text update" pattern
+            const roundText = result.text || result.content || '';
+            if (roundText.trim()) {
+                sendMessageBreak();
+            }
+
             mainWindow?.webContents.send('ai-agent-step', { round, status: 'executing' });
             for (const fn of result.functionCalls) {
                 let args = {};
@@ -1136,6 +1145,13 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             return { success: true };
         }
         console.error('[AI] ChatGPT backend request error:', err.message);
+        // Check if there are in-progress tasks — inform user they can continue
+        const summary = taskManager.getSummary();
+        if (summary.inProgress > 0 || summary.pending > 0) {
+            const taskStatus = `${summary.done}/${summary.total} tasks done, ${summary.pending} pending`;
+            mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Connection lost — ${taskStatus}. Send another message to continue where you left off.]*`);
+            sendCompletionSummary(toolsUsed, _taskStartSnapshot);
+        }
         mainWindow?.webContents.send('ai-stream-done', err.message);
         return { error: err.message };
     } finally {
@@ -1666,6 +1682,13 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         const result = await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
 
         if (result.error) {
+            // Check if there are in-progress tasks — inform user they can continue
+            const errSummary = taskManager.getSummary();
+            if (errSummary.inProgress > 0 || errSummary.pending > 0) {
+                const taskStatus = `${errSummary.done}/${errSummary.total} tasks done, ${errSummary.pending} pending`;
+                mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Connection lost — ${taskStatus}. Send another message to continue where you left off.]*`);
+                sendCompletionSummary(toolsUsed, _taskStartSnapshot);
+            }
             mainWindow?.webContents.send('ai-stream-done', result.error);
             return { error: result.error };
         }
@@ -1689,10 +1712,11 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             const aiTextContent = result.textContent || '';
 
             // Detect if the AI is announcing intent to act without making tool calls
-            const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now)\b/i.test(aiTextContent)
+            // Triggers when AI used discovery/read tools but hasn't built anything yet
+            const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now|implementing|adding|creating|wiring|building)\b/i.test(aiTextContent)
                 && aiTextContent.length < 500
-                && round < 3
-                && toolsUsed.size === 0;
+                && round < 10
+                && !hasBuiltAnything;
 
             // If the AI is asking discovery questions after init_project, let the response
             // end naturally so the user can answer. Don't force auto-continue.
@@ -1763,7 +1787,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 } else if (!hasBuiltAnything) {
                     continuePrompt = `MANDATORY: You have ${summary.pending} pending${summary.inProgress > 0 ? ` + ${summary.inProgress} in-progress` : ''} tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                 } else {
-                    continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW.${nextTask ? `\nNext task to work on: "${nextTask.content}" (status: ${nextTask.status})` : ''}\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task is in_progress, FINISH IT before starting new tasks\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
+                    continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW — do NOT repeat any status updates you already gave.${nextTask ? `\nNext task: "${nextTask.content}" (${nextTask.status})` : ''}\n\n⏱️ ${roundsLeft} rounds left. Batch 3-5 file ops per round. Mark tasks done immediately.\n${roundsLeft < 15 ? '⚠️ LOW ROUNDS — finish remaining tasks NOW.\n' : ''}\n${projectContext}`;
                 }
 
                 conversationMessages.push({ role: 'user', content: continuePrompt });
@@ -1791,6 +1815,13 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         // ── Tool calling round ──
         autoContinueCount = 0; // Reset auto-continue counter on successful tool calls
         _consecutiveTextOnlyRounds = 0; // Reset — AI made tool calls
+
+        // ── Break message bubble when AI emitted text before tool calls ──
+        // This creates the "text update → tool group → text update" pattern
+        const roundText = result.textContent || '';
+        if (roundText.trim()) {
+            sendMessageBreak();
+        }
 
         // Add assistant message with tool calls to conversation
         const assistantMsg = { role: 'assistant', content: result.textContent || null };
