@@ -369,25 +369,23 @@ ${context.autoCommitEnabled !== false ? `**Auto-Commit Protocol (MANDATORY):**
 4. \`git_push(set_upstream=true)\` → Push feature branch
 5. Never commit directly to main/master unless explicitly asked
 
-### Browser Testing (MANDATORY for Web Projects)
-After building any web project, you MUST verify it works using the browser tools:
+### Browser Testing (Recommended for Web Projects)
+After building a web project, verify it works using browser tools:
 1. Start the dev server: \`run_command("npm run dev", { cwd })\` — it auto-detects readiness
 2. Navigate using the URL from the result: \`browser_navigate({ url: result.url })\`
 3. Check for errors: \`browser_console_logs({ type: "error" })\`
 4. Take a screenshot: \`browser_screenshot({ name: "initial-render" })\`
-5. If errors exist, fix them, restart, and re-test
-6. Close the browser when done: \`browser_close()\`
 
-This ensures every web app you build actually works. Never deliver a web project without browser verification.
+**IMPORTANT: If browser_navigate fails with CONNECTION_REFUSED, do NOT retry more than once.** The server may need time to start. Move on to the remaining tasks instead of wasting rounds on browser retries. You can always test later.
 
 ### Agent Loop & Error Recovery
 When a tool call fails (command error, file not found, build failure):
 1. **Read the FULL error output** — every line matters. Parse stderr AND stdout completely.
-2. **Check system logs**: \`get_system_logs({ level: "ERROR", limit: 10 })\`
-3. **Fix and retry** — don't just report the error; attempt to fix it
-4. **If a command fails with ENOENT/PATH issues**, try alternative approaches (e.g., use full paths, different package managers)
-5. **After 3 failed retries of the same approach**, explain the blocker and suggest a manual workaround
-6. **Never give up on the first error** — always try at least one fix
+2. **Fix and retry** — don't just report the error; attempt to fix it
+3. **If a command fails with ENOENT/PATH issues**, try alternative approaches (e.g., use full paths, different package managers)
+4. **After 2 failed retries of the same approach**, skip it and move on to the next task. Don't waste rounds.
+5. **Never give up on the first error** — always try at least one fix
+6. **Budget awareness**: You have a limited number of rounds. Don't spend 5+ rounds debugging one issue — fix it or skip it.
 
 ### Terminal Output Protocol (MANDATORY)
 When you run \`run_command\` and get output:

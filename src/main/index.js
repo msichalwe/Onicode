@@ -734,7 +734,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     }
 
     const model = selectedModel || 'gpt-4o';
-    const MAX_ROUNDS = 50;
+    const MAX_ROUNDS = 75;
     const MAX_AUTO_CONTINUES = 15;
 
     // Wire provider config for sub-agent use
@@ -1222,7 +1222,7 @@ function compactConversation(messages, maxTokenEstimate = 180000) {
  * This prevents the "init_project + task_add then stop" hallucination pattern.
  */
 async function streamOpenAI(messages, providerConfig, projectPath) {
-    const MAX_TOOL_ROUNDS = 50;  // Support long 10+ minute sessions
+    const MAX_TOOL_ROUNDS = 75;  // Support long agentic sessions (50 was too low for complex projects)
     const MAX_AUTO_CONTINUES = 15; // Max times we'll push the model to continue (was 5, too low)
     let conversationMessages = [...messages];
     setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks
