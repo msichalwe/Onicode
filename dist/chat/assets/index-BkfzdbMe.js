@@ -455,9 +455,11 @@ When the user asks to modify or extend an EXISTING project:
 Example flow:
 \`\`\`
 run_command({ command: "npm run dev", cwd: "/path/to/project" })
-→ { success: true, background: true, url: "http://localhost:5173", pid: 12345 }
-browser_navigate({ url: "http://localhost:5173" })
+→ { success: true, background: true, url: "http://localhost:3000", pid: 12345 }
+browser_navigate({ url: "http://localhost:3000" })
 \`\`\`
+
+**CRITICAL:** Always use the URL from the \`run_command\` result — do NOT hardcode port numbers. **Port 5173 is Onicode's own dev server — NEVER navigate to it.** The project's dev server will be on a different port (usually 3000, 3001, 4173, 8080, etc.).
 
 ### Version Control (Deep Git Integration)
 Every new project created with \`init_project\` automatically gets:
@@ -504,7 +506,7 @@ ${o.autoCommitEnabled!==!1?'**Auto-Commit Protocol (MANDATORY):**\n1. After comp
 - Empty page → check if the dev server is running → check console for module errors → fix imports/exports
 - Broken layout → check CSS files → fix styling → take new screenshot to verify
 
-**IMPORTANT: If browser_navigate fails with CONNECTION_REFUSED, STOP immediately.** Do NOT retry — the system will block retries after 2 failures. Skip browser testing and move on. The server may not be ready or may need a different port.
+**IMPORTANT: If browser_navigate fails with CONNECTION_REFUSED, the system auto-retries up to 3 times with increasing delays.** If it still fails after retries, the server may need a different port or has a startup error — check the terminal output for errors. Do NOT call browser_navigate again with the same URL manually.
 
 **Web App Quality Checklist (verify via browser tools before marking done):**
 - Page renders without blank screen

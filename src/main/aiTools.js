@@ -2119,8 +2119,8 @@ async function executeTool(name, args) {
                                     port: expectedPort,
                                     stdout: stdout.slice(0, 4000),
                                     stderr: stderr.slice(0, 2000),
-                                    message: `Dev server started in background (PID ${child.pid}). Output is streaming. ${expectedPort ? `Expected on port ${expectedPort}.` : ''}`,
-                                    hint: expectedPort ? `Use browser_navigate("http://localhost:${expectedPort}") to test the app.` : undefined,
+                                    message: `Dev server started in background (PID ${child.pid}). ${expectedPort ? `Expected at http://localhost:${expectedPort} — wait a few seconds then navigate.` : 'Waiting for readiness signal...'}`,
+                                    hint: expectedPort ? `Wait 5 seconds then: browser_navigate("http://localhost:${expectedPort}")` : undefined,
                                 });
                             }
                         }, 15000); // Max 15s wait for readiness signals
@@ -2163,8 +2163,8 @@ async function executeTool(name, args) {
                                     url: actualUrl,
                                     stdout: stdout.slice(0, 4000),
                                     stderr: stderr.slice(0, 2000),
-                                    message: `Dev server is ready! ${actualUrl || ''}`,
-                                    hint: actualUrl ? `Use browser_navigate("${actualUrl}") to test the app.` : undefined,
+                                    message: `Dev server is ready at ${actualUrl || 'unknown URL'}. IMPORTANT: Use this exact URL for browser_navigate — do NOT use a different port.`,
+                                    hint: actualUrl ? `browser_navigate("${actualUrl}")` : undefined,
                                 });
                             }
                         };
@@ -2884,13 +2884,17 @@ async function executeTool(name, args) {
                 let result = await browserMod.navigate(args.url, {
                     waitUntil: args.wait_until || 'networkidle2',
                 });
-                // Auto-retry once on CONNECTION_REFUSED (dev server may still be starting)
+                // Auto-retry up to 3 times on CONNECTION_REFUSED (dev servers can take 5-10s to start)
                 if (result.error && result.error.includes('ERR_CONNECTION_REFUSED')) {
-                    logger.info('browser', `Connection refused on ${args.url} — waiting 3s and retrying...`);
-                    await new Promise(r => setTimeout(r, 3000));
-                    result = await browserMod.navigate(args.url, {
-                        waitUntil: args.wait_until || 'networkidle2',
-                    });
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                        const delay = attempt * 3000; // 3s, 6s, 9s
+                        logger.info('browser', `Connection refused on ${args.url} — waiting ${delay / 1000}s and retrying (attempt ${attempt}/3)...`);
+                        await new Promise(r => setTimeout(r, delay));
+                        result = await browserMod.navigate(args.url, {
+                            waitUntil: args.wait_until || 'networkidle2',
+                        });
+                        if (!result.error || !result.error.includes('ERR_CONNECTION_REFUSED')) break;
+                    }
                 }
                 logger.tool('browser', `navigate → ${args.url}`, result);
                 return result;

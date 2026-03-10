@@ -105,6 +105,13 @@ function createWindow() {
     mainWindow.once('ready-to-show', () => mainWindow.show());
     mainWindow.on('closed', () => { mainWindow = null; });
 
+    // Suppress noisy Chrome DevTools protocol errors (Autofill.enable, etc.)
+    mainWindow.webContents.on('console-message', (_event, _level, message) => {
+        if (message.includes('Autofill.enable') || message.includes('Autofill.setAddresses')) {
+            _event.preventDefault?.();
+        }
+    });
+
     // Give modules access to mainWindow for IPC events
     setAIToolsWindow(mainWindow);
     setMemoryWindow(mainWindow);
@@ -841,8 +848,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const systemMessages = messages.filter((m) => m.role === 'system');
     const chatMessages = messages.filter((m) => m.role !== 'system');
 
-    const instructions = systemMessages.map((m) => m.content).join('\n\n')
+    let instructions = systemMessages.map((m) => m.content).join('\n\n')
         || 'You are Onicode AI, an intelligent development companion.';
+
+    // Inject current session state (task list, file context, background processes) into system instructions
+    const initialContext = buildContinueContext();
+    if (initialContext) {
+        instructions += '\n\n## Current Session State\n' + initialContext;
+    }
 
     // Convert to Responses API input format
     const inputItems = chatMessages.map((m) => ({
@@ -879,6 +892,13 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 const justInitProject = toolsUsed.has('init_project') && !hasBuiltAnything && summary.total === 0;
                 const aiTextContent = result.text || result.content || '';
 
+                // Detect if the AI is announcing intent to act without making tool calls
+                // e.g., "I'll fix that now", "Let me update the styles", "On it — I'll..."
+                const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now)\b/i.test(aiTextContent)
+                    && aiTextContent.length < 500 // Short intent messages, not long explanations
+                    && round < 3 // Only on early rounds (AI stalling at start)
+                    && toolsUsed.size === 0; // Hasn't used any tools yet this session
+
                 // If the AI is asking discovery questions after init_project, let the response
                 // end naturally so the user can answer. Don't force auto-continue.
                 // BUT: if user already said "use defaults" / "just build it", don't pause.
@@ -889,22 +909,26 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     return { success: true };
                 }
 
-                if ((hasPendingTasks || justInitProject) && autoContinueCount < MAX_AUTO_CONTINUES) {
+                if ((hasPendingTasks || justInitProject || announcesIntent) && autoContinueCount < MAX_AUTO_CONTINUES) {
                     autoContinueCount++;
-                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}`);
+                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.inProgress} in_progress, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}${announcesIntent ? ' [intent-detected]' : ''}`);
 
                     const projectContext = buildContinueContext();
                     const nextTask = summary.nextTask;
                     const roundsLeft = MAX_ROUNDS - round;
+                    const taskStatusLine = `${summary.done}/${summary.total} tasks done${summary.inProgress > 0 ? `, ${summary.inProgress} IN PROGRESS (must finish!)` : ''}${summary.pending > 0 ? `, ${summary.pending} pending` : ''}`;
                     let continuePrompt;
-                    if (justInitProject && !userWantsToSkipQuestions(inputItems)) {
+                    if (announcesIntent && !hasPendingTasks) {
+                        continuePrompt = `STOP TALKING. You just said "${aiTextContent.slice(0, 100)}..." but made ZERO tool calls. DO NOT describe what you'll do — USE TOOLS NOW. Call task_add to plan tasks, then create_file or edit_file to implement. Every response MUST contain tool calls.\n\n${projectContext}`;
+                        logger.info('agent-loop', `Detected intent-without-action — forcing tool use (round ${round})`);
+                    } else if (justInitProject && !userWantsToSkipQuestions(inputItems)) {
                         continuePrompt = `MANDATORY: You just initialized the project. Before adding tasks, ask the user 3-5 quick setup questions to clarify their preferences (tech stack, features, design style, etc.). Format as numbered questions with options in parentheses so the UI can render them as interactive buttons. Example:\n1. What tech stack? (React + Vite, Next.js, Vue)\n2. Auth needed? (yes, no, later)\n\nDo NOT add tasks or create files yet — ask questions first.\n\n${projectContext}`;
                     } else if (justInitProject) {
                         continuePrompt = `The user chose recommended defaults — skip all questions. Call task_add to plan 4-6 tasks, then immediately call create_file to start building. Do NOT ask any questions. Start NOW.\n\n${projectContext}`;
                     } else if (!hasBuiltAnything) {
-                        continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
+                        continuePrompt = `MANDATORY: You have ${summary.pending} pending${summary.inProgress > 0 ? ` + ${summary.inProgress} in-progress` : ''} tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                     } else {
-                        continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. Continue with tool calls NOW.\nNext: "${nextTask?.content || 'check task_list'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task's files are all created, call task_update(done) before starting the next task\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
+                        continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW.${nextTask ? `\nNext task to work on: "${nextTask.content}" (status: ${nextTask.status})` : ''}\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task is in_progress, FINISH IT before starting new tasks\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
                     }
 
                     inputItems.push({ role: 'user', content: continuePrompt });
@@ -953,13 +977,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 }
                 logger.toolResult(fn.name, toolResult, round);
 
-                // Track browser_navigate failures — block retries after 2 failures
+                // Track browser_navigate failures — block AI from calling it again after 3 cumulative failures
+                // (Note: aiTools.js already retries internally up to 3 times with progressive delays)
                 if (fn.name === 'browser_navigate') {
                     if (toolResult?.error && /ECONNREFUSED|CONNECTION_REFUSED|ERR_CONNECTION_REFUSED/i.test(toolResult.error)) {
                         _browserNavFailures++;
-                        if (_browserNavFailures >= 2) {
-                            toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED. The dev server is not running or not ready. Do NOT retry browser_navigate — skip browser testing and move on to the next task.';
-                            logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times — injecting stop-retry directive`);
+                        if (_browserNavFailures >= 3) {
+                            toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED (including internal retries). The dev server is not running or crashed. Do NOT call browser_navigate again — skip browser testing and move on.';
+                            logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times (cumulative) — injecting stop-retry directive`);
                         }
                     } else if (!toolResult?.error) {
                         _browserNavFailures = 0; // Reset on success
@@ -1564,11 +1589,18 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             const hasPendingTasks = summary.pending > 0 || summary.inProgress > 0;
             const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
             const justInitProject = toolsUsed.has('init_project') && !hasBuiltAnything && summary.total === 0;
+            const aiTextContent = result.textContent || '';
+
+            // Detect if the AI is announcing intent to act without making tool calls
+            const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now)\b/i.test(aiTextContent)
+                && aiTextContent.length < 500
+                && round < 3
+                && toolsUsed.size === 0;
 
             // If the AI is asking discovery questions after init_project, let the response
             // end naturally so the user can answer. Don't force auto-continue.
             // BUT: if user already said "use defaults" / "just build it", don't pause.
-            if (justInitProject && looksLikeDiscoveryQuestions(result.textContent || '') && !userWantsToSkipQuestions(conversationMessages)) {
+            if (justInitProject && looksLikeDiscoveryQuestions(aiTextContent) && !userWantsToSkipQuestions(conversationMessages)) {
                 logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
                 currentAIRequest = null;
                 sendCompletionSummary(toolsUsed, _taskStartSnapshot);
@@ -1580,9 +1612,10 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             // Auto-continue if:
             // 1. Tasks are pending (normal case)
             // 2. init_project was called but no tasks or files were created yet (post-init stall)
-            if ((hasPendingTasks || justInitProject) && autoContinueCount < MAX_AUTO_CONTINUES) {
+            // 3. AI announced intent but made zero tool calls (stalling)
+            if ((hasPendingTasks || justInitProject || announcesIntent) && autoContinueCount < MAX_AUTO_CONTINUES) {
                 autoContinueCount++;
-                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}`);
+                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}${announcesIntent ? ' [intent-detected]' : ''}`);
 
                 // Add the assistant's text response to conversation
                 if (result.textContent) {
@@ -1593,15 +1626,19 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 const projectContext = buildContinueContext();
                 const nextTask = summary.nextTask;
                 const roundsLeft = MAX_TOOL_ROUNDS - round;
+                const taskStatusLine = `${summary.done}/${summary.total} tasks done${summary.inProgress > 0 ? `, ${summary.inProgress} IN PROGRESS (must finish!)` : ''}${summary.pending > 0 ? `, ${summary.pending} pending` : ''}`;
                 let continuePrompt;
-                if (justInitProject && !userWantsToSkipQuestions(conversationMessages)) {
+                if (announcesIntent && !hasPendingTasks) {
+                    continuePrompt = `STOP TALKING. You just said "${aiTextContent.slice(0, 100)}..." but made ZERO tool calls. DO NOT describe what you'll do — USE TOOLS NOW. Call task_add to plan tasks, then create_file or edit_file to implement. Every response MUST contain tool calls.\n\n${projectContext}`;
+                    logger.info('agent-loop', `Detected intent-without-action — forcing tool use (round ${round})`);
+                } else if (justInitProject && !userWantsToSkipQuestions(conversationMessages)) {
                     continuePrompt = `MANDATORY: You just initialized the project. Before adding tasks, ask the user 3-5 quick setup questions to clarify their preferences (tech stack, features, design style, etc.). Format as numbered questions with options in parentheses so the UI can render them as interactive buttons. Example:\n1. What tech stack? (React + Vite, Next.js, Vue)\n2. Auth needed? (yes, no, later)\n\nDo NOT add tasks or create files yet — ask questions first.\n\n${projectContext}`;
                 } else if (justInitProject) {
                     continuePrompt = `The user chose recommended defaults — skip all questions. Call task_add to plan 4-6 tasks, then immediately call create_file to start building. Do NOT ask any questions. Start NOW.\n\n${projectContext}`;
                 } else if (!hasBuiltAnything) {
-                    continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
+                    continuePrompt = `MANDATORY: You have ${summary.pending} pending${summary.inProgress > 0 ? ` + ${summary.inProgress} in-progress` : ''} tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                 } else {
-                    continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. Continue with tool calls NOW.\nNext: "${nextTask?.content || 'check task_list'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task's files are all created, call task_update(done) before starting the next task\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
+                    continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW.${nextTask ? `\nNext task to work on: "${nextTask.content}" (status: ${nextTask.status})` : ''}\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task is in_progress, FINISH IT before starting new tasks\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
                 }
 
                 conversationMessages.push({ role: 'user', content: continuePrompt });
@@ -1675,13 +1712,14 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             }
             logger.toolResult(tc.name, toolResult, round);
 
-            // Track browser_navigate failures — block retries after 2 failures
+            // Track browser_navigate failures — block AI from calling it again after 3 cumulative failures
+            // (Note: aiTools.js already retries internally up to 3 times with progressive delays)
             if (tc.name === 'browser_navigate') {
                 if (toolResult?.error && /ECONNREFUSED|CONNECTION_REFUSED|ERR_CONNECTION_REFUSED/i.test(toolResult.error)) {
                     _browserNavFailures++;
-                    if (_browserNavFailures >= 2) {
-                        toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED. The dev server is not running or not ready. Do NOT retry browser_navigate — skip browser testing and move on to the next task.';
-                        logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times — injecting stop-retry directive`);
+                    if (_browserNavFailures >= 3) {
+                        toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED (including internal retries). The dev server is not running or crashed. Do NOT call browser_navigate again — skip browser testing and move on.';
+                        logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times (cumulative) — injecting stop-retry directive`);
                     }
                 } else if (!toolResult?.error) {
                     _browserNavFailures = 0; // Reset on success
