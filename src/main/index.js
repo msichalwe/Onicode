@@ -904,6 +904,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     let _forceNoToolsNextRound = false; // After init_project, force text-only to get discovery questions
     let _browserNavFailures = 0; // Track consecutive browser_navigate failures
     let _consecutiveTextOnlyRounds = 0; // Track text-only rounds to detect stuck loops
+    let _toolOnlyRounds = 0; // Track consecutive tool-only rounds for synthetic status
+    const _roundToolNames = []; // Collect tool names per round for status generation
 
     try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -912,6 +914,54 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 mainWindow?.webContents.send('ai-agent-step', { round, status: 'thinking' });
             } else {
                 mainWindow?.webContents.send('ai-agent-step', { round, status: 'streaming' });
+            }
+
+            // Auto-compact inputItems if conversation is getting too long
+            if (round > 3) {
+                const totalChars = inputItems.reduce((sum, item) => {
+                    if (typeof item.content === 'string') return sum + item.content.length;
+                    if (item.output) return sum + item.output.length;
+                    return sum + (JSON.stringify(item).length);
+                }, 0);
+                const estTokens = totalChars / 4;
+                if (estTokens > 80000) {
+                    logger.info('compaction', `ChatGPT backend auto-compact at round ${round}, ~${Math.round(estTokens)} tokens, ${inputItems.length} items`);
+                    const keepLast = 20;
+                    if (inputItems.length > keepLast + 5) {
+                        // Extract context from items being removed
+                        const removing = inputItems.slice(0, -keepLast);
+                        const filesCreated = new Set();
+                        const filesEdited = new Set();
+                        const toolsCalled = {};
+                        for (const item of removing) {
+                            if (item.type === 'function_call' && item.name) {
+                                toolsCalled[item.name] = (toolsCalled[item.name] || 0) + 1;
+                                try {
+                                    const a = JSON.parse(item.arguments || '{}');
+                                    if (item.name === 'create_file' && a.file_path) filesCreated.add(a.file_path.split('/').pop());
+                                    if ((item.name === 'edit_file' || item.name === 'multi_edit') && a.file_path) filesEdited.add(a.file_path.split('/').pop());
+                                } catch {}
+                            }
+                        }
+                        const taskSummary = taskManager.getSummary();
+                        const summaryParts = [];
+                        if (filesCreated.size > 0) summaryParts.push(`Files created: ${[...filesCreated].join(', ')}`);
+                        if (filesEdited.size > 0) summaryParts.push(`Files edited: ${[...filesEdited].join(', ')}`);
+                        const toolList = Object.entries(toolsCalled).map(([k, v]) => `${k}(${v})`).join(', ');
+                        if (toolList) summaryParts.push(`Tools used: ${toolList}`);
+                        summaryParts.push(`Tasks: ${taskSummary.done}/${taskSummary.total} done, ${taskSummary.pending} pending`);
+
+                        const trimmed = inputItems.slice(-keepLast);
+                        trimmed.unshift({
+                            role: 'user',
+                            content: `[Context compacted — ${removing.length} older items summarized]\n${summaryParts.join('\n')}\n\nAll files listed above exist on disk. Continue from the most recent results. Check task_list for current state.`,
+                        });
+                        const beforeLen = inputItems.length;
+                        inputItems.length = 0;
+                        inputItems.push(...trimmed);
+                        logger.info('compaction', `Compacted ${beforeLen} → ${inputItems.length} items`);
+                    }
+                }
             }
 
             // Force tool_choice on auto-continue rounds to guarantee the model makes tool calls
@@ -1085,6 +1135,41 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     call_id: fn.call_id,
                     output: JSON.stringify(toolResult).slice(0, 16000),
                 });
+            }
+
+            // ── Track tool-only rounds and inject synthetic status every 3 rounds ──
+            const roundToolNames = result.functionCalls.map(fn => fn.name);
+            _roundToolNames.push(...roundToolNames);
+            const hasTextThisRound = (result.text || result.content || '').trim().length > 0;
+            if (!hasTextThisRound) {
+                _toolOnlyRounds++;
+            } else {
+                _toolOnlyRounds = 0;
+                _roundToolNames.length = 0;
+            }
+            if (_toolOnlyRounds >= 3) {
+                // Generate a concise synthetic status from accumulated tool names
+                const counts = {};
+                for (const n of _roundToolNames) counts[n] = (counts[n] || 0) + 1;
+                const parts = [];
+                if (counts.read_file || counts.smart_read) parts.push(`Read ${(counts.read_file || 0) + (counts.smart_read || 0)} files`);
+                if (counts.find_implementation) parts.push(`Found ${counts.find_implementation} implementations`);
+                if (counts.edit_file || counts.multi_edit) parts.push(`Edited ${(counts.edit_file || 0) + (counts.multi_edit || 0)} files`);
+                if (counts.create_file) parts.push(`Created ${counts.create_file} files`);
+                if (counts.task_add) parts.push(`Added ${counts.task_add} tasks`);
+                if (counts.run_command) parts.push(`Ran ${counts.run_command} commands`);
+                if (counts.search_files || counts.batch_search) parts.push(`Searched ${(counts.search_files || 0) + (counts.batch_search || 0)} queries`);
+                if (parts.length === 0) {
+                    const uniqueTools = [...new Set(_roundToolNames)].slice(0, 4);
+                    parts.push(uniqueTools.join(', '));
+                }
+                const summary = taskManager.getSummary();
+                const taskStatus = summary.total > 0 ? ` (${summary.done}/${summary.total} tasks done)` : '';
+                sendMessageBreak();
+                mainWindow?.webContents.send('ai-stream-chunk', parts.join(', ') + '.' + taskStatus);
+                sendMessageBreak();
+                _toolOnlyRounds = 0;
+                _roundToolNames.length = 0;
             }
 
             // ── Per-round: break message bubble when a task is completed ──
@@ -1515,6 +1600,8 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
     let _forceNoToolsNextRound = false; // After init_project, force text-only to get discovery questions
     let _browserNavFailures = 0; // Track consecutive browser_navigate failures
     let _consecutiveTextOnlyRounds = 0; // Track text-only rounds to detect stuck loops
+    let _toolOnlyRounds = 0; // Track consecutive tool-only rounds for synthetic status
+    const _roundToolNames = []; // Collect tool names for status generation
 
     // Snapshot task state at request start so completion summary only shows changes
     const _taskStartSnapshot = { ...taskManager.getSummary() };
@@ -1659,7 +1746,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         if (round > 3) {
             const totalChars = conversationMessages.reduce((sum, m) => sum + (m.content?.length || 0) + JSON.stringify(m.tool_calls || '').length, 0);
             const estTokens = totalChars / 4;
-            if (estTokens > 150000) {
+            if (estTokens > 80000) {
                 logger.info('compaction', `Auto-compact triggered at round ${round}, ~${Math.round(estTokens)} tokens`);
                 try {
                     conversationMessages = await semanticCompact(conversationMessages);
@@ -1897,6 +1984,40 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 tool_call_id: tc.id,
                 content: JSON.stringify(toolResult),
             });
+        }
+
+        // ── Track tool-only rounds and inject synthetic status every 3 rounds ──
+        const roundToolNames = result.toolCalls.map(tc => tc.name);
+        _roundToolNames.push(...roundToolNames);
+        const hasTextThisRound = (result.textContent || '').trim().length > 0;
+        if (!hasTextThisRound) {
+            _toolOnlyRounds++;
+        } else {
+            _toolOnlyRounds = 0;
+            _roundToolNames.length = 0;
+        }
+        if (_toolOnlyRounds >= 3) {
+            const counts = {};
+            for (const n of _roundToolNames) counts[n] = (counts[n] || 0) + 1;
+            const parts = [];
+            if (counts.read_file || counts.smart_read) parts.push(`Read ${(counts.read_file || 0) + (counts.smart_read || 0)} files`);
+            if (counts.find_implementation) parts.push(`Found ${counts.find_implementation} implementations`);
+            if (counts.edit_file || counts.multi_edit) parts.push(`Edited ${(counts.edit_file || 0) + (counts.multi_edit || 0)} files`);
+            if (counts.create_file) parts.push(`Created ${counts.create_file} files`);
+            if (counts.task_add) parts.push(`Added ${counts.task_add} tasks`);
+            if (counts.run_command) parts.push(`Ran ${counts.run_command} commands`);
+            if (counts.search_files || counts.batch_search) parts.push(`Searched ${(counts.search_files || 0) + (counts.batch_search || 0)} queries`);
+            if (parts.length === 0) {
+                const uniqueTools = [...new Set(_roundToolNames)].slice(0, 4);
+                parts.push(uniqueTools.join(', '));
+            }
+            const synthSummary = taskManager.getSummary();
+            const taskStatus = synthSummary.total > 0 ? ` (${synthSummary.done}/${synthSummary.total} tasks done)` : '';
+            sendMessageBreak();
+            mainWindow?.webContents.send('ai-stream-chunk', parts.join(', ') + '.' + taskStatus);
+            sendMessageBreak();
+            _toolOnlyRounds = 0;
+            _roundToolNames.length = 0;
         }
 
         // ── Per-round: break message bubble when a task is completed ──

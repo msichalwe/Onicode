@@ -1371,13 +1371,34 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     }, [activeConvId, newChat]);
 
     // ── Toggle expanded step ──
-    const toggleStepExpand = useCallback((stepId: string) => {
+    const toggleStepExpand = useCallback((stepId: string, event?: React.MouseEvent) => {
+        const clickedEl = event?.currentTarget as HTMLElement | undefined;
+        const isGroup = stepId.startsWith('group-');
         setExpandedSteps(prev => {
             const next = new Set(prev);
-            if (next.has(stepId)) next.delete(stepId);
-            else next.add(stepId);
+            if (next.has(stepId)) {
+                // Closing this item
+                next.delete(stepId);
+            } else if (isGroup) {
+                // Opening a group — close other groups (accordion), keep sub-items
+                for (const key of next) {
+                    if (key.startsWith('group-')) next.delete(key);
+                }
+                next.add(stepId);
+            } else {
+                // Opening a sub-item — keep parent group open, close other sub-items
+                for (const key of next) {
+                    if (!key.startsWith('group-')) next.delete(key);
+                }
+                next.add(stepId);
+            }
             return next;
         });
+        if (clickedEl) {
+            requestAnimationFrame(() => {
+                clickedEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            });
+        }
     }, []);
 
     // ── Format elapsed time ──
@@ -1991,7 +2012,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             <div key={gi} className={`tool-step tool-step-${status}`}>
                                 <div
                                     className="tool-step-group-header"
-                                    onClick={() => toggleStepExpand(`group-${gi}`)}
+                                    onClick={(e) => toggleStepExpand(`group-${gi}`, e)}
                                 >
                                     <span className={`tool-step-chevron${isGroupExpanded ? ' expanded' : ''}`}>&#9656;</span>
                                     <span className="tool-step-label">{label.plural}</span>
@@ -2010,7 +2031,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                                 <div key={step.id}>
                                                     <div
                                                         className="tool-step-group-item"
-                                                        onClick={isItemExpandable ? () => toggleStepExpand(step.id) : undefined}
+                                                        onClick={isItemExpandable ? (e) => toggleStepExpand(step.id, e) : undefined}
                                                     >
                                                         {isItemExpandable && <span className={`tool-step-chevron${isItemExpanded ? ' expanded' : ''}`}>&#9656;</span>}
                                                         <span className="file-name">{detail}</span>
@@ -2040,7 +2061,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         <div key={step.id} className={`tool-step tool-step-${step.status}${hasError ? ' tool-step-has-error' : ''}${isExpanded ? ' tool-step-expanded-active' : ''}`}>
                             <div
                                 className={`tool-step-header${isExpandable ? ' tool-step-clickable' : ''}`}
-                                onClick={isExpandable ? () => toggleStepExpand(step.id) : undefined}
+                                onClick={isExpandable ? (e) => toggleStepExpand(step.id, e) : undefined}
                             >
                                 {isExpandable && (
                                     <span className={`tool-step-chevron${isExpanded ? ' expanded' : ''}`}>&#9656;</span>
