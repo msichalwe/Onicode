@@ -259,6 +259,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const sendingRef = useRef(false); // Prevents double-send from StrictMode
     const slashMenuRef = useRef<HTMLDivElement>(null);
     const mentionMenuRef = useRef<HTMLDivElement>(null);
+    const activeProjectRef = useRef(activeProject);
+
+    // Keep ref in sync with prop so closures always have current value
+    useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
 
     // ── Migrate localStorage to SQLite on first mount ──
     useEffect(() => {
@@ -612,21 +616,25 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             const currentContent = streamContentRef.current;
             const currentSteps = [...toolStepsRef.current];
 
-            // Only create a message if there's content or tool steps
-            if (currentContent.trim() || currentSteps.length > 0) {
+            // Only create a message if there's actual text content.
+            // Tool-only rounds (no AI text) just get their steps folded into the next message.
+            if (currentContent.trim()) {
                 setMessages((prev) => [...prev, {
                     id: generateId(), role: 'ai' as const,
-                    content: currentContent || '*(Completed using tools)*',
+                    content: currentContent,
                     timestamp: Date.now(),
                     toolSteps: currentSteps.length > 0 ? currentSteps : undefined,
                 }]);
+                // Full reset — content was committed
+                streamContentRef.current = '';
+                toolStepsRef.current = [];
+                setStreamingContent('');
+                setActiveToolSteps([]);
+            } else if (currentSteps.length > 0) {
+                // No text but has tool steps — keep the steps for the next bubble
+                // (they'll be attached to whatever text the AI emits next)
+                // Don't create an empty message
             }
-
-            // Reset for the next bubble
-            streamContentRef.current = '';
-            toolStepsRef.current = [];
-            setStreamingContent('');
-            setActiveToolSteps([]);
         });
 
         const removeDoneListener = window.onicode!.onStreamDone((error: string | null) => {
@@ -656,7 +664,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             } else if (finalContent.trim() || finalToolSteps.length > 0) {
                 setMessages((prev) => [...prev, {
                     id: generateId(), role: 'ai' as const,
-                    content: finalContent || '*(Completed using tools)*',
+                    content: finalContent || '',
                     timestamp: Date.now(),
                     toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
                 }]);
@@ -674,7 +682,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             apiKey: provider.apiKey!,
             baseUrl: provider.baseUrl,
             selectedModel: provider.selectedModel,
-            projectPath: activeProject?.path,
+            projectPath: activeProjectRef.current?.path,
         });
 
         if (result.error) {
@@ -802,6 +810,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         setStreamingContent('');
         streamContentRef.current = '';
 
+        // Use ref to always get the current activeProject (closures capture stale props)
+        const currentProject = activeProjectRef.current;
+
         const provider = getActiveProvider();
         if (!provider) {
             setIsTyping(false);
@@ -843,7 +854,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         let memories: { soul?: string | null; user?: string | null; longTerm?: string | null; dailyToday?: string | null; dailyYesterday?: string | null; projectMemory?: string | null } | undefined;
         if (isElectron) {
             try {
-                const projectId = (scope === 'project' && activeProject?.id) ? activeProject.id : undefined;
+                const projectId = (scope === 'project' && currentProject?.id) ? currentProject.id : undefined;
                 const memResult = await window.onicode!.memoryLoadCore(projectId);
                 if (memResult.success && memResult.memories) {
                     memories = {
@@ -860,9 +871,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         // Load project docs if in project scope
         let projectDocs: Array<{ name: string; content: string }> | undefined;
-        if (scope === 'project' && activeProject?.id && isElectron) {
+        if (scope === 'project' && currentProject?.id && isElectron) {
             try {
-                const projResult = await window.onicode!.getProject(activeProject.id);
+                const projResult = await window.onicode!.getProject(currentProject.id);
                 if (projResult.docs) {
                     projectDocs = projResult.docs.map((d: { name: string; content: string }) => ({
                         name: d.name,
@@ -874,14 +885,14 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         // Load AGENTS.md (project intelligence file — equivalent to CLAUDE.md)
         let agentsMd: string | undefined;
-        if (activeProject?.path && isElectron) {
+        if (currentProject?.path && isElectron) {
             try {
-                const agentsResult = await window.onicode!.readFile(`${activeProject.path}/.onicode/AGENTS.md`);
+                const agentsResult = await window.onicode!.readFile(`${currentProject.path}/.onicode/AGENTS.md`);
                 if (agentsResult.success && agentsResult.content) agentsMd = agentsResult.content;
             } catch { /* no AGENTS.md */ }
             if (!agentsMd) {
                 try {
-                    const agentsResult = await window.onicode!.readFile(`${activeProject.path}/AGENTS.md`);
+                    const agentsResult = await window.onicode!.readFile(`${currentProject.path}/AGENTS.md`);
                     if (agentsResult.success && agentsResult.content) agentsMd = agentsResult.content;
                 } catch { /* no AGENTS.md */ }
             }
@@ -904,7 +915,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 }
             } catch { /* hooks not ready */ }
             try {
-                const cmds = await window.onicode!.customCommandsList(activeProject?.path);
+                const cmds = await window.onicode!.customCommandsList(activeProjectRef.current?.path);
                 if (cmds.length > 0) {
                     customCommandsSummary = cmds.map((c: CustomCommand) => `- \`/${c.name}\` — ${c.description} (${c.source})`).join('\n');
                 }
@@ -925,8 +936,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Build context-aware system prompt
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
         const systemContent = buildSystemPromptCached({
-            activeProjectName: activeProject?.name,
-            activeProjectPath: activeProject?.path,
+            activeProjectName: currentProject?.name,
+            activeProjectPath: currentProject?.path,
             projectDocs,
             customSystemPrompt: customPrompt,
             memories,

@@ -383,4 +383,4 @@ function readDirRecursive(dirPath, depth, maxDepth) {
     }
 }
 
-module.exports = { registerProjectIPC };
+module.exports = { registerProjectIPC, loadProjects, saveProjects };

@@ -604,24 +604,30 @@ Path: \`${context.activeProjectPath}\`
 **For pending tasks**: Use \`task_list\` to see what's pending, then execute.`);
     } else {
         parts.push(`
-## ⚠️ NO ACTIVE PROJECT — init_project IS MANDATORY
+## ⚠️ NO ACTIVE PROJECT
 
-**There is NO active project registered.** When the user asks to build something:
-1. Call \`init_project({ name: "<project-name>", projectPath: "~/OniProjects/<project-name>" })\` FIRST
-2. Then ask 3-5 quick discovery questions (see "Project Creation Protocol" above)
-3. Wait for user answers before proceeding with \`task_add\` and building
+**There is no active project.** Choose the right tool based on the situation:
 
-**⚠️ CRITICAL: CHECK CONVERSATION HISTORY FIRST.** If earlier messages in this conversation already show an init_project tool call, the project was ALREADY created. Do NOT call init_project again — proceed to Step 2 or Step 3 instead. Calling init_project twice creates duplicate projects and confuses the session.
+### Creating a BRAND NEW project from scratch:
+**IMPORTANT: Your FIRST action must be a tool call — do NOT respond with only text/questions before calling init_project.**
+1. Call \`init_project({ name: "<name>", projectPath: "~/OniProjects/<name>" })\` as your FIRST tool call
+2. The system will automatically prompt you to ask discovery questions after init — do NOT ask questions before calling init_project
+3. After the user answers (or says "use defaults"), call \`task_add\` + start building
 
-**This is a HARD REQUIREMENT.** If you skip \`init_project\` (and it hasn't been called before in this conversation):
-- Files you create won't be tracked in a project
-- Tasks won't be associated with any project
-- The user's project sidebar won't show the project
-- Git won't be initialized
+### Working on an EXISTING folder/repo/codebase:
+1. Call \`detect_project({ folder_path: "<path>" })\` — scans, detects tech, auto-registers, activates
+2. Read key files (\`read_file\` on README, package.json, etc.) to understand the codebase
+3. Proceed with the user's request
 
-**After init_project, your NEXT response MUST be discovery questions — NOT task_add or create_file.**
+### How to decide:
+- User says "build me a chess app" → **init_project** (call it immediately, don't ask questions first)
+- User says "work on ~/Projects/my-app" or "fix my app" → **detect_project** (existing folder)
+- User references a path that already exists → **detect_project**
+- User wants to continue work on a project from the sidebar → **detect_project**
 
-**Exception:** If the user is asking a question, chatting, or requesting help with existing code, you don't need init_project. But for ANY new app/project/codebase creation, init_project + questions is MANDATORY.`);
+**⚠️ CRITICAL: CHECK CONVERSATION HISTORY.** If \`init_project\` or \`detect_project\` was already called in this conversation, do NOT call either again. The project is already active.
+
+**Exception:** If the user is just asking a question or chatting, you don't need either tool.`);
     }
 
     // ── AGENTS.md / Project Intelligence (Claude Code's CLAUDE.md equivalent) ──

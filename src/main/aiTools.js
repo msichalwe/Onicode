@@ -557,9 +557,13 @@ class TaskManager {
      *  1. AI is actively streaming (executing tool calls)
      *  2. The current session already has tasks for this project */
     loadFromProject(projectPath) {
+        // Debounce: skip if called again within 200ms (two listeners fire on same event)
+        const now = Date.now();
+        if (this._lastLoadTime && now - this._lastLoadTime < 200) return;
+        this._lastLoadTime = now;
+
         // GUARD: Never wipe tasks while AI is actively working
         if (_aiStreamingActive) {
-            logger.info('task-mgr', `AI streaming active — broadcasting current ${this.tasks.length} tasks instead of reloading`);
             this._notifyRenderer();
             return;
         }
@@ -1169,7 +1173,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'init_project',
-            description: 'MANDATORY first step when creating any new project. Registers the project in Onicode\'s Projects tab, creates .onidocs/ folder with project.md, tasks.md, changelog.md. This activates "project mode" in the IDE. You MUST call this before any other tool call when creating a project.',
+            description: 'Create a BRAND NEW project from scratch. Registers in Onicode, creates directory + onidocs + git repo. Use ONLY for new projects — for existing folders/repos, use detect_project instead. If the project already exists at the given path, returns the existing project without duplicating.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1179,6 +1183,20 @@ const TOOL_DEFINITIONS = [
                     techStack: { type: 'string', description: 'Tech stack (e.g. "Next.js + TypeScript + Tailwind")' },
                 },
                 required: ['name', 'projectPath'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'detect_project',
+            description: 'Scan an existing folder to detect if it is a known project (already registered in Onicode) or import it as a new project. Use this INSTEAD of init_project when the user wants to work on an existing codebase, git repo, or folder they did not create through Onicode. Returns project info, detected tech stack, git status, and file listing. Automatically registers unregistered folders as projects.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    folder_path: { type: 'string', description: 'Path to the existing folder to scan (e.g. "~/Projects/my-app" or "/Users/me/code/repo")' },
+                },
+                required: ['folder_path'],
             },
         },
     },
@@ -1723,7 +1741,19 @@ async function executeTool(name, args) {
     try {
         const toolResult = await (async () => { switch (name) {
             case 'read_file': {
-                const { file_path, start_line, end_line } = args;
+                let { file_path, start_line, end_line } = args;
+                // Auto-correct hallucinated paths: if file doesn't exist but project is active, try remapping
+                if (!fs.existsSync(file_path) && _currentProjectPath) {
+                    const basename = path.basename(file_path);
+                    const relative = file_path.replace(/^.*?OniProjects\/[^/]+\//, '');
+                    const corrected = path.join(_currentProjectPath, relative);
+                    if (fs.existsSync(corrected)) {
+                        logger.warn('file-ops', `Auto-corrected path: ${file_path} → ${corrected}`);
+                        file_path = corrected;
+                    } else {
+                        return { error: `File not found: ${file_path}`, hint: _currentProjectPath ? `Active project is at: ${_currentProjectPath}` : undefined };
+                    }
+                }
                 if (!fs.existsSync(file_path)) {
                     return { error: `File not found: ${file_path}` };
                 }
@@ -1750,9 +1780,18 @@ async function executeTool(name, args) {
             }
 
             case 'edit_file': {
-                const { file_path, old_string, new_string, description } = args;
+                let { file_path, old_string, new_string, description } = args;
+                // Auto-correct hallucinated paths
+                if (!fs.existsSync(file_path) && _currentProjectPath) {
+                    const relative = file_path.replace(/^.*?OniProjects\/[^/]+\//, '');
+                    const corrected = path.join(_currentProjectPath, relative);
+                    if (fs.existsSync(corrected)) {
+                        logger.warn('file-ops', `Auto-corrected path: ${file_path} → ${corrected}`);
+                        file_path = corrected;
+                    }
+                }
                 if (!fs.existsSync(file_path)) {
-                    return { error: `File not found: ${file_path}` };
+                    return { error: `File not found: ${file_path}`, hint: _currentProjectPath ? `Active project is at: ${_currentProjectPath}` : undefined };
                 }
 
                 // Auto-backup before edit
@@ -2398,9 +2437,18 @@ async function executeTool(name, args) {
             }
 
             case 'multi_edit': {
-                const { file_path, edits, description, dry_run } = args;
+                let { file_path, edits, description, dry_run } = args;
+                // Auto-correct hallucinated paths
+                if (!fs.existsSync(file_path) && _currentProjectPath) {
+                    const relative = file_path.replace(/^.*?OniProjects\/[^/]+\//, '');
+                    const corrected = path.join(_currentProjectPath, relative);
+                    if (fs.existsSync(corrected)) {
+                        logger.warn('file-ops', `Auto-corrected path: ${file_path} → ${corrected}`);
+                        file_path = corrected;
+                    }
+                }
                 if (!fs.existsSync(file_path)) {
-                    return { error: `File not found: ${file_path}` };
+                    return { error: `File not found: ${file_path}`, hint: _currentProjectPath ? `Active project is at: ${_currentProjectPath}` : undefined };
                 }
 
                 // Auto-backup before edit (skip for dry run)
@@ -2492,8 +2540,137 @@ async function executeTool(name, args) {
                 };
             }
 
+            case 'detect_project': {
+                const folderPath = args.folder_path;
+                let expandedPath = folderPath.replace(/^~/, os.homedir());
+                expandedPath = path.resolve(expandedPath);
+
+                if (!fs.existsSync(expandedPath) || !fs.statSync(expandedPath).isDirectory()) {
+                    return { error: `Directory not found: ${expandedPath}`, suggestion: 'Use init_project to create a new project instead.' };
+                }
+
+                // Delegate to project-scan IPC (already handles detection, registration, tech detection)
+                const scanResult = await new Promise((resolve) => {
+                    const { loadProjects, saveProjects } = require('./projects');
+                    const projectName = path.basename(expandedPath);
+
+                    const result = { name: projectName, path: expandedPath };
+
+                    // Detect git
+                    result.hasGit = fs.existsSync(path.join(expandedPath, '.git'));
+                    if (result.hasGit) {
+                        try {
+                            result.gitBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+                                cwd: expandedPath, timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
+                            }).toString().trim();
+                        } catch { result.gitBranch = 'unknown'; }
+                    }
+
+                    // Detect onidocs
+                    result.hasOnidocs = fs.existsSync(path.join(expandedPath, 'onidocs')) ||
+                                        fs.existsSync(path.join(expandedPath, '.onidocs'));
+
+                    // Detect tech stack
+                    const files = fs.readdirSync(expandedPath);
+                    const techSignals = [];
+                    if (files.includes('package.json')) techSignals.push('Node.js');
+                    if (files.includes('tsconfig.json')) techSignals.push('TypeScript');
+                    if (files.includes('next.config.js') || files.includes('next.config.mjs') || files.includes('next.config.ts')) techSignals.push('Next.js');
+                    if (files.includes('vite.config.ts') || files.includes('vite.config.js')) techSignals.push('Vite');
+                    if (files.includes('Cargo.toml')) techSignals.push('Rust');
+                    if (files.includes('go.mod')) techSignals.push('Go');
+                    if (files.includes('requirements.txt') || files.includes('pyproject.toml')) techSignals.push('Python');
+                    if (files.includes('Gemfile')) techSignals.push('Ruby');
+                    if (files.includes('docker-compose.yml') || files.includes('Dockerfile')) techSignals.push('Docker');
+                    result.detectedTech = techSignals;
+                    result.topLevelFiles = files.filter(f => !f.startsWith('.') && f !== 'node_modules').slice(0, 25);
+
+                    // Check if already registered
+                    const projects = loadProjects();
+                    const existing = projects.find(p => p.path === expandedPath);
+                    if (existing) {
+                        result.alreadyRegistered = true;
+                        result.project = existing;
+                    } else {
+                        // Auto-register
+                        const project = {
+                            id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                            name: projectName,
+                            path: expandedPath,
+                            description: `Imported project (${techSignals.join(', ') || 'unknown stack'})`,
+                            techStack: techSignals.join(', '),
+                            createdAt: Date.now(),
+                            updatedAt: Date.now(),
+                        };
+                        projects.unshift(project);
+                        saveProjects(projects);
+                        result.project = project;
+                        result.alreadyRegistered = false;
+                        logger.info('detect_project', `Auto-registered project "${projectName}" at ${expandedPath}`);
+                    }
+
+                    resolve(result);
+                });
+
+                // Activate this project in the session
+                _currentProjectId = scanResult.project.id;
+                _currentProjectPath = expandedPath;
+
+                // Fire activation event
+                if (_mainWindow?.webContents) {
+                    _mainWindow.webContents.executeJavaScript(`
+                        window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                            detail: {
+                                id: ${JSON.stringify(scanResult.project.id)},
+                                name: ${JSON.stringify(scanResult.project.name)},
+                                path: ${JSON.stringify(expandedPath)},
+                                branch: ${JSON.stringify(scanResult.gitBranch || 'main')}
+                            }
+                        }));
+                    `);
+                }
+
+                // Read AGENTS.md or README for context if available
+                let projectContext = null;
+                const agentsPath = path.join(expandedPath, 'AGENTS.md');
+                const readmePath = path.join(expandedPath, 'README.md');
+                if (fs.existsSync(agentsPath)) {
+                    projectContext = { file: 'AGENTS.md', content: fs.readFileSync(agentsPath, 'utf-8').slice(0, 3000) };
+                } else if (fs.existsSync(readmePath)) {
+                    projectContext = { file: 'README.md', content: fs.readFileSync(readmePath, 'utf-8').slice(0, 3000) };
+                }
+
+                return {
+                    success: true,
+                    project_name: scanResult.name,
+                    project_path: expandedPath,
+                    already_registered: scanResult.alreadyRegistered,
+                    has_git: scanResult.hasGit,
+                    git_branch: scanResult.gitBranch,
+                    has_onidocs: scanResult.hasOnidocs,
+                    detected_tech: scanResult.detectedTech,
+                    top_level_files: scanResult.topLevelFiles,
+                    project_context: projectContext,
+                    INSTRUCTIONS: 'This project is now active. You can read files, edit files, and run commands in this directory. Use index_project to get a deeper codebase map if needed.',
+                };
+            }
+
             case 'init_project': {
                 const { name: projName, projectPath, description: projDesc, techStack } = args;
+
+                // GUARD: If a project is already active in this session, don't create another one
+                if (_currentProjectPath && fs.existsSync(_currentProjectPath)) {
+                    logger.warn('init_project', `Blocked — project already active at ${_currentProjectPath}`);
+                    return {
+                        success: true,
+                        project_path: _currentProjectPath,
+                        project_name: path.basename(_currentProjectPath),
+                        already_registered: true,
+                        message: `A project is already active at ${_currentProjectPath}. Use this project instead.`,
+                        NEXT: 'Do NOT call init_project again. Continue building in the active project.',
+                    };
+                }
+
                 // Expand ~ to home directory — use ~/OniProjects/ by default (avoids macOS TCC permission issues with ~/Documents/)
                 let expandedPath = projectPath.replace(/^~/, os.homedir());
                 // If the path uses ~/Documents/OniProjects, redirect to ~/OniProjects to avoid macOS sandbox issues
@@ -2658,13 +2835,13 @@ async function executeTool(name, args) {
                     project_name: projName,
                     project_path: expandedPath,
                     already_registered: result.alreadyRegistered || false,
-                    onidocs_created: ['architecture.md', 'project.md', 'changelog.md', 'README.md'],
+                    onidocs_created: result.alreadyRegistered ? [] : ['architecture.md', 'project.md', 'changelog.md', 'README.md'],
                     message: result.alreadyRegistered
-                        ? `Project "${projName}" is already registered. Task list cleared for fresh start.`
-                        : `Project "${projName}" registered in Onicode. Template onidocs/ created.`,
-                    IMPORTANT_NEXT_STEPS: result.alreadyRegistered
-                        ? `Project already exists at ${expandedPath}. Continue building — call task_add to plan, then create_file to build.`
-                        : `STOP — DO NOT call task_add yet. This is a NEW project. You MUST first ask the user 3-5 discovery questions about their preferences (tech stack choices, features, design style, auth needs, etc.). Format as numbered questions with options in parentheses so the UI renders them as buttons. Example: "1. What framework? (React, Vue, Svelte)". Only after the user answers should you call task_add and start building. The project directory is: ${expandedPath}`,
+                        ? `Project "${projName}" already registered — activated.`
+                        : `Project "${projName}" registered. Directory: ${expandedPath}`,
+                    NEXT: result.alreadyRegistered
+                        ? 'Project exists. Proceed with the user\'s request — call task_add or create_file.'
+                        : 'New project created. The system will guide you on whether to ask questions or start building based on the user\'s intent.',
                 };
             }
 
@@ -2704,9 +2881,17 @@ async function executeTool(name, args) {
 
             case 'browser_navigate': {
                 const browserMod = require('./browser');
-                const result = await browserMod.navigate(args.url, {
+                let result = await browserMod.navigate(args.url, {
                     waitUntil: args.wait_until || 'networkidle2',
                 });
+                // Auto-retry once on CONNECTION_REFUSED (dev server may still be starting)
+                if (result.error && result.error.includes('ERR_CONNECTION_REFUSED')) {
+                    logger.info('browser', `Connection refused on ${args.url} — waiting 3s and retrying...`);
+                    await new Promise(r => setTimeout(r, 3000));
+                    result = await browserMod.navigate(args.url, {
+                        waitUntil: args.wait_until || 'networkidle2',
+                    });
+                }
                 logger.tool('browser', `navigate → ${args.url}`, result);
                 return result;
             }
@@ -3163,7 +3348,7 @@ async function executeTool(name, args) {
                     });
                     let ahead = 0, behind = 0;
                     try {
-                        const ab = execSync('git rev-list --left-right --count HEAD...@{upstream}', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                        const ab = execSync('git rev-list --left-right --count HEAD...@{upstream}', { cwd, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
                         const parts = ab.split('\t');
                         ahead = parseInt(parts[0]) || 0;
                         behind = parseInt(parts[1]) || 0;

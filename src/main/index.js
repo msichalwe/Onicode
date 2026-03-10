@@ -462,8 +462,10 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
     // Fallback 1: explicit projectPath from renderer (covers race between init_project and project activation)
     if (!projectPath && providerConfig.projectPath) {
         projectPath = providerConfig.projectPath;
-        logger.info('session', `Using explicit projectPath from renderer: ${projectPath}`);
     }
+
+    // Debug: log how project path was resolved
+    logger.info('session', `Project path resolution: systemPrompt=${systemMsg?.content?.includes('Active Project') ? 'YES' : 'NO'}, providerConfig.projectPath=${providerConfig.projectPath || 'null'}, resolved=${projectPath || 'null'}`);
 
     // Fallback 2: project path persisted from previous streaming session (aiTools module state)
     // Only use this if the conversation looks like it's continuing project work (has >2 messages, meaning it's a follow-up)
@@ -723,6 +725,31 @@ function looksLikeDiscoveryQuestions(text) {
 }
 
 /**
+ * Check if the user's message indicates they want to skip questions and just build.
+ * e.g. "Use recommended defaults", "Just build it", "Let AI Decide", answering with "→"
+ */
+function userWantsToSkipQuestions(messages) {
+    // Check the last 2 user messages for skip signals
+    const userMsgs = messages.filter(m => m.role === 'user').slice(-2);
+    for (const msg of userMsgs) {
+        const text = (msg.content || '').toLowerCase();
+        if (
+            text.includes('default') ||
+            text.includes('just build') ||
+            text.includes('let ai decide') ||
+            text.includes('recommended') ||
+            text.includes('skip question') ||
+            text.includes('go ahead') ||
+            text.includes('start building') ||
+            /→\s*\*\*/.test(msg.content || '') // QuestionDialog "→ **answer**" format
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Generate a completion summary when the AI finishes an agentic session with tools.
  * @param {Set} toolsUsed — tools called in this request
  * @param {Object} [startSnapshot] — task snapshot at request start { done, total, pending }
@@ -854,7 +881,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
                 // If the AI is asking discovery questions after init_project, let the response
                 // end naturally so the user can answer. Don't force auto-continue.
-                if (justInitProject && looksLikeDiscoveryQuestions(aiTextContent)) {
+                // BUT: if user already said "use defaults" / "just build it", don't pause.
+                if (justInitProject && looksLikeDiscoveryQuestions(aiTextContent) && !userWantsToSkipQuestions(inputItems)) {
                     logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
                     sendCompletionSummary(toolsUsed, _taskStartSnapshot);
                     mainWindow?.webContents.send('ai-stream-done', null);
@@ -869,8 +897,10 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     const nextTask = summary.nextTask;
                     const roundsLeft = MAX_ROUNDS - round;
                     let continuePrompt;
-                    if (justInitProject) {
+                    if (justInitProject && !userWantsToSkipQuestions(inputItems)) {
                         continuePrompt = `MANDATORY: You just initialized the project. Before adding tasks, ask the user 3-5 quick setup questions to clarify their preferences (tech stack, features, design style, etc.). Format as numbered questions with options in parentheses so the UI can render them as interactive buttons. Example:\n1. What tech stack? (React + Vite, Next.js, Vue)\n2. Auth needed? (yes, no, later)\n\nDo NOT add tasks or create files yet — ask questions first.\n\n${projectContext}`;
+                    } else if (justInitProject) {
+                        continuePrompt = `The user chose recommended defaults — skip all questions. Call task_add to plan 4-6 tasks, then immediately call create_file to start building. Do NOT ask any questions. Start NOW.\n\n${projectContext}`;
                     } else if (!hasBuiltAnything) {
                         continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                     } else {
@@ -985,13 +1015,18 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     startSession(null, initProjectPath);
                     logger.info('agent-loop', `Updated session projectPath after init_project: ${initProjectPath}`);
                 }
-                if (isNewProject) {
+                if (isNewProject && !userWantsToSkipQuestions(inputItems)) {
                     logger.info('agent-loop', 'init_project created NEW project — forcing text-only next round for discovery questions');
                     _forceNoToolsNextRound = true;
-                    // Inject instruction into input (as system-level guidance)
                     inputItems.push({
                         role: 'user',
                         content: 'CRITICAL: You just created a NEW project. Before calling task_add or create_file, you MUST respond with 3-5 numbered discovery questions asking the user about their preferences. Do NOT make any tool calls — respond with text only. Format: "1. Question? (Option A, Option B, Option C)"',
+                    });
+                } else if (isNewProject) {
+                    logger.info('agent-loop', 'init_project created NEW project — user already answered questions, skipping to build');
+                    inputItems.push({
+                        role: 'user',
+                        content: 'The user chose to use recommended defaults. Skip questions entirely. Call task_add to plan tasks, then immediately start building with create_file. Do NOT ask any questions.',
                     });
                 }
             }
@@ -1532,7 +1567,8 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
 
             // If the AI is asking discovery questions after init_project, let the response
             // end naturally so the user can answer. Don't force auto-continue.
-            if (justInitProject && looksLikeDiscoveryQuestions(result.textContent || '')) {
+            // BUT: if user already said "use defaults" / "just build it", don't pause.
+            if (justInitProject && looksLikeDiscoveryQuestions(result.textContent || '') && !userWantsToSkipQuestions(conversationMessages)) {
                 logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
                 currentAIRequest = null;
                 sendCompletionSummary(toolsUsed, _taskStartSnapshot);
@@ -1558,8 +1594,10 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 const nextTask = summary.nextTask;
                 const roundsLeft = MAX_TOOL_ROUNDS - round;
                 let continuePrompt;
-                if (justInitProject) {
+                if (justInitProject && !userWantsToSkipQuestions(conversationMessages)) {
                     continuePrompt = `MANDATORY: You just initialized the project. Before adding tasks, ask the user 3-5 quick setup questions to clarify their preferences (tech stack, features, design style, etc.). Format as numbered questions with options in parentheses so the UI can render them as interactive buttons. Example:\n1. What tech stack? (React + Vite, Next.js, Vue)\n2. Auth needed? (yes, no, later)\n\nDo NOT add tasks or create files yet — ask questions first.\n\n${projectContext}`;
+                } else if (justInitProject) {
+                    continuePrompt = `The user chose recommended defaults — skip all questions. Call task_add to plan 4-6 tasks, then immediately call create_file to start building. Do NOT ask any questions. Start NOW.\n\n${projectContext}`;
                 } else if (!hasBuiltAnything) {
                     continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                 } else {
@@ -1693,12 +1731,18 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 logger.info('agent-loop', `Updated session projectPath after init_project: ${initProjectPath}`);
             }
 
-            if (isNewProject) {
+            if (isNewProject && !userWantsToSkipQuestions(conversationMessages)) {
                 logger.info('agent-loop', 'init_project created NEW project — forcing text-only next round for discovery questions');
                 _forceNoToolsNextRound = true;
                 conversationMessages.push({
                     role: 'user',
                     content: 'CRITICAL: You just created a NEW project. Before calling task_add or create_file, you MUST respond with 3-5 numbered discovery questions asking the user about their preferences. Do NOT make any tool calls — respond with text only. Format: "1. Question? (Option A, Option B, Option C)"',
+                });
+            } else if (isNewProject) {
+                logger.info('agent-loop', 'init_project created NEW project — user already answered questions, skipping to build');
+                conversationMessages.push({
+                    role: 'user',
+                    content: 'The user chose to use recommended defaults. Skip questions entirely. Call task_add to plan tasks, then immediately start building with create_file. Do NOT ask any questions.',
                 });
             }
         }
