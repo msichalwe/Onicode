@@ -430,7 +430,8 @@ const fileContext = new FileContextTracker();
 //  Background Process Manager (dev servers, watchers)
 // ══════════════════════════════════════════
 
-const _backgroundProcesses = new Map(); // sessionId -> { child, command, port, cwd }
+const _backgroundProcesses = new Map(); // sessionId -> { child, command, port, cwd, outputBuffer, startedAt }
+const MAX_OUTPUT_BUFFER = 200; // Keep last 200 lines per process
 
 function killBackgroundProcesses() {
     for (const [id, entry] of _backgroundProcesses) {
@@ -448,10 +449,66 @@ function killBackgroundProcesses() {
 
 function getBackgroundProcesses() {
     const result = [];
+    const now = Date.now();
     for (const [id, entry] of _backgroundProcesses) {
-        result.push({ id, command: entry.command, port: entry.port, cwd: entry.cwd, pid: entry.child?.pid });
+        const running = entry.child && !entry.child.killed && !entry.child.exitCode;
+        result.push({
+            id,
+            command: entry.command,
+            port: entry.port,
+            cwd: entry.cwd,
+            pid: entry.child?.pid,
+            running: !!running,
+            uptime: entry.startedAt ? Math.round((now - entry.startedAt) / 1000) : 0,
+            url: entry.url || null,
+            lastLine: entry.outputBuffer?.length > 0 ? entry.outputBuffer[entry.outputBuffer.length - 1] : null,
+        });
     }
     return result;
+}
+
+/**
+ * Get recent output from a background process.
+ * @param {string} sessionId - The terminal session ID
+ * @param {number} lines - Number of lines to return (default 20)
+ * @returns {{ found, running, pid, uptime, output, exitCode, port, url }}
+ */
+function getTerminalOutput(sessionId, lines = 20) {
+    // Check background processes first
+    const entry = _backgroundProcesses.get(sessionId);
+    if (entry) {
+        const running = entry.child && !entry.child.killed;
+        const buf = entry.outputBuffer || [];
+        return {
+            found: true,
+            session_id: sessionId,
+            command: entry.command,
+            running: !!running,
+            pid: entry.child?.pid,
+            port: entry.port,
+            url: entry.url || null,
+            uptime: entry.startedAt ? Math.round((Date.now() - entry.startedAt) / 1000) : 0,
+            output: buf.slice(-lines).join('\n'),
+            line_count: buf.length,
+            exitCode: entry.child?.exitCode ?? null,
+        };
+    }
+    // Check terminal sessions (completed commands)
+    const session = terminalSessions.find(s => s.id === sessionId);
+    if (session) {
+        return {
+            found: true,
+            session_id: sessionId,
+            command: session.command,
+            running: session.status === 'running',
+            status: session.status,
+            exitCode: session.exitCode ?? null,
+            duration: session.duration,
+            port: session.port,
+            url: session.url || null,
+        };
+    }
+    return { found: false, error: `No terminal session found with ID: ${sessionId}` };
 }
 
 // ══════════════════════════════════════════
@@ -962,6 +1019,32 @@ const TOOL_DEFINITIONS = [
                     timeout: { type: 'integer', description: 'Timeout in milliseconds (default 30000)' },
                 },
                 required: ['command'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'check_terminal',
+            description: 'Check the status and recent output of a running terminal session (dev server, install, build). Use this to monitor background processes, verify dev servers are still running, check install progress, or read error output.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    session_id: { type: 'string', description: 'The terminal session ID (returned by run_command)' },
+                    lines: { type: 'integer', description: 'Number of recent output lines to return (default 20, max 100)' },
+                },
+                required: ['session_id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'list_terminals',
+            description: 'List all active terminal sessions — running dev servers, background processes, and recent commands. Shows PID, port, uptime, and status for each.',
+            parameters: {
+                type: 'object',
+                properties: {},
             },
         },
     },
@@ -2101,7 +2184,7 @@ async function executeTool(name, args) {
 
                         // Store the child PID so we can clean it up later
                         sessionEntry.pid = child.pid;
-                        _backgroundProcesses.set(sessionEntry.id, { child, command, port: expectedPort, cwd: execCwd });
+                        _backgroundProcesses.set(sessionEntry.id, { child, command, port: expectedPort, cwd: execCwd, outputBuffer: [], startedAt: Date.now(), url: null });
 
                         const readyTimeout = setTimeout(() => {
                             if (!resolved) {
@@ -2111,6 +2194,7 @@ async function executeTool(name, args) {
                                 resolve({
                                     command,
                                     cwd: execCwd,
+                                    session_id: sessionEntry.id,
                                     exitCode: null,
                                     success: true,
                                     background: true,
@@ -2149,11 +2233,15 @@ async function executeTool(name, args) {
 
                                 sessionEntry.status = 'running';
                                 sessionEntry.url = actualUrl;
+                                // Store URL on background entry for check_terminal
+                                const bgEntryReady = _backgroundProcesses.get(sessionEntry.id);
+                                if (bgEntryReady) bgEntryReady.url = actualUrl;
                                 sendToRenderer('ai-terminal-session', sessionEntry);
 
                                 resolve({
                                     command,
                                     cwd: execCwd,
+                                    session_id: sessionEntry.id,
                                     exitCode: null,
                                     success: true,
                                     background: true,
@@ -2162,7 +2250,7 @@ async function executeTool(name, args) {
                                     url: actualUrl,
                                     stdout: stdout.slice(0, 4000),
                                     stderr: stderr.slice(0, 2000),
-                                    message: `Dev server is ready at ${actualUrl || 'unknown URL'}. IMPORTANT: Use this exact URL for browser_navigate — do NOT use a different port.`,
+                                    message: `Dev server is ready at ${actualUrl || 'unknown URL'}. Use check_terminal("${sessionEntry.id}") to monitor.`,
                                     hint: actualUrl ? `browser_navigate("${actualUrl}")` : undefined,
                                 });
                             }
@@ -2193,9 +2281,22 @@ async function executeTool(name, args) {
                             }
                         };
 
+                        // Rolling output buffer for background process monitoring
+                        const bgEntry = _backgroundProcesses.get(sessionEntry.id);
+                        const appendToBuffer = (text) => {
+                            if (!bgEntry) return;
+                            const lines = text.split('\n').filter(l => l.trim());
+                            bgEntry.outputBuffer.push(...lines);
+                            // Keep only last MAX_OUTPUT_BUFFER lines
+                            if (bgEntry.outputBuffer.length > MAX_OUTPUT_BUFFER) {
+                                bgEntry.outputBuffer.splice(0, bgEntry.outputBuffer.length - MAX_OUTPUT_BUFFER);
+                            }
+                        };
+
                         child.stdout.on('data', (chunk) => {
                             const text = chunk.toString();
                             stdout += text;
+                            appendToBuffer(text);
                             sendToRenderer('ai-terminal-output', {
                                 sessionId: sessionEntry.id,
                                 type: 'stdout',
@@ -2207,6 +2308,7 @@ async function executeTool(name, args) {
                         child.stderr.on('data', (chunk) => {
                             const text = chunk.toString();
                             stderr += text;
+                            appendToBuffer(text);
                             sendToRenderer('ai-terminal-output', {
                                 sessionId: sessionEntry.id,
                                 type: 'stderr',
@@ -2233,7 +2335,8 @@ async function executeTool(name, args) {
                             if (!resolved) {
                                 resolved = true;
                                 resolve({
-                                    command, cwd: execCwd, exitCode: code ?? 1,
+                                    command, cwd: execCwd, session_id: sessionEntry.id,
+                                    exitCode: code ?? 1,
                                     stdout: stdout.slice(0, 8000), stderr: stderr.slice(0, 4000),
                                     success: code === 0,
                                 });
@@ -2373,6 +2476,34 @@ async function executeTool(name, args) {
                         });
                     });
                 });
+            }
+
+            case 'check_terminal': {
+                const { session_id, lines } = args;
+                const lineCount = Math.min(lines || 20, 100);
+                return getTerminalOutput(session_id, lineCount);
+            }
+
+            case 'list_terminals': {
+                const bg = getBackgroundProcesses();
+                const recent = terminalSessions
+                    .filter(s => s.status === 'done' || s.status === 'error')
+                    .slice(-5)
+                    .map(s => ({
+                        id: s.id,
+                        command: s.command,
+                        status: s.status,
+                        exitCode: s.exitCode,
+                        duration: s.duration ? `${(s.duration / 1000).toFixed(1)}s` : null,
+                    }));
+                return {
+                    active: bg,
+                    active_count: bg.length,
+                    recent_completed: recent,
+                    hint: bg.length > 0
+                        ? `Use check_terminal("${bg[0].id}") to see recent output from a running process.`
+                        : 'No active background processes.',
+                };
             }
 
             case 'get_context_summary': {

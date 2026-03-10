@@ -1418,7 +1418,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             const icons: Record<string, string> = {
                 read_file: 'Read', edit_file: 'Edit', multi_edit: 'Edit', create_file: 'Created',
                 delete_file: 'Deleted', list_directory: 'Listed', search_files: 'Searched',
-                run_command: 'Ran', init_project: 'Init', task_add: 'Task', task_update: 'Task',
+                run_command: 'Ran', check_terminal: 'Terminal', list_terminals: 'Terminals',
+                init_project: 'Init', task_add: 'Task', task_update: 'Task',
                 task_list: 'Tasks', milestone_create: 'Milestone', browser_navigate: 'Browser', browser_screenshot: 'Screenshot',
                 browser_evaluate: 'Browser JS', browser_click: 'Clicked', browser_type: 'Typed',
                 browser_console_logs: 'Console', browser_close: 'Browser',

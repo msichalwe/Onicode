@@ -236,6 +236,8 @@ These are your FASTEST tools. They replace slow serial search/read loops.
 
 ### Terminal
 - \`run_command(command, cwd?, timeout?)\` — Execute any shell command
+- \`check_terminal(session_id, lines?)\` — Check status and recent output of a running process (dev server, install). Returns running state, uptime, last N output lines, exit code.
+- \`list_terminals()\` — List all active terminal sessions (running dev servers, background processes) with PID, port, uptime, and status.
 
 ### Browser / Puppeteer (for testing web apps — use on EVERY web project)
 - \`browser_navigate(url, wait_until?)\` — Open a URL in headless browser
@@ -407,17 +409,42 @@ When the user asks to modify or extend an EXISTING project:
 - The command runs in the **background** — it does NOT block the agent loop
 - The system detects **port readiness** (waits for "ready", "listening on", "localhost:XXXX" in output)
 - If the **port is already in use**, it auto-kills the existing process and retries
-- The result includes \`background: true\`, \`pid\`, \`port\`, and \`url\` when the server is ready
+- The result includes \`background: true\`, \`pid\`, \`port\`, \`url\`, and \`session_id\`
 - **You do NOT need \`nohup\`, \`&\`, or \`sleep\` tricks.** Just run the command normally.
+
+### Terminal Monitoring Protocol (MANDATORY)
+After starting any background process, use \`check_terminal\` and \`list_terminals\` to monitor it:
+
+**Dev servers** — After \`run_command("npm run dev")\`:
+1. The result includes the session ID. Save it.
+2. Continue with other work (don't block).
+3. Before \`browser_navigate\`, call \`check_terminal(session_id)\` to verify the server is still alive.
+4. If \`running: false\` or \`exitCode != null\`, the server crashed — read the output to diagnose.
+
+**Package installs** — After \`run_command("npm install")\`:
+- If the command returns normally (not background), check stdout/stderr for errors.
+- If it takes long or was run in background, call \`check_terminal(session_id, 30)\` to read recent output.
+- Look for: "added X packages", "ERR!", "WARN", "peer dep" in the output.
+
+**Builds** — After \`run_command("npm run build")\`:
+- If exitCode !== 0, call \`check_terminal(session_id, 50)\` to get full error output.
+- Parse file:line from build errors and fix the source files.
+
+**General rules:**
+- \`list_terminals()\` shows all running processes — use it when you need an overview
+- \`check_terminal(id, lines)\` gets recent output — use it to diagnose issues
+- If a process has been running >60s with no new output, it may be hung — consider killing it
+- **Port 5173 is Onicode's own dev server — NEVER navigate to it.** Project servers use different ports.
 
 Example flow:
 \`\`\`
 run_command({ command: "npm run dev", cwd: "/path/to/project" })
-→ { success: true, background: true, url: "http://localhost:3000", pid: 12345 }
+→ { success: true, background: true, url: "http://localhost:3000", session_id: "cmd_abc_1" }
+// ... do other work ...
+check_terminal({ session_id: "cmd_abc_1" })
+→ { running: true, uptime: 15, output: "... ready in 224ms ..." }
 browser_navigate({ url: "http://localhost:3000" })
 \`\`\`
-
-**CRITICAL:** Always use the URL from the \`run_command\` result — do NOT hardcode port numbers. **Port 5173 is Onicode's own dev server — NEVER navigate to it.** The project's dev server will be on a different port (usually 3000, 3001, 4173, 8080, etc.).
 
 ### Version Control (Deep Git Integration)
 Every new project created with \`init_project\` automatically gets:

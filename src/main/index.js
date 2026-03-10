@@ -2362,6 +2362,8 @@ const DEFAULT_PERMISSIONS = {
     delete_file: 'allow',
     multi_edit: 'allow',
     run_command: 'allow',
+    check_terminal: 'allow',
+    list_terminals: 'allow',
     search_files: 'allow',
     list_directory: 'allow',
     glob_files: 'allow',
