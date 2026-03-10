@@ -1939,7 +1939,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'find_implementation', 'impact_analysis', 'prepare_edit_context', 'smart_read', 'batch_search']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },
@@ -1956,6 +1956,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             find_references: { single: 'Refs', plural: 'Refs' },
             list_symbols: { single: 'Symbols', plural: 'Symbols' },
             semantic_search: { single: 'Search', plural: 'Searched' },
+            find_implementation: { single: 'Found', plural: 'Found' },
+            smart_read: { single: 'Smart Read', plural: 'Smart Read' },
+            batch_search: { single: 'Batch Search', plural: 'Batch Search' },
         };
         // Merge edit_file and multi_edit into same group key
         const groupKey = (name: string) => name === 'multi_edit' ? 'edit_file' : name;
