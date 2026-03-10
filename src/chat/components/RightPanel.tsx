@@ -12,7 +12,7 @@ function stripAnsi(str: string): string {
 //  Widget Types (kernel layer)
 // ══════════════════════════════════════════
 
-export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks' | 'git' | 'browser';
+export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks' | 'git' | 'attachments';
 
 export interface PanelState {
     widget: WidgetType | null;
@@ -32,7 +32,7 @@ const WIDGETS: WidgetDef[] = [
     { id: 'agents', label: 'Agents', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg> },
     { id: 'tasks', label: 'Tasks', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg> },
     { id: 'git', label: 'Git', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg> },
-    { id: 'browser', label: 'Browser', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" /></svg> },
+    { id: 'attachments', label: 'Attachments', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg> },
 ];
 
 // ══════════════════════════════════════════
@@ -57,6 +57,8 @@ function TerminalWidget() {
     const [cmdHistory, setCmdHistory] = useState<string[]>([]);
     const [historyIdx, setHistoryIdx] = useState(-1);
     const [aiSessions, setAiSessions] = useState<TerminalSession[]>([]);
+    const [aiSessionOutput, setAiSessionOutput] = useState<Record<string, string[]>>({});
+    const [activeAiSession, setActiveAiSession] = useState<string | null>(null);
     const [showSessions, setShowSessions] = useState(true);
     const containerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -113,12 +115,22 @@ function TerminalWidget() {
             cleanupRef.current.push(removeSession);
         }
 
-        // Listen for real-time AI command output (streamed from spawn)
+        // Listen for real-time AI command output (routed by session ID)
         if (window.onicode?.onAITerminalOutput) {
-            const removeAIOutput = window.onicode.onAITerminalOutput((chunk) => {
+            const removeAIOutput = window.onicode.onAITerminalOutput((chunk: { sessionId?: string; data: string }) => {
                 if (!mounted) return;
                 const text = stripAnsi(chunk.data);
-                if (text.trim()) {
+                if (!text.trim()) return;
+                if (chunk.sessionId) {
+                    // Route output to the specific session
+                    setAiSessionOutput((prev) => ({
+                        ...prev,
+                        [chunk.sessionId!]: [...(prev[chunk.sessionId!] || []), text],
+                    }));
+                    // Auto-select the latest active session
+                    setActiveAiSession(chunk.sessionId);
+                } else {
+                    // Fallback: append to main terminal output
                     setOutput((prev) => [...prev, text]);
                 }
             });
@@ -175,59 +187,88 @@ function TerminalWidget() {
         return `${(ms / 1000).toFixed(1)}s`;
     };
 
+    const runningSessions = aiSessions.filter(s => s.status === 'running');
+    const completedSessions = aiSessions.filter(s => s.status !== 'running');
+
+    // Determine what to show in the main output area
+    const activeOutput = activeAiSession && aiSessionOutput[activeAiSession]
+        ? aiSessionOutput[activeAiSession]
+        : output;
+    const activeLabel = activeAiSession
+        ? aiSessions.find(s => s.id === activeAiSession)?.command
+        : null;
+
     return (
         <div className="widget-terminal-container">
+            {/* Compact status bar: running processes + session count */}
             {aiSessions.length > 0 && (
-                <div className="terminal-sessions">
-                    <div className="terminal-sessions-header">
-                        <button
-                            className="terminal-sessions-toggle"
-                            onClick={() => setShowSessions(!showSessions)}
-                            title="Toggle AI command history"
-                        >
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                {showSessions
-                                    ? <polyline points="6 9 12 15 18 9" />
-                                    : <polyline points="9 18 15 12 9 6" />
-                                }
-                            </svg>
-                            <span>AI Commands ({aiSessions.length})</span>
-                        </button>
-                        {aiSessions.some(s => s.status === 'running') && (
-                            <span className="terminal-sessions-running">
-                                <span className="tool-spinner" />
-                                Running
-                            </span>
-                        )}
-                    </div>
-                    {showSessions && (
-                        <div className="terminal-sessions-list">
-                            {aiSessions.slice(-20).reverse().map((s) => (
-                                <div key={s.id} className={`terminal-session-item terminal-session-${s.status}`}>
-                                    <span className={`terminal-session-status ${s.status}`}>
-                                        {s.status === 'running' ? <span className="tool-spinner" />
-                                            : s.status === 'done' ? '✓' : '✗'}
-                                    </span>
-                                    <code className="terminal-session-cmd">{s.command}</code>
-                                    {s.duration !== undefined && (
-                                        <span className="terminal-session-duration">{formatDuration(s.duration)}</span>
-                                    )}
-                                    {s.exitCode !== undefined && s.exitCode !== 0 && (
-                                        <span className="terminal-session-exit">exit {s.exitCode}</span>
-                                    )}
-                                </div>
+                <div className="terminal-statusbar">
+                    {runningSessions.length > 0 && (
+                        <div className="terminal-statusbar-running">
+                            <span className="tool-spinner" />
+                            <span>{runningSessions.length} running</span>
+                            {runningSessions.map(s => (
+                                <button
+                                    key={s.id}
+                                    className={`terminal-statusbar-proc${activeAiSession === s.id ? ' active' : ''}`}
+                                    onClick={() => setActiveAiSession(activeAiSession === s.id ? null : s.id)}
+                                    title={s.command}
+                                >
+                                    <code>{s.command.length > 20 ? s.command.slice(0, 20) + '…' : s.command}</code>
+                                </button>
                             ))}
                         </div>
                     )}
+                    <button
+                        className="terminal-statusbar-toggle"
+                        onClick={() => setShowSessions(!showSessions)}
+                    >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            {showSessions ? <polyline points="6 9 12 15 18 9" /> : <polyline points="9 18 15 12 9 6" />}
+                        </svg>
+                        <span>{completedSessions.length} completed</span>
+                    </button>
                 </div>
             )}
+
+            {/* Collapsible completed sessions list */}
+            {showSessions && completedSessions.length > 0 && (
+                <div className="terminal-sessions-list">
+                    {completedSessions.slice(-10).reverse().map((s) => (
+                        <div
+                            key={s.id}
+                            className={`terminal-session-item terminal-session-${s.status}${activeAiSession === s.id ? ' terminal-session-active' : ''}`}
+                            onClick={() => setActiveAiSession(activeAiSession === s.id ? null : s.id)}
+                        >
+                            <span className={`terminal-session-status ${s.status}`}>
+                                {s.status === 'done' ? '✓' : '✗'}
+                            </span>
+                            <code className="terminal-session-cmd">{s.command}</code>
+                            {s.duration !== undefined && (
+                                <span className="terminal-session-duration">{formatDuration(s.duration)}</span>
+                            )}
+                            {s.exitCode !== undefined && s.exitCode !== 0 && (
+                                <span className="terminal-session-exit">exit {s.exitCode}</span>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {/* Main output area — shows shell output OR selected AI session output */}
             <div className="widget-terminal" ref={containerRef} onClick={() => inputRef.current?.focus()}>
+                {activeLabel && (
+                    <div className="terminal-viewing-label">
+                        <code>{activeLabel}</code>
+                        <button onClick={() => setActiveAiSession(null)} title="Back to shell">×</button>
+                    </div>
+                )}
                 <div className="terminal-output">
-                    {output.map((line, i) => (
+                    {activeOutput.map((line, i) => (
                         <span key={i}>{line}</span>
                     ))}
                 </div>
-                {sessionId && (
+                {!activeAiSession && sessionId && (
                     <div className="terminal-input-line">
                         <span className="terminal-prompt">$ </span>
                         <input
@@ -1152,171 +1193,183 @@ function GitWidget() {
 }
 
 // ══════════════════════════════════════════
-//  Browser Widget (Puppeteer preview)
+//  Attachments Widget (project-scoped)
 // ══════════════════════════════════════════
 
-function BrowserWidget() {
-    const [url, setUrl] = useState('');
-    const [currentUrl, setCurrentUrl] = useState('');
-    const [pageTitle, setPageTitle] = useState('');
-    const [screenshotSrc, setScreenshotSrc] = useState<string | null>(null);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [launched, setLaunched] = useState(false);
+interface ProjectAttachment {
+    id: string;
+    name: string;
+    type: string;
+    size?: number;
+    mime_type?: string;
+    url?: string;
+    content?: string;
+    data_url?: string;
+    created_at: number;
+}
 
-    const handleNavigate = async () => {
-        if (!url.trim() || !isElectron) return;
-        setLoading(true);
-        setError(null);
-        try {
-            // Launch browser if not yet launched
-            if (!launched) {
-                await window.onicode!.browserLaunch({ headless: true });
-                setLaunched(true);
-            }
-            const nav = await window.onicode!.browserNavigate(url.trim());
-            if (nav.success) {
-                setCurrentUrl(nav.url || url.trim());
-                setPageTitle(nav.title || '');
-                // Take a screenshot for preview
-                const shot = await window.onicode!.browserScreenshot({ name: 'preview' });
-                if (shot.success && shot.path) {
-                    // Use file:// protocol to display the screenshot
-                    setScreenshotSrc(`file://${shot.path}?t=${Date.now()}`);
-                }
-            } else {
-                setError(nav.error || 'Navigation failed');
-            }
-        } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : 'Browser error');
-        } finally {
+function AttachmentsWidget() {
+    const [atts, setAtts] = useState<ProjectAttachment[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [filter, setFilter] = useState('');
+    const [selectedAtt, setSelectedAtt] = useState<ProjectAttachment | null>(null);
+
+    const loadAttachments = useCallback(async () => {
+        if (!isElectron || !window.onicode?.attachmentList) {
             setLoading(false);
+            return;
         }
-    };
-
-    const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            handleNavigate();
-        }
-    };
-
-    const handleRefreshScreenshot = async () => {
-        if (!isElectron || !launched) return;
         try {
-            const shot = await window.onicode!.browserScreenshot({ name: 'preview' });
-            if (shot.success && shot.path) {
-                setScreenshotSrc(`file://${shot.path}?t=${Date.now()}`);
+            const stored = localStorage.getItem('onicode-active-project');
+            if (!stored) { setAtts([]); setLoading(false); return; }
+            const project = JSON.parse(stored);
+            const result = await window.onicode.attachmentList(project.id);
+            if (result.success && result.attachments) {
+                setAtts(result.attachments);
             }
         } catch { /* ignore */ }
+        setLoading(false);
+    }, []);
+
+    useEffect(() => { loadAttachments(); }, [loadAttachments]);
+
+    const handleDelete = async (id: string) => {
+        if (!window.onicode?.attachmentDelete) return;
+        await window.onicode.attachmentDelete(id);
+        setAtts(prev => prev.filter(a => a.id !== id));
+        if (selectedAtt?.id === id) setSelectedAtt(null);
+    };
+
+    const filtered = filter
+        ? atts.filter(a => a.name.toLowerCase().includes(filter.toLowerCase()))
+        : atts;
+
+    const typeIcon = (type: string) => {
+        switch (type) {
+            case 'image': return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>;
+            case 'link': return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>;
+            case 'doc': return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>;
+            default: return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>;
+        }
     };
 
     return (
-        <div className="widget-browser" style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '8px', padding: '12px' }}>
-            {/* URL bar */}
-            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <div className="widget-attachments" style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '8px', padding: '12px' }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <input
                     type="text"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Enter URL..."
+                    value={filter}
+                    onChange={e => setFilter(e.target.value)}
+                    placeholder="Filter attachments..."
                     style={{
-                        flex: 1,
-                        padding: '6px 10px',
-                        borderRadius: '6px',
-                        border: '1px solid var(--border)',
-                        background: 'var(--bg-secondary)',
-                        color: 'var(--text-primary)',
-                        fontSize: '12px',
-                        fontFamily: 'JetBrains Mono, monospace',
-                        outline: 'none',
+                        flex: 1, padding: '5px 10px', borderRadius: '6px',
+                        border: '1px solid var(--border)', background: 'var(--bg-secondary)',
+                        color: 'var(--text-primary)', fontSize: '12px', outline: 'none',
                     }}
                 />
-                <button
-                    onClick={handleNavigate}
-                    disabled={loading || !url.trim()}
-                    style={{
-                        padding: '6px 12px',
-                        borderRadius: '6px',
-                        border: '1px solid var(--border)',
-                        background: 'var(--accent)',
-                        color: 'var(--bg-primary)',
-                        fontSize: '11px',
-                        fontWeight: 600,
-                        cursor: loading ? 'wait' : 'pointer',
-                        opacity: loading || !url.trim() ? 0.5 : 1,
-                    }}
-                >
-                    {loading ? 'Loading...' : 'Go'}
+                <button onClick={loadAttachments} title="Refresh" style={{
+                    padding: '5px 8px', borderRadius: '6px', border: '1px solid var(--border)',
+                    background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
+                    fontSize: '11px', cursor: 'pointer',
+                }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+                    </svg>
                 </button>
             </div>
 
-            {/* Page title */}
-            {pageTitle && (
-                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {pageTitle} — <span style={{ opacity: 0.6 }}>{currentUrl}</span>
-                </div>
-            )}
+            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                {atts.length} attachment{atts.length !== 1 ? 's' : ''} in project
+            </div>
 
-            {/* Error */}
-            {error && (
-                <div style={{ fontSize: '11px', color: 'var(--error, #e55)', padding: '4px 8px', background: 'var(--bg-tertiary)', borderRadius: '4px' }}>
-                    {error}
-                </div>
-            )}
-
-            {/* Preview area */}
-            <div style={{
-                flex: 1,
-                borderRadius: '8px',
-                border: '1px solid var(--border)',
-                background: 'var(--bg-secondary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                overflow: 'hidden',
-                position: 'relative',
-                minHeight: '200px',
-            }}>
-                {screenshotSrc ? (
-                    <>
-                        <img
-                            src={screenshotSrc}
-                            alt="Browser preview"
-                            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                        />
-                        <button
-                            onClick={handleRefreshScreenshot}
-                            title="Refresh screenshot"
-                            style={{
-                                position: 'absolute',
-                                top: '8px',
-                                right: '8px',
-                                padding: '4px 8px',
-                                borderRadius: '4px',
-                                border: '1px solid var(--border)',
-                                background: 'var(--bg-primary)',
-                                color: 'var(--text-secondary)',
-                                fontSize: '10px',
-                                cursor: 'pointer',
-                                opacity: 0.7,
-                            }}
-                        >
-                            Refresh
-                        </button>
-                    </>
-                ) : (
-                    <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px' }}>
-                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: '8px' }}>
-                            <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+            {/* List */}
+            <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                {loading ? (
+                    <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '12px' }}>Loading...</div>
+                ) : filtered.length === 0 ? (
+                    <div style={{ padding: '24px 16px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: '8px' }}>
+                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                         </svg>
-                        <div style={{ fontSize: '12px', fontWeight: 500 }}>Browser Preview</div>
+                        <div style={{ fontSize: '12px', fontWeight: 500 }}>No attachments</div>
                         <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.6 }}>
-                            Enter a URL above, or launch via <code style={{ fontSize: '10px' }}>/browser</code> or AI tool
+                            Attach files in chat to add them here. Use <code style={{ fontSize: '10px' }}>@</code> to reference.
                         </div>
                     </div>
-                )}
+                ) : filtered.map(att => (
+                    <div
+                        key={att.id}
+                        onClick={() => setSelectedAtt(att)}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '8px',
+                            padding: '6px 8px', borderRadius: '6px', cursor: 'pointer',
+                            background: selectedAtt?.id === att.id ? 'var(--bg-tertiary)' : 'transparent',
+                            transition: 'background 0.15s',
+                        }}
+                        onMouseEnter={e => { if (selectedAtt?.id !== att.id) (e.currentTarget as HTMLElement).style.background = 'var(--bg-secondary)'; }}
+                        onMouseLeave={e => { if (selectedAtt?.id !== att.id) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                    >
+                        <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{typeIcon(att.type)}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: '12px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.name}</div>
+                            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '6px' }}>
+                                <span className={`gallery-type-badge gallery-type-${att.type}`} style={{ padding: '1px 4px', borderRadius: '3px', fontSize: '9px' }}>{att.type}</span>
+                                {att.size && <span>{att.size < 1024 ? `${att.size}B` : `${Math.round(att.size / 1024)}KB`}</span>}
+                            </div>
+                        </div>
+                        <button
+                            onClick={(e) => { e.stopPropagation(); handleDelete(att.id); }}
+                            title="Remove"
+                            style={{
+                                padding: '2px', background: 'none', border: 'none',
+                                color: 'var(--text-tertiary)', cursor: 'pointer', opacity: 0.5,
+                                flexShrink: 0,
+                            }}
+                        >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                        </button>
+                    </div>
+                ))}
+            </div>
+
+            {/* Preview pane */}
+            {selectedAtt && (
+                <div style={{
+                    borderTop: '1px solid var(--border)', paddingTop: '8px',
+                    maxHeight: '40%', overflow: 'auto',
+                }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                        {selectedAtt.name}
+                    </div>
+                    {selectedAtt.type === 'image' && selectedAtt.data_url && (
+                        <img src={selectedAtt.data_url} alt={selectedAtt.name} style={{ maxWidth: '100%', borderRadius: '6px', maxHeight: '200px', objectFit: 'contain' }} />
+                    )}
+                    {selectedAtt.type === 'link' && selectedAtt.url && (
+                        <div style={{ fontSize: '11px', color: 'var(--accent)', wordBreak: 'break-all' }}>{selectedAtt.url}</div>
+                    )}
+                    {selectedAtt.content && (
+                        <pre style={{
+                            fontSize: '10px', color: 'var(--text-secondary)',
+                            background: 'var(--bg-code)', padding: '6px 8px',
+                            borderRadius: '4px', overflow: 'auto', maxHeight: '150px',
+                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                            margin: '4px 0 0',
+                        }}>
+                            <code>{selectedAtt.content.slice(0, 5000)}</code>
+                        </pre>
+                    )}
+                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                        {selectedAtt.mime_type && <span>{selectedAtt.mime_type} · </span>}
+                        {new Date(selectedAtt.created_at).toLocaleDateString()}
+                    </div>
+                </div>
+            )}
+
+            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', borderTop: '1px solid var(--border)', paddingTop: '6px' }}>
+                Type <code style={{ fontSize: '9px', background: 'var(--bg-tertiary)', padding: '1px 3px', borderRadius: '2px' }}>@</code> in chat to reference attachments
             </div>
         </div>
     );
@@ -1360,7 +1413,7 @@ export default function RightPanel({ panel, onClose, onChangeWidget }: RightPane
             case 'agents': return <AgentsWidget />;
             case 'tasks': return <TasksWidget />;
             case 'git': return <GitWidget />;
-            case 'browser': return <BrowserWidget />;
+            case 'attachments': return <AttachmentsWidget />;
             default: return null;
         }
     };

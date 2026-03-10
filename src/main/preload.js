@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('onicode', {
     listBackgroundProcesses: () => ipcRenderer.invoke('list-background-processes'),
     killBackgroundProcess: (processId) => ipcRenderer.invoke('kill-background-process', processId),
     readFileContent: (filePath) => ipcRenderer.invoke('read-file-content', filePath),
+    readScreenshotBase64: (filePath) => ipcRenderer.invoke('read-screenshot-base64', filePath),
 
     // Task management (extends existing tasksList + onTasksUpdated)
     listProjectTasks: (projectPath) => ipcRenderer.invoke('list-project-tasks', projectPath),
@@ -168,6 +169,11 @@ contextBridge.exposeInMainWorld('onicode', {
     browserConsoleLogs: (opts) => ipcRenderer.invoke('browser-console-logs', opts),
     browserConsoleClear: () => ipcRenderer.invoke('browser-console-clear'),
 
+    // ── Attachments (project-scoped, SQLite) ──
+    attachmentSave: (att) => ipcRenderer.invoke('attachment-save', att),
+    attachmentList: (projectId) => ipcRenderer.invoke('attachment-list', projectId),
+    attachmentDelete: (id) => ipcRenderer.invoke('attachment-delete', id),
+
     // ── Conversations (SQLite) ──
     conversationSave: (conv) => ipcRenderer.invoke('conversation-save', conv),
     conversationGet: (id) => ipcRenderer.invoke('conversation-get', id),
@@ -184,6 +190,16 @@ contextBridge.exposeInMainWorld('onicode', {
     // ── Tasks ──
     tasksList: () => ipcRenderer.invoke('tasks-list'),
     loadProjectTasks: (projectPath) => ipcRenderer.invoke('load-project-tasks', projectPath),
+    taskCreate: (content, priority) => ipcRenderer.invoke('task-create', { content, priority }),
+    taskUpdate: (id, updates) => ipcRenderer.invoke('task-update', { id, updates }),
+    taskDelete: (id) => ipcRenderer.invoke('task-delete', { id }),
+    taskSetMilestone: (taskId, milestoneId) => ipcRenderer.invoke('task-set-milestone', { taskId, milestoneId }),
+
+    // ── Milestones ──
+    milestoneList: (projectPath) => ipcRenderer.invoke('milestone-list', projectPath),
+    milestoneCreate: (milestone, projectId, projectPath) => ipcRenderer.invoke('milestone-create', { milestone, projectId, projectPath }),
+    milestoneUpdate: (id, updates) => ipcRenderer.invoke('milestone-update', { id, updates }),
+    milestoneDelete: (id) => ipcRenderer.invoke('milestone-delete', { id }),
     onTasksUpdated: (callback) => {
         const handler = (_event, data) => callback(data);
         ipcRenderer.on('ai-tasks-updated', handler);

@@ -48,8 +48,7 @@ ${name}/
 ├── onidocs/
 │   ├── architecture.md
 │   ├── changelog.md
-│   ├── scope.md
-│   └── tasks.md
+│   └── project.md
 └── README.md
 \`\`\`
 
@@ -60,7 +59,7 @@ ${name}/
 - *Describe how data flows through the system*
 `,
 
-    'scope.md': (name, description, scope) => `# ${name} — Project Scope
+    'project.md': (name, description, scope) => `# ${name}
 
 ## Description
 ${description || 'A new project created with Onicode.'}
@@ -98,23 +97,6 @@ All notable changes to this project will be documented here.
 - *None yet*
 `,
 
-    'tasks.md': (name) => `# ${name} — Tasks
-
-## In Progress
-- [ ] Set up project structure
-- [ ] Define architecture
-
-## To Do
-- [ ] Implement core features
-- [ ] Write tests
-- [ ] Set up CI/CD
-- [ ] Documentation
-
-## Done
-- [x] Project initialized with Onicode
-- [x] Created onidocs documentation
-`,
-
     'README.md': (name, description) => `# ${name}
 
 ${description || 'A project created with Onicode AI.'}
@@ -130,9 +112,10 @@ cd ${name}
 
 See the \`onidocs/\` folder for detailed project documentation:
 - **architecture.md** — System architecture and tech stack
-- **scope.md** — Project scope and goals
+- **project.md** — Project scope and goals
 - **changelog.md** — Version history
-- **tasks.md** — Task tracking
+
+Tasks and milestones are managed in the Onicode app (persisted to SQLite).
 
 ---
 *Created with [Onicode](https://onicode.dev)*
@@ -158,11 +141,10 @@ function registerProjectIPC(ipcMain, getWindow) {
             const onidocsPath = path.join(fullPath, 'onidocs');
             ensureDir(onidocsPath);
 
-            // Write template files
+            // Write template files (tasks/milestones managed in SQLite, not markdown)
             fs.writeFileSync(path.join(onidocsPath, 'architecture.md'), TEMPLATES['architecture.md'](name, techStack));
-            fs.writeFileSync(path.join(onidocsPath, 'scope.md'), TEMPLATES['scope.md'](name, description, scope));
+            fs.writeFileSync(path.join(onidocsPath, 'project.md'), TEMPLATES['project.md'](name, description, scope));
             fs.writeFileSync(path.join(onidocsPath, 'changelog.md'), TEMPLATES['changelog.md'](name));
-            fs.writeFileSync(path.join(onidocsPath, 'tasks.md'), TEMPLATES['tasks.md'](name));
             fs.writeFileSync(path.join(fullPath, 'README.md'), TEMPLATES['README.md'](name, description));
 
             // Create src directory

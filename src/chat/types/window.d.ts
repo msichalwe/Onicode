@@ -53,6 +53,7 @@ interface OnicodeAPI {
     listBackgroundProcesses: () => Promise<Array<{ id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number }>>;
     killBackgroundProcess: (processId: string) => Promise<{ success?: boolean; error?: string }>;
     readFileContent: (filePath: string) => Promise<{ content?: string; size?: number; modified?: string; error?: string }>;
+    readScreenshotBase64: (filePath: string) => Promise<{ dataUri?: string; error?: string }>;
 
     // Task Management (extended)
     listProjectTasks: (projectPath: string) => Promise<{ pending: Array<unknown>; inProgress: Array<unknown>; done: Array<unknown>; archived: Array<unknown>; skipped: Array<unknown> }>;
@@ -209,6 +210,23 @@ interface OnicodeAPI {
     browserConsoleLogs: (opts?: { type?: string; limit?: number }) => Promise<{ success: boolean; logs: Array<{ type: string; text: string; ts: string }> }>;
     browserConsoleClear: () => Promise<{ success: boolean }>;
 
+    // Attachments (project-scoped)
+    attachmentSave: (att: {
+        id: string; projectId: string; name: string; type: string;
+        size?: number; mimeType?: string; url?: string; content?: string;
+        dataUrl?: string; conversationId?: string; createdAt?: number;
+    }) => Promise<{ success?: boolean; error?: string }>;
+    attachmentList: (projectId: string) => Promise<{
+        success?: boolean;
+        attachments?: Array<{
+            id: string; project_id: string; name: string; type: string;
+            size?: number; mime_type?: string; url?: string; content?: string;
+            data_url?: string; conversation_id?: string; created_at: number;
+        }>;
+        error?: string;
+    }>;
+    attachmentDelete: (id: string) => Promise<{ success?: boolean; error?: string }>;
+
     // Conversations (SQLite)
     conversationSave: (conv: {
         id: string; title: string; messages: Array<{ id: string; role: string; content: string; timestamp: number; toolSteps?: unknown[] }>;
@@ -230,7 +248,17 @@ interface OnicodeAPI {
     // Tasks
     tasksList: () => Promise<TaskSummary>;
     loadProjectTasks: (projectPath: string) => Promise<{ success: boolean; summary?: TaskSummary; error?: string }>;
+    taskCreate: (content: string, priority?: string) => Promise<{ success: boolean; task?: TaskItem; summary?: TaskSummary; error?: string }>;
+    taskUpdate: (id: number, updates: { status?: string; content?: string; priority?: string }) => Promise<{ success: boolean; task?: TaskItem; summary?: TaskSummary; error?: string }>;
+    taskDelete: (id: number) => Promise<{ success: boolean; summary?: TaskSummary; error?: string }>;
+    taskSetMilestone: (taskId: number, milestoneId: string | null) => Promise<{ success: boolean; error?: string }>;
     onTasksUpdated: (callback: (data: TaskSummary) => void) => () => void;
+
+    // Milestones
+    milestoneList: (projectPath: string) => Promise<{ success: boolean; milestones: MilestoneItem[]; error?: string }>;
+    milestoneCreate: (milestone: { id: string; title: string; description?: string; dueDate?: number | null; status?: string; createdAt: number }, projectId: string, projectPath: string) => Promise<{ success: boolean; error?: string }>;
+    milestoneUpdate: (id: string, updates: { title?: string; description?: string; status?: string; dueDate?: number | null }) => Promise<{ success: boolean; error?: string }>;
+    milestoneDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
 
     // Live File Changes (from AI tool calls)
     onFileChanged: (callback: (data: { action: string; path: string; lines?: number; linesAdded?: number; linesRemoved?: number; dir?: string }) => void) => () => void;
@@ -318,6 +346,23 @@ declare global {
         priority: 'high' | 'medium' | 'low';
         createdAt: string;
         completedAt: string | null;
+        milestoneId?: string | null;
+    }
+
+    interface MilestoneItem {
+        id: string;
+        title: string;
+        description: string;
+        status: 'open' | 'closed';
+        due_date?: number | null;
+        dueDate?: number | null;
+        project_id?: string | null;
+        project_path?: string | null;
+        created_at?: number;
+        createdAt?: number;
+        taskCount: number;
+        tasksDone: number;
+        tasksInProgress: number;
     }
 
     interface TaskSummary {

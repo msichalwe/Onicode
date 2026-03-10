@@ -37,7 +37,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     { name: '/terminal', description: 'Open terminal panel', usage: '/terminal', category: 'terminal' },
 
     // ── Panels ──
-    { name: '/browser', description: 'Open browser panel', usage: '/browser [url]', category: 'panel' },
+    { name: '/attachments', description: 'Open attachments panel', usage: '/attachments', category: 'panel' },
     { name: '/files', description: 'Open file viewer panel', usage: '/files [path]', category: 'panel' },
 
     // ── System ──

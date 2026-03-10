@@ -25,25 +25,6 @@ interface FileItem {
     children?: FileItem[];
 }
 
-interface TaskItem {
-    id: string;
-    title: string;
-    description: string;
-    status: 'backlog' | 'todo' | 'in-progress' | 'done';
-    priority: 'low' | 'medium' | 'high' | 'critical';
-    type: 'task' | 'story' | 'bug';
-    createdAt: number;
-}
-
-interface Milestone {
-    id: string;
-    title: string;
-    description: string;
-    dueDate: number | null;
-    status: 'open' | 'closed';
-    createdAt: number;
-}
-
 type ProjectTab = 'overview' | 'git' | 'tasks' | 'milestones';
 
 const EDITORS = [
@@ -53,32 +34,7 @@ const EDITORS = [
     { id: 'finder', name: 'Finder', icon: 'Fi' },
 ];
 
-const KANBAN_COLS: { key: TaskItem['status']; label: string }[] = [
-    { key: 'backlog', label: 'Backlog' },
-    { key: 'todo', label: 'To Do' },
-    { key: 'in-progress', label: 'In Progress' },
-    { key: 'done', label: 'Done' },
-];
-
-const PRIORITIES: TaskItem['priority'][] = ['critical', 'high', 'medium', 'low'];
-
 function generateId() { return Math.random().toString(36).substring(2, 10); }
-
-function getTasksKey(projectId: string) { return `onicode-tasks-${projectId}`; }
-function getMilestonesKey(projectId: string) { return `onicode-milestones-${projectId}`; }
-
-function loadTasks(projectId: string): TaskItem[] {
-    try { return JSON.parse(localStorage.getItem(getTasksKey(projectId)) || '[]'); } catch { return []; }
-}
-function saveTasks(projectId: string, tasks: TaskItem[]) {
-    localStorage.setItem(getTasksKey(projectId), JSON.stringify(tasks));
-}
-function loadMilestones(projectId: string): Milestone[] {
-    try { return JSON.parse(localStorage.getItem(getMilestonesKey(projectId)) || '[]'); } catch { return []; }
-}
-function saveMilestones(projectId: string, milestones: Milestone[]) {
-    localStorage.setItem(getMilestonesKey(projectId), JSON.stringify(milestones));
-}
 
 // ══════════════════════════════════════════
 //  Git Tab
@@ -329,127 +285,145 @@ function GitTab({ projectPath }: { projectPath: string }) {
 }
 
 // ══════════════════════════════════════════
-//  Tasks / Kanban Tab
+//  Tasks Tab — Unified TaskManager-backed
 // ══════════════════════════════════════════
 
-// Map AI TaskManager status to Kanban column status
-function mapAIStatusToKanban(status: string): TaskItem['status'] {
-    switch (status) {
-        case 'in_progress': return 'in-progress';
-        case 'done': return 'done';
-        case 'skipped': return 'done';
-        case 'pending':
-        default: return 'todo';
-    }
+interface UnifiedTask {
+    id: number;
+    content: string;
+    status: string;
+    priority: string;
+    createdAt?: string;
+    completedAt?: string | null;
 }
 
-// Map AI TaskManager priority
-function mapAIPriority(priority: string): TaskItem['priority'] {
-    if (priority === 'high') return 'high';
-    if (priority === 'low') return 'low';
-    return 'medium';
-}
-
-// Convert AI TaskManager task to Kanban TaskItem
-function aiTaskToKanban(aiTask: { id: number; content: string; status: string; priority: string; createdAt: string }): TaskItem {
-    return {
-        id: `ai-${aiTask.id}`,
-        title: aiTask.content,
-        description: '',
-        status: mapAIStatusToKanban(aiTask.status),
-        priority: mapAIPriority(aiTask.priority),
-        type: 'task',
-        createdAt: new Date(aiTask.createdAt).getTime(),
-    };
-}
-
-function TasksTab({ projectId }: { projectId: string }) {
-    const [manualTasks, setManualTasks] = useState<TaskItem[]>(() => loadTasks(projectId));
-    const [aiTasks, setAiTasks] = useState<TaskItem[]>([]);
+function TasksTab({ projectId, projectPath }: { projectId: string; projectPath: string }) {
+    const [tasks, setTasks] = useState<UnifiedTask[]>([]);
+    const [total, setTotal] = useState(0);
+    const [done, setDone] = useState(0);
+    const [inProgress, setInProgress] = useState(0);
     const [showForm, setShowForm] = useState(false);
     const [formTitle, setFormTitle] = useState('');
-    const [formDesc, setFormDesc] = useState('');
-    const [formPriority, setFormPriority] = useState<TaskItem['priority']>('medium');
-    const [formType, setFormType] = useState<TaskItem['type']>('task');
-    const [dragItem, setDragItem] = useState<string | null>(null);
+    const [formPriority, setFormPriority] = useState<string>('medium');
 
-    // Merged view: AI tasks + manual tasks
-    const tasks = [...aiTasks, ...manualTasks];
+    const applyTaskSummary = useCallback((data: { total: number; done: number; inProgress: number; tasks: UnifiedTask[] }) => {
+        setTotal(data.total);
+        setDone(data.done);
+        setInProgress(data.inProgress);
+        setTasks(data.tasks || []);
+    }, []);
 
-    useEffect(() => { setManualTasks(loadTasks(projectId)); }, [projectId]);
-
-    // Fetch AI tasks from TaskManager and subscribe to updates
+    // Load project tasks on mount + subscribe to real-time updates
     useEffect(() => {
         if (!isElectron) return;
-        // Initial fetch
-        window.onicode!.tasksList().then((summary: TaskSummary) => {
-            if (summary?.tasks) {
-                setAiTasks(summary.tasks.map(aiTaskToKanban));
-            }
-        }).catch(() => { });
-        // Subscribe to real-time updates
-        const cleanup = window.onicode!.onTasksUpdated((summary: TaskSummary) => {
-            if (summary?.tasks) {
-                setAiTasks(summary.tasks.map(aiTaskToKanban));
-            }
+
+        // Load tasks for this specific project
+        if (window.onicode?.loadProjectTasks) {
+            window.onicode.loadProjectTasks(projectPath).then((res) => {
+                if (res.success && res.summary) {
+                    applyTaskSummary(res.summary as { total: number; done: number; inProgress: number; tasks: UnifiedTask[] });
+                }
+            }).catch(() => {});
+        }
+
+        // Subscribe to real-time updates from TaskManager
+        const cleanup = window.onicode!.onTasksUpdated((summary) => {
+            applyTaskSummary(summary as { total: number; done: number; inProgress: number; tasks: UnifiedTask[] });
         });
         return cleanup;
-    }, [projectId]);
+    }, [projectId, projectPath, applyTaskSummary]);
 
-    const persistManual = (updated: TaskItem[]) => { setManualTasks(updated); saveTasks(projectId, updated); };
-
-    const addTask = () => {
-        if (!formTitle.trim()) return;
-        const task: TaskItem = {
-            id: generateId(), title: formTitle.trim(), description: formDesc.trim(),
-            status: 'backlog', priority: formPriority, type: formType, createdAt: Date.now(),
-        };
-        persistManual([...manualTasks, task]);
-        setFormTitle(''); setFormDesc(''); setShowForm(false);
+    const addTask = async () => {
+        if (!formTitle.trim() || !isElectron) return;
+        await window.onicode!.taskCreate(formTitle.trim(), formPriority);
+        setFormTitle('');
+        setShowForm(false);
     };
 
-    const moveTask = (taskId: string, newStatus: TaskItem['status']) => {
-        // Only manual tasks can be moved via drag-drop (AI tasks are managed by the agent)
-        if (taskId.startsWith('ai-')) return;
-        persistManual(manualTasks.map(t => t.id === taskId ? { ...t, status: newStatus } : t));
+    const updateStatus = async (id: number, status: string) => {
+        if (!isElectron) return;
+        await window.onicode!.taskUpdate(id, { status });
     };
 
-    const deleteTask = (taskId: string) => {
-        // Only manual tasks can be deleted (AI tasks are managed by the agent)
-        if (taskId.startsWith('ai-')) return;
-        persistManual(manualTasks.filter(t => t.id !== taskId));
+    const deleteTask = async (id: number) => {
+        if (!isElectron) return;
+        await window.onicode!.taskDelete(id);
+    };
+
+    const archiveCompleted = async () => {
+        if (!isElectron) return;
+        await window.onicode!.archiveCompletedTasks();
+        // Reload from project
+        if (window.onicode?.loadProjectTasks) {
+            const res = await window.onicode.loadProjectTasks(projectPath);
+            if (res.success && res.summary) {
+                applyTaskSummary(res.summary as { total: number; done: number; inProgress: number; tasks: UnifiedTask[] });
+            }
+        }
     };
 
     const priorityColor = (p: string) => {
-        const c: Record<string, string> = { critical: 'var(--error)', high: 'var(--warning)', medium: 'var(--accent)', low: 'var(--text-tertiary)' };
+        const c: Record<string, string> = { high: 'var(--warning)', medium: 'var(--accent)', low: 'var(--text-tertiary)' };
         return c[p] || 'var(--text-secondary)';
     };
 
-    const typeIcon = (t: string) => {
-        if (t === 'story') return '📖';
-        if (t === 'bug') return '🐛';
-        return '✓';
+    const statusIcon = (s: string) => {
+        if (s === 'in_progress') return <span className="task-item-icon task-icon-progress" />;
+        if (s === 'done') return <span className="task-item-icon task-icon-done" />;
+        if (s === 'skipped') return <span className="task-item-icon task-icon-skipped" />;
+        return <span className="task-item-icon task-icon-pending" />;
     };
+
+    const nextStatusBtn = (task: UnifiedTask) => {
+        if (task.status === 'pending') {
+            return <button className="task-action-btn task-action-start" onClick={() => updateStatus(task.id, 'in_progress')} title="Start">Start</button>;
+        }
+        if (task.status === 'in_progress') {
+            return <button className="task-action-btn task-action-done" onClick={() => updateStatus(task.id, 'done')} title="Done">Done</button>;
+        }
+        if (task.status === 'done' || task.status === 'skipped') {
+            return <button className="task-action-btn task-action-reopen" onClick={() => updateStatus(task.id, 'pending')} title="Reopen">Reopen</button>;
+        }
+        return null;
+    };
+
+    const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+    const inProgressTasks = tasks.filter(t => t.status === 'in_progress');
+    const pendingTasks = tasks.filter(t => t.status === 'pending');
+    const doneTasks = tasks.filter(t => t.status === 'done');
+    const skippedTasks = tasks.filter(t => t.status === 'skipped');
 
     return (
         <div className="tasks-tab">
             <div className="tasks-header">
-                <span>{tasks.length} items</span>
-                <button className="test-btn" onClick={() => setShowForm(!showForm)}>+ New</button>
+                <div className="tasks-header-left">
+                    <span>{total} tasks</span>
+                    {total > 0 && <span className="tasks-header-pct">{progressPct}% done</span>}
+                </div>
+                <div className="tasks-header-actions">
+                    {doneTasks.length > 0 && <button className="task-archive-btn" onClick={archiveCompleted}>Archive</button>}
+                    <button className="test-btn" onClick={() => setShowForm(!showForm)}>+ New</button>
+                </div>
             </div>
+
+            {/* Progress bar */}
+            {total > 0 && (
+                <div className="tasks-progress-bar" style={{ marginBottom: 12 }}>
+                    <div className="tasks-progress-fill" style={{ width: `${progressPct}%` }} />
+                </div>
+            )}
 
             {showForm && (
                 <div className="task-form">
-                    <input className="git-commit-input" placeholder="Title" value={formTitle} onChange={e => setFormTitle(e.target.value)} autoFocus />
-                    <input className="git-commit-input" placeholder="Description (optional)" value={formDesc} onChange={e => setFormDesc(e.target.value)} />
+                    <input className="git-commit-input" placeholder="Task description..." value={formTitle} onChange={e => setFormTitle(e.target.value)} autoFocus
+                        onKeyDown={e => { if (e.key === 'Enter') addTask(); }}
+                    />
                     <div className="task-form-row">
-                        <select className="task-select" value={formType} onChange={e => setFormType(e.target.value as TaskItem['type'])} title="Type">
-                            <option value="task">Task</option>
-                            <option value="story">User Story</option>
-                            <option value="bug">Bug</option>
-                        </select>
-                        <select className="task-select" value={formPriority} onChange={e => setFormPriority(e.target.value as TaskItem['priority'])} title="Priority">
-                            {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+                        <select className="task-select" value={formPriority} onChange={e => setFormPriority(e.target.value)} title="Priority">
+                            <option value="high">High</option>
+                            <option value="medium">Medium</option>
+                            <option value="low">Low</option>
                         </select>
                         <button className="test-btn" onClick={addTask} disabled={!formTitle.trim()}>Add</button>
                         <button className="disconnect-btn" onClick={() => setShowForm(false)}>Cancel</button>
@@ -457,79 +431,155 @@ function TasksTab({ projectId }: { projectId: string }) {
                 </div>
             )}
 
-            <div className="kanban-board">
-                {KANBAN_COLS.map(col => (
-                    <div
-                        key={col.key}
-                        className="kanban-column"
-                        onDragOver={e => e.preventDefault()}
-                        onDrop={() => { if (dragItem) { moveTask(dragItem, col.key); setDragItem(null); } }}
-                    >
-                        <div className="kanban-col-header">
-                            <span>{col.label}</span>
-                            <span className="kanban-count">{tasks.filter(t => t.status === col.key).length}</span>
-                        </div>
-                        <div className="kanban-col-body">
-                            {tasks.filter(t => t.status === col.key).map(task => (
-                                <div
-                                    key={task.id}
-                                    className="kanban-card"
-                                    draggable
-                                    onDragStart={() => setDragItem(task.id)}
-                                >
-                                    <div className="kanban-card-header">
-                                        <span className="kanban-type">{typeIcon(task.type)}</span>
-                                        <span className="kanban-priority-dot" style={{ background: priorityColor(task.priority) }} title={task.priority} />
-                                        <button className="kanban-delete" onClick={() => deleteTask(task.id)}>×</button>
-                                    </div>
-                                    <div className="kanban-card-title">{task.title}</div>
-                                    {task.description && <div className="kanban-card-desc">{task.description}</div>}
-                                </div>
-                            ))}
-                        </div>
+            <div className="tasks-tab-list">
+                {/* In Progress */}
+                {inProgressTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">In Progress ({inProgressTasks.length})</div>
+                        {inProgressTasks.map(t => (
+                            <div key={t.id} className="task-item task-item-active">
+                                {statusIcon(t.status)}
+                                <span className="task-item-text">{t.content}</span>
+                                <span className="kanban-priority-dot" style={{ background: priorityColor(t.priority) }} title={t.priority} />
+                                {nextStatusBtn(t)}
+                                <button className="kanban-delete" onClick={() => deleteTask(t.id)} title="Delete">x</button>
+                            </div>
+                        ))}
                     </div>
-                ))}
+                )}
+
+                {/* Pending */}
+                {pendingTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">Pending ({pendingTasks.length})</div>
+                        {pendingTasks.map(t => (
+                            <div key={t.id} className="task-item">
+                                {statusIcon(t.status)}
+                                <span className="task-item-text">{t.content}</span>
+                                <span className="kanban-priority-dot" style={{ background: priorityColor(t.priority) }} title={t.priority} />
+                                {nextStatusBtn(t)}
+                                <button className="kanban-delete" onClick={() => deleteTask(t.id)} title="Delete">x</button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Completed */}
+                {doneTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">Completed ({doneTasks.length})</div>
+                        {doneTasks.map(t => (
+                            <div key={t.id} className="task-item task-item-done">
+                                {statusIcon(t.status)}
+                                <span className="task-item-text">{t.content}</span>
+                                {nextStatusBtn(t)}
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Skipped */}
+                {skippedTasks.length > 0 && (
+                    <div className="task-section">
+                        <div className="task-section-label">Skipped ({skippedTasks.length})</div>
+                        {skippedTasks.map(t => (
+                            <div key={t.id} className="task-item task-item-skipped">
+                                {statusIcon(t.status)}
+                                <span className="task-item-text">{t.content}</span>
+                                {nextStatusBtn(t)}
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {total === 0 && (
+                    <div className="git-empty">
+                        No tasks yet. Add tasks manually or let the AI agent create them.
+                    </div>
+                )}
             </div>
         </div>
     );
 }
 
 // ══════════════════════════════════════════
-//  Milestones Tab
+//  Milestones Tab — SQLite-backed, linked to tasks
 // ══════════════════════════════════════════
 
-function MilestonesTab({ projectId }: { projectId: string }) {
-    const [milestones, setMilestones] = useState<Milestone[]>(() => loadMilestones(projectId));
+interface MilestoneEntry {
+    id: string;
+    title: string;
+    description: string;
+    status: string;
+    dueDate: number | null;
+    due_date?: number | null;
+    created_at?: number;
+    createdAt: number;
+    taskCount: number;
+    tasksDone: number;
+    tasksInProgress: number;
+}
+
+function MilestonesTab({ projectId, projectPath }: { projectId: string; projectPath: string }) {
+    const [milestones, setMilestones] = useState<MilestoneEntry[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [formTitle, setFormTitle] = useState('');
     const [formDesc, setFormDesc] = useState('');
     const [formDue, setFormDue] = useState('');
-    const tasks = loadTasks(projectId);
 
-    useEffect(() => { setMilestones(loadMilestones(projectId)); }, [projectId]);
+    const loadMilestones = useCallback(async () => {
+        if (!isElectron || !window.onicode?.milestoneList) return;
+        const res = await window.onicode.milestoneList(projectPath);
+        if (res.success && res.milestones) {
+            setMilestones(res.milestones.map(ms => ({
+                ...ms,
+                dueDate: ms.due_date ?? ms.dueDate ?? null,
+                createdAt: ms.created_at ?? ms.createdAt ?? Date.now(),
+                taskCount: ms.taskCount ?? 0,
+                tasksDone: ms.tasksDone ?? 0,
+                tasksInProgress: ms.tasksInProgress ?? 0,
+            })));
+        }
+    }, [projectPath]);
 
-    const persist = (updated: Milestone[]) => { setMilestones(updated); saveMilestones(projectId, updated); };
+    useEffect(() => { loadMilestones(); }, [loadMilestones]);
 
-    const addMilestone = () => {
-        if (!formTitle.trim()) return;
-        const ms: Milestone = {
-            id: generateId(), title: formTitle.trim(), description: formDesc.trim(),
-            dueDate: formDue ? new Date(formDue).getTime() : null, status: 'open', createdAt: Date.now(),
+    // Refresh milestones when tasks change (progress may update)
+    useEffect(() => {
+        if (!isElectron || !window.onicode?.onTasksUpdated) return;
+        const cleanup = window.onicode.onTasksUpdated(() => { loadMilestones(); });
+        return cleanup;
+    }, [loadMilestones]);
+
+    const addMilestone = async () => {
+        if (!formTitle.trim() || !isElectron) return;
+        const ms = {
+            id: generateId(),
+            title: formTitle.trim(),
+            description: formDesc.trim(),
+            dueDate: formDue ? new Date(formDue).getTime() : null,
+            status: 'open',
+            createdAt: Date.now(),
         };
-        persist([...milestones, ms]);
+        await window.onicode!.milestoneCreate(ms, projectId, projectPath);
         setFormTitle(''); setFormDesc(''); setFormDue(''); setShowForm(false);
+        loadMilestones();
     };
 
-    const toggleStatus = (id: string) => {
-        persist(milestones.map(m => m.id === id ? { ...m, status: m.status === 'open' ? 'closed' as const : 'open' as const } : m));
+    const toggleStatus = async (id: string, current: string) => {
+        if (!isElectron) return;
+        await window.onicode!.milestoneUpdate(id, { status: current === 'open' ? 'closed' : 'open' });
+        loadMilestones();
     };
 
-    const deleteMilestone = (id: string) => {
-        persist(milestones.filter(m => m.id !== id));
+    const deleteMilestone = async (id: string) => {
+        if (!isElectron) return;
+        await window.onicode!.milestoneDelete(id);
+        loadMilestones();
     };
 
-    const totalTasks = tasks.length;
-    const doneTasks = tasks.filter(t => t.status === 'done').length;
+    const totalTasks = milestones.reduce((sum, m) => sum + m.taskCount, 0);
+    const doneTasks = milestones.reduce((sum, m) => sum + m.tasksDone, 0);
     const progress = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
 
     return (
@@ -538,7 +588,7 @@ function MilestonesTab({ projectId }: { projectId: string }) {
                 <div className="milestones-summary">
                     <span>{milestones.filter(m => m.status === 'open').length} open</span>
                     <span>{milestones.filter(m => m.status === 'closed').length} closed</span>
-                    <span className="milestones-progress">Overall: {progress}% ({doneTasks}/{totalTasks} tasks)</span>
+                    {totalTasks > 0 && <span className="milestones-progress">Tasks: {progress}% ({doneTasks}/{totalTasks})</span>}
                 </div>
                 <button className="test-btn" onClick={() => setShowForm(!showForm)}>+ Milestone</button>
             </div>
@@ -556,26 +606,37 @@ function MilestonesTab({ projectId }: { projectId: string }) {
             )}
 
             <div className="milestones-list">
-                {milestones.map(ms => (
-                    <div key={ms.id} className={`milestone-card ${ms.status}`}>
-                        <div className="milestone-card-left">
-                            <button className={`milestone-check ${ms.status}`} onClick={() => toggleStatus(ms.id)}>
-                                {ms.status === 'closed' ? '✓' : '○'}
-                            </button>
-                            <div>
-                                <div className="milestone-title">{ms.title}</div>
-                                {ms.description && <div className="milestone-desc">{ms.description}</div>}
-                                <div className="milestone-meta">
-                                    {ms.dueDate && <span>Due: {new Date(ms.dueDate).toLocaleDateString()}</span>}
-                                    <span>Created {new Date(ms.createdAt).toLocaleDateString()}</span>
+                {milestones.map(ms => {
+                    const msPct = ms.taskCount > 0 ? Math.round((ms.tasksDone / ms.taskCount) * 100) : 0;
+                    return (
+                        <div key={ms.id} className={`milestone-card ${ms.status}`}>
+                            <div className="milestone-card-left">
+                                <button className={`milestone-check ${ms.status}`} onClick={() => toggleStatus(ms.id, ms.status)}>
+                                    {ms.status === 'closed' ? '✓' : '○'}
+                                </button>
+                                <div style={{ flex: 1 }}>
+                                    <div className="milestone-title">{ms.title}</div>
+                                    {ms.description && <div className="milestone-desc">{ms.description}</div>}
+                                    {ms.taskCount > 0 && (
+                                        <div className="milestone-task-progress">
+                                            <div className="tasks-progress-bar" style={{ height: 4 }}>
+                                                <div className="tasks-progress-fill" style={{ width: `${msPct}%` }} />
+                                            </div>
+                                            <span className="milestone-task-count">{ms.tasksDone}/{ms.taskCount} tasks</span>
+                                        </div>
+                                    )}
+                                    <div className="milestone-meta">
+                                        {ms.dueDate && <span>Due: {new Date(ms.dueDate).toLocaleDateString()}</span>}
+                                        <span>Created {new Date(ms.createdAt).toLocaleDateString()}</span>
+                                    </div>
                                 </div>
                             </div>
+                            <button className="kanban-delete" onClick={() => deleteMilestone(ms.id)}>x</button>
                         </div>
-                        <button className="kanban-delete" onClick={() => deleteMilestone(ms.id)}>×</button>
-                    </div>
-                ))}
+                    );
+                })}
                 {milestones.length === 0 && (
-                    <div className="git-empty">No milestones yet. Create one to track progress.</div>
+                    <div className="git-empty">No milestones yet. Create milestones to organize tasks into phases.</div>
                 )}
             </div>
         </div>
@@ -833,8 +894,8 @@ export default function ProjectsView() {
                         )}
 
                         {activeTab === 'git' && <GitTab projectPath={selectedProject.path} />}
-                        {activeTab === 'tasks' && <TasksTab projectId={selectedProject.id} />}
-                        {activeTab === 'milestones' && <MilestonesTab projectId={selectedProject.id} />}
+                        {activeTab === 'tasks' && <TasksTab projectId={selectedProject.id} projectPath={selectedProject.path} />}
+                        {activeTab === 'milestones' && <MilestonesTab projectId={selectedProject.id} projectPath={selectedProject.path} />}
                     </div>
                 )}
             </div>

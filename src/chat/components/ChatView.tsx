@@ -8,6 +8,30 @@ import type { ChatScope } from '../App';
 import type { ActiveProject } from './ProjectModeBar';
 
 // ══════════════════════════════════════════
+//  Screenshot Image Component (loads via IPC)
+// ══════════════════════════════════════════
+
+function ScreenshotImage({ filePath, alt, onClick }: { filePath: string; alt: string; onClick?: () => void }) {
+    const [src, setSrc] = React.useState<string>('');
+    const [error, setError] = React.useState(false);
+
+    React.useEffect(() => {
+        if (!filePath) return;
+        let cancelled = false;
+        window.onicode?.readScreenshotBase64?.(filePath).then(result => {
+            if (cancelled) return;
+            if (result?.dataUri) setSrc(result.dataUri);
+            else setError(true);
+        }).catch(() => { if (!cancelled) setError(true); });
+        return () => { cancelled = true; };
+    }, [filePath]);
+
+    if (error) return <div className="tool-step-error" style={{ fontSize: 11, padding: '4px 8px' }}>Screenshot not available</div>;
+    if (!src) return <div style={{ padding: '8px', color: 'var(--text-tertiary)', fontSize: 11 }}>Loading screenshot...</div>;
+    return <img src={src} alt={alt} className="tool-screenshot-img" onClick={onClick} />;
+}
+
+// ══════════════════════════════════════════
 //  Types
 // ══════════════════════════════════════════
 
@@ -30,12 +54,13 @@ export interface Message {
 }
 
 export interface Attachment {
-    type: 'file' | 'link' | 'image';
+    type: 'file' | 'link' | 'image' | 'doc';
     name: string;
     url?: string;
     size?: number;
     mimeType?: string;
     content?: string;
+    dataUrl?: string; // Base64 data URL for image thumbnails
 }
 
 export interface Conversation {
@@ -204,6 +229,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const [showSlashMenu, setShowSlashMenu] = useState(false);
     const [slashFilter, setSlashFilter] = useState('');
     const [slashIndex, setSlashIndex] = useState(0);
+    const [showMentionMenu, setShowMentionMenu] = useState(false);
+    const [mentionFilter, setMentionFilter] = useState('');
+    const [mentionIndex, setMentionIndex] = useState(0);
+    const [isDragOver, setIsDragOver] = useState(false);
     const [activeToolSteps, setActiveToolSteps] = useState<ToolStep[]>([]);
     const [agentStatus, setAgentStatus] = useState<{
         status: string;
@@ -228,6 +257,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const cleanupRef = useRef<(() => void) | null>(null);
     const abortRef = useRef<AbortController | null>(null);
     const sendingRef = useRef(false); // Prevents double-send from StrictMode
+    const slashMenuRef = useRef<HTMLDivElement>(null);
+    const mentionMenuRef = useRef<HTMLDivElement>(null);
 
     // ── Migrate localStorage to SQLite on first mount ──
     useEffect(() => {
@@ -286,7 +317,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // ── Scroll ──
     const scrollToBottom = useCallback(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        // Use double rAF to ensure DOM layout is complete before scrolling
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            });
+        });
     }, []);
 
     useEffect(() => { scrollToBottom(); }, [messages, streamingContent, activeToolSteps, scrollToBottom]);
@@ -303,11 +339,32 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         return () => container.removeEventListener('scroll', handleScroll);
     }, [messages.length > 0]);
 
-    // ── Context tracking (estimate token count) ──
+    // ── Context tracking (estimate token count — includes tool steps + system prompt) ──
     useEffect(() => {
         if (messages.length === 0) { setContextInfo(null); return; }
-        const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-        const estimatedTokens = Math.round(totalChars / 4);
+        let totalChars = 0;
+        for (const m of messages) {
+            totalChars += m.content.length;
+            // Include tool step args + results in token estimate
+            if (m.toolSteps) {
+                for (const step of m.toolSteps) {
+                    totalChars += JSON.stringify(step.args || {}).length;
+                    if (step.result) totalChars += JSON.stringify(step.result).length;
+                }
+            }
+            // Include attachment content
+            if (m.attachments) {
+                for (const att of m.attachments) {
+                    if (att.content) totalChars += att.content.length;
+                    if (att.url) totalChars += att.url.length;
+                }
+            }
+        }
+        // System prompt overhead (~6000 chars = ~1500 tokens)
+        const systemPromptTokens = 1500;
+        // Per-message overhead (role labels, separators) = ~4 tokens each
+        const messageOverhead = messages.length * 4;
+        const estimatedTokens = Math.round(totalChars / 4) + systemPromptTokens + messageOverhead;
         setContextInfo({ tokens: estimatedTokens, messages: messages.length });
     }, [messages]);
 
@@ -342,6 +399,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     useEffect(() => {
         if (input.startsWith('/')) {
             setShowSlashMenu(true);
+            setShowMentionMenu(false);
             setSlashFilter(input.slice(1).toLowerCase());
             setSlashIndex(0);
         } else {
@@ -352,6 +410,113 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
         cmd.name.toLowerCase().includes('/' + slashFilter)
     );
+
+    // Scroll active slash menu item into view
+    useEffect(() => {
+        if (!showSlashMenu || !slashMenuRef.current) return;
+        const active = slashMenuRef.current.querySelector('.slash-menu-item.active');
+        if (active) active.scrollIntoView({ block: 'nearest' });
+    }, [slashIndex, showSlashMenu]);
+
+    // ── @ mention menu ──
+    useEffect(() => {
+        // Detect @ at any position in input (not just start)
+        const atIndex = input.lastIndexOf('@');
+        if (atIndex >= 0 && !input.startsWith('/')) {
+            const afterAt = input.slice(atIndex + 1);
+            // Only show if there's no space after the filter text (user is still typing the mention)
+            if (!afterAt.includes(' ') || afterAt.length === 0) {
+                setShowMentionMenu(true);
+                setShowSlashMenu(false);
+                setMentionFilter(afterAt.toLowerCase());
+                setMentionIndex(0);
+            } else {
+                setShowMentionMenu(false);
+            }
+        } else if (!input.startsWith('/')) {
+            setShowMentionMenu(false);
+        }
+    }, [input]);
+
+    // ── Project-scoped attachments (loaded from SQLite) ──
+    const [projectAttachments, setProjectAttachments] = useState<Attachment[]>([]);
+
+    useEffect(() => {
+        if (!activeProject?.id || !window.onicode?.attachmentList) return;
+        window.onicode.attachmentList(activeProject.id).then(result => {
+            if (result.success && result.attachments) {
+                setProjectAttachments(result.attachments.map(a => ({
+                    name: a.name,
+                    type: (a.type as Attachment['type']) || 'file',
+                    size: a.size || undefined,
+                    mimeType: a.mime_type || undefined,
+                    url: a.url || undefined,
+                    content: a.content || undefined,
+                    dataUrl: a.data_url || undefined,
+                })));
+            }
+        }).catch(() => {});
+    }, [activeProject?.id, messages.length]); // Reload after each message send
+
+    // Collect all available mention items (project-scoped + session + pending)
+    const mentionItems = React.useMemo(() => {
+        const items: Array<{ type: 'attachment' | 'file'; label: string; detail: string; attachment?: Attachment }> = [];
+        const seen = new Set<string>();
+
+        // Project-scoped attachments from SQLite (primary source)
+        for (const att of projectAttachments) {
+            if (!seen.has(att.name)) {
+                seen.add(att.name);
+                items.push({
+                    type: 'attachment',
+                    label: att.name,
+                    detail: att.type === 'link' ? (att.url || 'link') : `${att.type}${att.size ? ` · ${Math.round(att.size / 1024)}KB` : ''}`,
+                    attachment: att,
+                });
+            }
+        }
+
+        // Attachments from current conversation messages
+        for (const m of messages) {
+            if (m.attachments) {
+                for (const att of m.attachments) {
+                    if (!seen.has(att.name)) {
+                        seen.add(att.name);
+                        items.push({
+                            type: 'attachment',
+                            label: att.name,
+                            detail: att.type === 'link' ? (att.url || 'link') : `${att.type}${att.size ? ` · ${Math.round(att.size / 1024)}KB` : ''}`,
+                            attachment: att,
+                        });
+                    }
+                }
+            }
+        }
+        // Current pending attachments
+        for (const att of attachments) {
+            if (!seen.has(att.name)) {
+                seen.add(att.name);
+                items.push({
+                    type: 'attachment',
+                    label: att.name,
+                    detail: att.type === 'link' ? (att.url || 'link') : `${att.type}${att.size ? ` · ${Math.round(att.size / 1024)}KB` : ''}`,
+                    attachment: att,
+                });
+            }
+        }
+        return items;
+    }, [messages, attachments, projectAttachments]);
+
+    const filteredMentions = mentionItems.filter(item =>
+        item.label.toLowerCase().includes(mentionFilter)
+    );
+
+    // Scroll active mention item into view
+    useEffect(() => {
+        if (!showMentionMenu || !mentionMenuRef.current) return;
+        const active = mentionMenuRef.current.querySelector('.mention-menu-item.active');
+        if (active) active.scrollIntoView({ block: 'nearest' });
+    }, [mentionIndex, showMentionMenu]);
 
     // ── Listen for show-history event from unified header ──
     useEffect(() => {
@@ -410,10 +575,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         toolStepsRef.current = [];
         setActiveToolSteps([]);
 
+        // Register persistent chunk listener that survives HMR remounts
         const removeChunkListener = window.onicode!.onStreamChunk((chunk: string) => {
             streamContentRef.current += chunk;
             setStreamingContent(streamContentRef.current);
         });
+
+        // Also register a global fallback — if the component remounts during streaming,
+        // we keep accumulating text so it's not lost
+        const globalChunkKey = '__onicode_stream_accumulator';
+        (window as any)[globalChunkKey] = streamContentRef;
 
         // Listen for tool calls from the agentic loop
         const removeToolCallListener = window.onicode!.onToolCall((data) => {
@@ -583,6 +754,19 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
     }, []);
 
+    // ── Recover streaming state on HMR remount ──
+    useEffect(() => {
+        if (!isElectron) return;
+        const globalRef = (window as any).__onicode_stream_accumulator;
+        if (globalRef && globalRef.current && globalRef.current.length > 0) {
+            // A stream was active before HMR — recover it
+            streamContentRef.current = globalRef.current;
+            setStreamingContent(globalRef.current);
+            setIsTyping(true);
+            sendingRef.current = true;
+        }
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
     // ── Main send handler ──
     const sendToAI = useCallback(async (userMessage: string, allMessages: Message[], currentAttachments?: Attachment[]) => {
         // Guard against React StrictMode double-invoke
@@ -610,12 +794,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         if (currentAttachments && currentAttachments.length > 0) {
             const parts: string[] = ['\n\n---\n**Attached files:**'];
             for (const att of currentAttachments) {
+                const sizeStr = att.size ? (att.size < 1024 ? `${att.size}B` : `${Math.round(att.size / 1024)}KB`) : '';
                 if (att.type === 'link') {
-                    parts.push(`\n**Link:** ${att.url}`);
+                    parts.push(`\n**Link:** [${att.name}](${att.url})`);
+                } else if (att.type === 'image') {
+                    parts.push(`\n**Image: \`${att.name}\`** (${sizeStr}${att.mimeType ? ', ' + att.mimeType : ''}) — image attached for reference`);
+                } else if (att.type === 'doc') {
+                    parts.push(`\n**Document: \`${att.name}\`** (${sizeStr}${att.mimeType ? ', ' + att.mimeType : ''})${att.content ? '\n```\n' + att.content + '\n```' : ' — binary document, content not directly readable'}`);
                 } else if (att.content) {
-                    parts.push(`\n**File: \`${att.name}\`** (${att.size ? Math.round(att.size / 1024) + 'KB' : 'unknown size'})\n\`\`\`\n${att.content}\n\`\`\``);
+                    // Detect language from extension for syntax highlighting
+                    const ext = att.name.split('.').pop()?.toLowerCase() || '';
+                    const langMap: Record<string, string> = { ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx', py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java', css: 'css', html: 'html', json: 'json', md: 'markdown', yml: 'yaml', yaml: 'yaml', sql: 'sql', sh: 'bash' };
+                    const lang = langMap[ext] || ext;
+                    parts.push(`\n**File: \`${att.name}\`** (${sizeStr})\n\`\`\`${lang}\n${att.content}\n\`\`\``);
                 } else {
-                    parts.push(`\n**File: \`${att.name}\`** (${att.type}, ${att.size ? Math.round(att.size / 1024) + 'KB' : 'binary'}) — content not readable`);
+                    parts.push(`\n**File: \`${att.name}\`** (${att.type}, ${sizeStr}) — binary file, content not readable`);
                 }
             }
             attachmentContext = parts.join('');
@@ -709,12 +902,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         // Auto-compact if context is getting large
         let messagesToSend = allMessages;
-        if (isElectron && allMessages.length > 15) {
+        if (isElectron && allMessages.length > 8) {
             try {
-                const tokenEst = await window.onicode!.estimateTokens(
-                    allMessages.map(m => ({ role: m.role, content: m.content }))
-                );
-                if (tokenEst.tokens > 60000) {
+                // Include tool step content in token estimation for accuracy
+                const msgsForEstimate = allMessages.map(m => {
+                    let content = m.content;
+                    if (m.toolSteps) {
+                        const toolContent = m.toolSteps.map(s =>
+                            JSON.stringify(s.args || {}) + JSON.stringify(s.result || {})
+                        ).join('');
+                        content += toolContent;
+                    }
+                    return { role: m.role, content };
+                });
+                const tokenEst = await window.onicode!.estimateTokens(msgsForEstimate);
+                if (tokenEst.tokens > 150000) {
                     const compactResult = await window.onicode!.compactMessages(
                         allMessages.map(m => ({ role: m.role, content: m.content, toolSteps: m.toolSteps }))
                     );
@@ -766,13 +968,22 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         setIsTyping(false);
         sendingRef.current = false;
         const finalContent = streamContentRef.current || '';
-        if (finalContent.trim()) {
+        const finalToolSteps = [...toolStepsRef.current];
+
+        // Preserve both streaming content AND tool steps when user stops generation
+        if (finalContent.trim() || finalToolSteps.length > 0) {
             setMessages((prev) => [...prev, {
-                id: generateId(), role: 'ai' as const, content: finalContent, timestamp: Date.now(),
+                id: generateId(),
+                role: 'ai' as const,
+                content: finalContent || '*(Stopped by user)*',
+                timestamp: Date.now(),
+                toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
             }]);
         }
         setStreamingContent('');
         streamContentRef.current = '';
+        setActiveToolSteps([]);
+        toolStepsRef.current = [];
     }, []);
 
     // ── Attachments ──
@@ -783,14 +994,37 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const files = e.target.files;
         if (!files) return;
+        processFiles(Array.from(files));
+        e.target.value = '';
+    }, []);
 
-        Array.from(files).forEach((f) => {
+    const processFiles = useCallback((files: File[]) => {
+        for (const f of files) {
+            // Block video files
+            if (f.type.startsWith('video/') || /\.(mp4|avi|mov|wmv|flv|mkv|webm|m4v)$/i.test(f.name)) {
+                continue; // Skip videos silently
+            }
+
+            const isImage = f.type.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(f.name);
+            const isDoc = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|odt|rtf)$/i.test(f.name);
+
             const att: Attachment = {
-                type: f.type.startsWith('image/') ? 'image' as const : 'file' as const,
+                type: isImage ? 'image' as const : isDoc ? 'doc' as const : 'file' as const,
                 name: f.name,
                 size: f.size,
                 mimeType: f.type,
             };
+
+            // Read image as data URL for thumbnail preview
+            if (isImage && f.size < 5_000_000) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    att.dataUrl = reader.result as string;
+                    setAttachments((prev) => [...prev, att]);
+                };
+                reader.readAsDataURL(f);
+                continue;
+            }
 
             // Read text content for code/text files (up to 100KB)
             const isText = f.type.startsWith('text/') ||
@@ -806,8 +1040,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             } else {
                 setAttachments((prev) => [...prev, att]);
             }
-        });
-        e.target.value = '';
+        }
     }, []);
 
     const handlePaste = useCallback((e: React.ClipboardEvent) => {
@@ -821,8 +1054,41 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 name: new URL(url).hostname,
                 url,
             }]);
+            return;
         }
+        // Handle pasted images
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.startsWith('image/')) {
+                e.preventDefault();
+                const file = items[i].getAsFile();
+                if (file) processFiles([file]);
+                return;
+            }
+        }
+    }, [processFiles]);
+
+    // ── Drag-and-drop ──
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(true);
     }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Only hide if leaving the container (not entering a child)
+        if (e.currentTarget === e.target) setIsDragOver(false);
+    }, []);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(false);
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length > 0) processFiles(files);
+    }, [processFiles]);
 
     const removeAttachment = useCallback((index: number) => {
         setAttachments((prev) => prev.filter((_, i) => i !== index));
@@ -918,18 +1184,38 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         };
 
         setInput('');
-        setAttachments([]);
         setShowSlashMenu(false);
+
+        // Persist attachments to project-scoped storage
+        if (attachments.length > 0 && activeProject?.id && window.onicode?.attachmentSave) {
+            for (const att of attachments) {
+                window.onicode.attachmentSave({
+                    id: generateId(),
+                    projectId: activeProject.id,
+                    name: att.name,
+                    type: att.type,
+                    size: att.size,
+                    mimeType: att.mimeType,
+                    url: att.url,
+                    content: att.content,
+                    dataUrl: att.dataUrl,
+                    conversationId: activeConvId || undefined,
+                    createdAt: Date.now(),
+                }).catch(() => {});
+            }
+        }
+        setAttachments([]);
 
         setMessages((prev) => {
             const updated = [...prev, userMessage];
             sendToAI(text, prev, userMessage.attachments);
             return updated;
         });
-    }, [input, attachments, handleCommand, sendToAI, autoDetectProject]);
+    }, [input, attachments, activeProject?.id, activeConvId, handleCommand, sendToAI, autoDetectProject]);
 
     // ── Keyboard handler ──
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+        // Slash command menu navigation
         if (showSlashMenu && filteredCommands.length > 0) {
             if (e.key === 'ArrowDown') {
                 e.preventDefault();
@@ -953,11 +1239,43 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             }
         }
 
+        // @ mention menu navigation
+        if (showMentionMenu && filteredMentions.length > 0) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setMentionIndex((prev) => (prev + 1) % filteredMentions.length);
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setMentionIndex((prev) => (prev - 1 + filteredMentions.length) % filteredMentions.length);
+                return;
+            }
+            if (e.key === 'Tab' || (e.key === 'Enter' && filteredMentions[mentionIndex])) {
+                e.preventDefault();
+                const item = filteredMentions[mentionIndex];
+                // Replace @filter with @name
+                const atIndex = input.lastIndexOf('@');
+                const newInput = input.slice(0, atIndex) + '@' + item.label + ' ';
+                setInput(newInput);
+                // Re-attach the referenced attachment
+                if (item.attachment && !attachments.some(a => a.name === item.attachment!.name)) {
+                    setAttachments(prev => [...prev, item.attachment!]);
+                }
+                setShowMentionMenu(false);
+                return;
+            }
+            if (e.key === 'Escape') {
+                setShowMentionMenu(false);
+                return;
+            }
+        }
+
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSend();
         }
-    }, [showSlashMenu, filteredCommands, slashIndex, handleSend]);
+    }, [showSlashMenu, filteredCommands, slashIndex, showMentionMenu, filteredMentions, mentionIndex, input, attachments, handleSend]);
 
     // ── Welcome suggestion click ──
     const handleSuggestionClick = useCallback((suggestion: string) => {
@@ -1021,7 +1339,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 read_file: 'Read', edit_file: 'Edit', multi_edit: 'Edit', create_file: 'Created',
                 delete_file: 'Deleted', list_directory: 'Listed', search_files: 'Searched',
                 run_command: 'Ran', init_project: 'Init', task_add: 'Task', task_update: 'Task',
-                task_list: 'Tasks', task_clear: 'Tasks', browser_navigate: 'Browser', browser_screenshot: 'Screenshot',
+                task_list: 'Tasks', milestone_create: 'Milestone', browser_navigate: 'Browser', browser_screenshot: 'Screenshot',
                 browser_evaluate: 'Browser JS', browser_click: 'Clicked', browser_type: 'Typed',
                 browser_console_logs: 'Console', browser_close: 'Browser', create_restore_point: 'Checkpoint',
                 restore_to_point: 'Restored', spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
@@ -1480,10 +1798,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             </div>
                             {isScreenshot && (
                                 <div className="tool-step-screenshot">
-                                    <img
-                                        src={`file://${String((step.result as Record<string, unknown>).path)}`}
+                                    <ScreenshotImage
+                                        filePath={String((step.result as Record<string, unknown>).path)}
                                         alt={String(step.args.name || 'Screenshot')}
-                                        className="tool-screenshot-img"
                                         onClick={() => window.onicode?.openExternal?.(`file://${String((step.result as Record<string, unknown>).path)}`)}
                                     />
                                 </div>
@@ -1637,13 +1954,20 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                     {message.attachments && message.attachments.length > 0 && (
                                         <div className="message-attachments">
                                             {message.attachments.map((att, i) => (
-                                                <div key={i} className="attachment-chip">
+                                                <div key={i} className={`attachment-chip attachment-chip-${att.type}`}>
                                                     {att.type === 'link' ? (
                                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
+                                                    ) : att.type === 'image' ? (
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                                                    ) : att.type === 'doc' ? (
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>
                                                     ) : (
                                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                                                     )}
                                                     {att.name}
+                                                    {att.type === 'image' && att.dataUrl && (
+                                                        <img src={att.dataUrl} alt="" className="attachment-chip-thumb" />
+                                                    )}
                                                 </div>
                                             ))}
                                         </div>
@@ -1713,20 +2037,41 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 </>
             )}
 
-            <div className="input-area">
+            <div
+                className={`input-area${isDragOver ? ' drag-over' : ''}`}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+            >
+                {/* Drag-drop overlay */}
+                {isDragOver && (
+                    <div className="drag-overlay">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                        </svg>
+                        <span>Drop files to attach</span>
+                        <span className="drag-overlay-hint">Images, documents, code files</span>
+                    </div>
+                )}
+
                 {/* Attachment previews */}
                 {attachments.length > 0 && (
                     <div className="attachment-bar">
                         {attachments.map((att, i) => (
-                            <div key={i} className="attachment-preview">
-                                {att.type === 'link' ? (
+                            <div key={i} className={`attachment-preview${att.type === 'image' && att.dataUrl ? ' attachment-preview-image' : ''}`}>
+                                {att.type === 'image' && att.dataUrl ? (
+                                    <img src={att.dataUrl} alt={att.name} className="attachment-thumb" />
+                                ) : att.type === 'link' ? (
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
+                                ) : att.type === 'doc' ? (
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>
                                 ) : att.type === 'image' ? (
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
                                 ) : (
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                                 )}
                                 <span>{att.name}</span>
+                                {att.size && <span className="attachment-size">{att.size < 1024 ? `${att.size}B` : `${Math.round(att.size / 1024)}KB`}</span>}
                                 <button className="attachment-remove" onClick={() => removeAttachment(i)}>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                         <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -1739,7 +2084,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
                 {/* Slash command menu */}
                 {showSlashMenu && filteredCommands.length > 0 && (
-                    <div className="slash-menu">
+                    <div className="slash-menu" ref={slashMenuRef}>
                         {filteredCommands.map((cmd, i) => (
                             <div
                                 key={cmd.name}
@@ -1752,6 +2097,40 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             >
                                 <span className="slash-cmd-name">{cmd.name}</span>
                                 <span className="slash-cmd-desc">{cmd.description}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* @ mention menu */}
+                {showMentionMenu && filteredMentions.length > 0 && (
+                    <div className="mention-menu" ref={mentionMenuRef}>
+                        <div className="mention-menu-header">Attachments</div>
+                        {filteredMentions.map((item, i) => (
+                            <div
+                                key={item.label}
+                                className={`mention-menu-item ${i === mentionIndex ? 'active' : ''}`}
+                                onClick={() => {
+                                    const atIndex = input.lastIndexOf('@');
+                                    setInput(input.slice(0, atIndex) + '@' + item.label + ' ');
+                                    if (item.attachment && !attachments.some(a => a.name === item.attachment!.name)) {
+                                        setAttachments(prev => [...prev, item.attachment!]);
+                                    }
+                                    setShowMentionMenu(false);
+                                    textareaRef.current?.focus();
+                                }}
+                            >
+                                <span className="mention-item-icon">
+                                    {item.type === 'attachment' && item.attachment?.type === 'link' ? (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
+                                    ) : item.type === 'attachment' && item.attachment?.type === 'image' ? (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                                    ) : (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                    )}
+                                </span>
+                                <span className="mention-item-name">{item.label}</span>
+                                <span className="mention-item-detail">{item.detail}</span>
                             </div>
                         ))}
                     </div>
@@ -1796,6 +2175,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         ref={fileInputRef}
                         type="file"
                         multiple
+                        accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.json,.csv,.xml,.yml,.yaml,.ts,.tsx,.js,.jsx,.py,.rb,.go,.rs,.java,.c,.cpp,.h,.css,.html,.sh,.sql,.toml,.env,.cfg,.ini,.log,.rtf,.odt"
                         className="file-input-hidden"
                         onChange={handleFileChange}
                     />
@@ -1810,7 +2190,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
                         onPaste={handlePaste}
-                        placeholder={scope === 'project' ? `Ask about ${activeProject?.name || 'this project'}...` : 'Ask Onicode anything... (type / for commands)'}
+                        placeholder={scope === 'project' ? `Ask about ${activeProject?.name || 'this project'}... (/ commands, @ attachments)` : 'Ask Onicode anything... (/ commands, @ attachments)'}
                         rows={1}
                         disabled={isTyping}
                     />
@@ -1835,8 +2215,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             <circle cx="12" cy="12" r="10" />
                             <path d="M12 6v6l4 2" />
                         </svg>
+                        <span className="context-model">{getActiveProvider()?.selectedModel || 'gpt-4o'}</span>
+                        <span className="context-divider">·</span>
                         <span>~{contextInfo.tokens.toLocaleString()} tokens · {contextInfo.messages} msgs</span>
-                        {contextInfo.tokens > 50000 && <span className="context-warning">compacting soon</span>}
+                        {contextInfo.tokens > 150000 && <span className="context-warning">compacting soon</span>}
                     </div>
                 )}
             </div>

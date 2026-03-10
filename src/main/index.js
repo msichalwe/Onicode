@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, shell, net } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, net, protocol } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
@@ -13,8 +14,8 @@ const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses } = require('./aiTools');
-const { conversationStorage, closeDB } = require('./storage');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive } = require('./aiTools');
+const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
 
@@ -674,12 +675,20 @@ function sendCompletionSummary(toolsUsed) {
 
     if (summary.total > 0) {
         parts.push(`**${summary.done}/${summary.total} tasks completed.**`);
+        if (summary.pending > 0) parts.push(`${summary.pending} still pending.`);
     }
 
     const actions = [];
-    if (toolsUsed.has('create_file')) actions.push('created files');
-    if (toolsUsed.has('edit_file') || toolsUsed.has('multi_edit')) actions.push('edited files');
+    if (toolsUsed.has('create_file')) {
+        const fileCount = fileContext.created?.length || 0;
+        actions.push(fileCount > 0 ? `created ${fileCount} files` : 'created files');
+    }
+    if (toolsUsed.has('edit_file') || toolsUsed.has('multi_edit')) {
+        const editCount = fileContext.edited?.length || 0;
+        actions.push(editCount > 0 ? `edited ${editCount} files` : 'edited files');
+    }
     if (toolsUsed.has('run_command')) actions.push('ran commands');
+    if (toolsUsed.has('git_commit')) actions.push('committed changes');
     if (toolsUsed.has('browser_navigate') || toolsUsed.has('browser_screenshot')) actions.push('used browser');
     if (toolsUsed.has('init_project')) actions.push('initialized project');
     if (toolsUsed.has('spawn_sub_agent')) actions.push('spawned sub-agents');
@@ -709,13 +718,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
     const model = selectedModel || 'gpt-4o';
     const MAX_ROUNDS = 50;
-    const MAX_AUTO_CONTINUES = 5;
+    const MAX_AUTO_CONTINUES = 15;
 
     // Wire provider config for sub-agent use
     setLastProviderConfig({ id: 'codex', apiKey: accessToken, selectedModel: model });
     startSession(null, projectPath);
     setPermissions(activePermissions);
     setAgentModeRef(agentMode);
+    setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks
 
     // Separate system/developer instructions from user/assistant messages
     const systemMessages = messages.filter((m) => m.role === 'system');
@@ -754,15 +764,15 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
                 if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
                     autoContinueCount++;
-                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}: ${summary.pending} tasks pending`);
+                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.done}/${summary.total} done`);
 
                     const projectContext = buildContinueContext();
+                    const nextTask = summary.nextTask;
                     let continuePrompt;
                     if (!hasBuiltAnything) {
-                        continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files. Do not explain — just make the tool calls.\n\n${projectContext}`;
+                        continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n${projectContext}`;
                     } else {
-                        const nextTask = summary.nextTask;
-                        continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.\n\n${projectContext}`;
+                        continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. You MUST continue with tool calls NOW. Do not explain — execute the next task immediately.\nNext: "${nextTask?.content || 'check task_list'}"\n\n${projectContext}`;
                     }
 
                     inputItems.push({ role: 'user', content: continuePrompt });
@@ -770,6 +780,10 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     continue;
                 }
 
+                if (hasPendingTasks) {
+                    logger.warn('agent-loop', `Max auto-continues (${MAX_AUTO_CONTINUES}) reached with ${summary.pending} tasks still pending`);
+                    mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
+                }
                 sendCompletionSummary(toolsUsed);
                 mainWindow?.webContents.send('ai-stream-done', null);
                 return { success: true };
@@ -832,6 +846,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
         console.error('[AI] ChatGPT backend request error:', err.message);
         mainWindow?.webContents.send('ai-stream-done', err.message);
         return { error: err.message };
+    } finally {
+        setAIStreamingActive(false); // Unlock: renderer can now safely reload tasks
     }
 }
 
@@ -1072,7 +1088,7 @@ setCompactorAICall(makeSubAgentAICall);
  * Keeps the system prompt and last N messages, replaces the middle with a summary.
  * Inspired by OpenCode's compaction agent.
  */
-function compactConversation(messages, maxTokenEstimate = 100000) {
+function compactConversation(messages, maxTokenEstimate = 180000) {
     // Rough token estimate: ~4 chars per token
     const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0) + JSON.stringify(m.tool_calls || '').length, 0);
     const estimatedTokens = totalChars / 4;
@@ -1176,8 +1192,9 @@ function compactConversation(messages, maxTokenEstimate = 100000) {
  */
 async function streamOpenAI(messages, providerConfig, projectPath) {
     const MAX_TOOL_ROUNDS = 50;  // Support long 10+ minute sessions
-    const MAX_AUTO_CONTINUES = 5; // Max times we'll push the model to continue
+    const MAX_AUTO_CONTINUES = 15; // Max times we'll push the model to continue (was 5, too low)
     let conversationMessages = [...messages];
+    setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks
     let round = 0;
     let autoContinueCount = 0;
     const toolsUsed = new Set(); // Track which tool types have been called
@@ -1205,77 +1222,105 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         }
     }
 
-    // If this is a new conversation about an existing project, inject previous conversation summary
-    if (projectPath && conversationMessages.length <= 3) {
+    // Inject previous session context when continuing work on a project
+    if (projectPath) {
         try {
-            const projectId = conversationMessages[0]?.content?.match(/projectId:\s*([^\s,]+)/)?.[1];
             const { conversationStorage: convStore } = require('./storage');
-            // Try to find latest conversation for this project
-            const stored = localStorage?.getItem?.('onicode-active-project');
-            let projId = projectId;
-            if (!projId) {
-                // Match by project path in system prompt
-                const projMatch = conversationMessages[0]?.content?.match(/Path:\s*`([^`]+)`/);
-                if (projMatch) {
-                    // Search for recent project conversations
-                    const recent = convStore.list(10, 0);
-                    const found = recent.find(c => c.project_name && projectPath.endsWith(c.project_name));
-                    if (found) projId = found.project_id;
-                }
-            }
-            if (projId) {
-                const lastConv = convStore.getLatestForProject(projId);
-                if (lastConv && lastConv.messages) {
-                    const msgs = typeof lastConv.messages === 'string' ? JSON.parse(lastConv.messages) : lastConv.messages;
-                    if (msgs.length > 2) {
-                        // Build a compact summary of the last conversation
-                        const summaryParts = [];
-                        const aiMsgs = msgs.filter(m => m.role === 'ai' || m.role === 'assistant');
-                        const userMsgs = msgs.filter(m => m.role === 'user');
-                        if (userMsgs.length > 0) {
-                            summaryParts.push(`Previous session request: "${userMsgs[0].content?.slice(0, 200)}"`);
-                        }
-                        // Get last AI message (usually a summary of what was done)
-                        if (aiMsgs.length > 0) {
-                            const lastAI = aiMsgs[aiMsgs.length - 1];
-                            summaryParts.push(`Last AI response: "${lastAI.content?.slice(0, 500)}"`);
-                        }
-                        // Get tool steps if available
-                        const toolSteps = msgs.flatMap(m => m.toolSteps || []).filter(s => s.status === 'done');
-                        if (toolSteps.length > 0) {
-                            const toolNames = [...new Set(toolSteps.map(s => s.name))];
-                            summaryParts.push(`Tools used last session: ${toolNames.join(', ')}`);
-                        }
+            const contextParts = [];
 
-                        if (summaryParts.length > 0) {
-                            const lastSystemIdx = conversationMessages.findLastIndex(m => m.role === 'system');
-                            if (lastSystemIdx >= 0) {
-                                conversationMessages[lastSystemIdx] = {
-                                    ...conversationMessages[lastSystemIdx],
-                                    content: conversationMessages[lastSystemIdx].content +
-                                        '\n\n## Previous Session Context\n' +
-                                        'The user previously worked on this project. Here is context from the last session:\n' +
-                                        summaryParts.join('\n') +
-                                        '\n\nUse this context to understand where they left off. Do NOT repeat completed work.',
-                                };
+            // 1. Task history — show what tasks exist from previous/current sessions
+            const taskSummary = taskManager.getSummary();
+            if (taskSummary.total > 0) {
+                const taskLines = taskSummary.tasks.map(t =>
+                    `  [${t.status.toUpperCase()}] #${t.id}: ${t.content}`
+                );
+                contextParts.push(`Existing tasks (${taskSummary.done}/${taskSummary.total} done):\n${taskLines.join('\n')}`);
+            }
+
+            // 2. Previous conversation context (for new conversations only)
+            if (conversationMessages.length <= 3) {
+                // Find project conversations by searching recent ones
+                const recent = convStore.list(10, 0);
+                const projConv = recent.find(c => {
+                    if (c.project_name && projectPath.includes(c.project_name)) return true;
+                    return false;
+                });
+                if (projConv) {
+                    const lastConv = convStore.getLatestForProject(projConv.project_id);
+                    if (lastConv?.messages) {
+                        const msgs = typeof lastConv.messages === 'string' ? JSON.parse(lastConv.messages) : lastConv.messages;
+                        if (msgs.length > 2) {
+                            const userMsgs = msgs.filter(m => m.role === 'user');
+                            const aiMsgs = msgs.filter(m => m.role === 'ai' || m.role === 'assistant');
+                            if (userMsgs.length > 0) {
+                                contextParts.push(`Previous session request: "${userMsgs[0].content?.slice(0, 300)}"`);
+                            }
+                            if (aiMsgs.length > 0) {
+                                contextParts.push(`Last AI summary: "${aiMsgs[aiMsgs.length - 1].content?.slice(0, 500)}"`);
+                            }
+                            const toolSteps = msgs.flatMap(m => m.toolSteps || []).filter(s => s.status === 'done');
+                            if (toolSteps.length > 0) {
+                                const toolNames = [...new Set(toolSteps.map(s => s.name))];
+                                contextParts.push(`Tools used last session: ${toolNames.join(', ')}`);
                             }
                         }
                     }
                 }
             }
-        } catch { /* previous conversation loading failed, proceed without */ }
+
+            // 3. Project directory listing — show what files exist
+            const fs = require('fs');
+            if (fs.existsSync(projectPath)) {
+                const listDir = (dir, depth = 0, max = 2) => {
+                    if (depth >= max) return [];
+                    try {
+                        return fs.readdirSync(dir, { withFileTypes: true })
+                            .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== '.git')
+                            .sort((a, b) => (a.isDirectory() === b.isDirectory()) ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1)
+                            .flatMap(e => {
+                                const p = require('path').join(dir, e.name);
+                                return e.isDirectory() ? [`${'  '.repeat(depth)}${e.name}/`, ...listDir(p, depth + 1, max)] : [`${'  '.repeat(depth)}${e.name}`];
+                            });
+                    } catch { return []; }
+                };
+                const listing = listDir(projectPath);
+                if (listing.length > 0) {
+                    contextParts.push(`Project directory (${projectPath}):\n${listing.slice(0, 40).join('\n')}`);
+                }
+            }
+
+            // Inject context into system message
+            if (contextParts.length > 0) {
+                const lastSystemIdx = conversationMessages.findLastIndex(m => m.role === 'system');
+                if (lastSystemIdx >= 0) {
+                    conversationMessages[lastSystemIdx] = {
+                        ...conversationMessages[lastSystemIdx],
+                        content: conversationMessages[lastSystemIdx].content +
+                            '\n\n## Project Context (auto-injected)\n' +
+                            contextParts.join('\n\n') +
+                            '\n\nUse this context to understand the current state. Check task_list before adding new tasks. Do NOT repeat completed work or re-create existing files.',
+                    };
+                }
+            }
+        } catch { /* context injection failed, proceed without */ }
     }
 
+    try {
     while (round < MAX_TOOL_ROUNDS) {
         round++;
 
         // Auto-compact conversation if it's getting too long
-        // Prefer semantic (AI-powered) compaction, fall back to mechanical
+        // Check actual token estimate before compacting
         if (round > 3) {
-            try {
-                conversationMessages = await semanticCompact(conversationMessages);
-            } catch {
-                conversationMessages = compactConversation(conversationMessages);
+            const totalChars = conversationMessages.reduce((sum, m) => sum + (m.content?.length || 0) + JSON.stringify(m.tool_calls || '').length, 0);
+            const estTokens = totalChars / 4;
+            if (estTokens > 150000) {
+                logger.info('compaction', `Auto-compact triggered at round ${round}, ~${Math.round(estTokens)} tokens`);
+                try {
+                    conversationMessages = await semanticCompact(conversationMessages);
+                } catch {
+                    conversationMessages = compactConversation(conversationMessages);
+                }
             }
         }
 
@@ -1293,30 +1338,40 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             return { error: result.error };
         }
 
+        // ── Handle finish_reason: length (truncated response) ──
+        if (result.finishReason === 'length' && !result.hasToolCalls) {
+            logger.info('agent-loop', `Response truncated (finish_reason=length) at round ${round}. Requesting continuation.`);
+            if (result.textContent) {
+                conversationMessages.push({ role: 'assistant', content: result.textContent });
+            }
+            conversationMessages.push({ role: 'user', content: 'Your previous response was truncated due to length limits. Continue exactly where you left off. Do NOT repeat what you already said.' });
+            continue; // Loop back — this does NOT count against MAX_AUTO_CONTINUES
+        }
+
         // ── Text-only response: check if we should auto-continue ──
         if (!result.hasToolCalls) {
             const summary = taskManager.getSummary();
             const hasPendingTasks = summary.pending > 0 || summary.inProgress > 0;
             const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
 
-            // Auto-continue if: tasks are pending AND (we haven't built anything yet OR tasks in-progress)
+            // Auto-continue if tasks are pending
             if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
                 autoContinueCount++;
-                logger.info('agent-loop', `Auto-continue #${autoContinueCount} (will force tool_choice:required): ${summary.pending} tasks pending, ${summary.done}/${summary.total} done`);
+                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done`);
 
                 // Add the assistant's text response to conversation
                 if (result.textContent) {
                     conversationMessages.push({ role: 'assistant', content: result.textContent });
                 }
 
-                // Build context-rich continuation prompt so the AI doesn't lose track
+                // Build aggressive continuation prompt — the AI MUST call tools
                 const projectContext = buildContinueContext();
+                const nextTask = summary.nextTask;
                 let continuePrompt;
                 if (!hasBuiltAnything) {
-                    continuePrompt = `You have ${summary.pending} pending tasks but have not created any project files yet. You MUST call create_file now to create the actual source code files. Do not explain — just make the tool calls.\n\n${projectContext}`;
+                    continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n${projectContext}`;
                 } else {
-                    const nextTask = summary.nextTask;
-                    continuePrompt = `Continue building. ${summary.done}/${summary.total} tasks done. Next task: "${nextTask?.content || 'check task_list'}". Execute it now with tool calls.\n\n${projectContext}`;
+                    continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. You MUST continue with tool calls NOW. Do not explain — execute the next task immediately.\nNext: "${nextTask?.content || 'check task_list'}"\n\n${projectContext}`;
                 }
 
                 conversationMessages.push({ role: 'user', content: continuePrompt });
@@ -1327,6 +1382,11 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             }
 
             // Actually done (no pending tasks, or max auto-continues reached)
+            if (hasPendingTasks) {
+                // Reached MAX_AUTO_CONTINUES with tasks still pending — notify user
+                logger.warn('agent-loop', `Max auto-continues (${MAX_AUTO_CONTINUES}) reached with ${summary.pending} tasks still pending`);
+                mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
+            }
             currentAIRequest = null;
             sendCompletionSummary(toolsUsed);
             mainWindow?.webContents.send('ai-stream-done', null);
@@ -1400,6 +1460,10 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
     try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
     currentAIRequest = null;
     return { success: true };
+
+    } finally {
+        setAIStreamingActive(false); // Unlock: renderer can now safely reload tasks
+    }
 }
 
 ipcMain.handle('ai-abort', () => {
@@ -1458,6 +1522,26 @@ ipcMain.handle('read-file-content', async (_event, filePath) => {
         return { content, size: stats.size, modified: stats.mtime.toISOString() };
     } catch (err) {
         return { error: err.message };
+    }
+});
+
+ipcMain.handle('read-screenshot-base64', async (_event, filePath) => {
+    try {
+        const home = require('os').homedir();
+        const allowedPrefixes = [
+            path.join(home, '.onicode'),
+            path.join(home, 'OniProjects'),
+        ];
+        if (!allowedPrefixes.some(prefix => filePath.startsWith(prefix))) {
+            return { error: 'Forbidden' };
+        }
+        const data = fs.readFileSync(filePath);
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+        const mime = mimeMap[ext] || 'image/png';
+        return { dataUri: `data:${mime};base64,${data.toString('base64')}` };
+    } catch {
+        return { error: 'Not found' };
     }
 });
 
@@ -1680,7 +1764,7 @@ const DEFAULT_PERMISSIONS = {
     task_add: 'allow',
     task_update: 'allow',
     task_list: 'allow',
-    task_clear: 'allow',
+    milestone_create: 'allow',
     init_project: 'allow',
     memory_read: 'allow',
     memory_write: 'allow',
@@ -1826,6 +1910,90 @@ ipcMain.handle('load-project-tasks', async (_event, projectPath) => {
     }
 });
 
+// Manual task CRUD — allows UI to create/update/delete tasks through TaskManager
+ipcMain.handle('task-create', async (_event, { content, priority }) => {
+    try {
+        const task = taskManager.addTask(content, priority || 'medium');
+        return { success: true, task, summary: taskManager.getSummary() };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('task-update', async (_event, { id, updates }) => {
+    try {
+        const result = taskManager.updateTask(id, updates);
+        if (result.error) return { success: false, error: result.error };
+        return { success: true, task: result, summary: taskManager.getSummary() };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('task-delete', async (_event, { id }) => {
+    try {
+        const result = taskManager.removeTask(id);
+        if (result.error) return { success: false, error: result.error };
+        return { success: true, summary: taskManager.getSummary() };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// ══════════════════════════════════════════
+//  Milestone IPC (SQLite-backed)
+// ══════════════════════════════════════════
+
+ipcMain.handle('milestone-list', async (_event, projectPath) => {
+    try {
+        const milestones = milestoneStorage.getProjectSummary(projectPath);
+        return { success: true, milestones };
+    } catch (err) {
+        return { success: false, error: err.message, milestones: [] };
+    }
+});
+
+ipcMain.handle('milestone-create', async (_event, { milestone, projectId, projectPath }) => {
+    try {
+        milestoneStorage.save(milestone, projectId, projectPath);
+        return { success: true, milestone };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('milestone-update', async (_event, { id, updates }) => {
+    try {
+        milestoneStorage.update(id, updates);
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('milestone-delete', async (_event, { id }) => {
+    try {
+        milestoneStorage.delete(id);
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// Assign a task to a milestone
+ipcMain.handle('task-set-milestone', async (_event, { taskId, milestoneId }) => {
+    try {
+        const task = taskManager.getTask(taskId);
+        if (!task) return { success: false, error: 'Task not found' };
+        task.milestoneId = milestoneId || null;
+        taskManager._persistUpdate(taskId, { milestoneId: milestoneId || null });
+        taskManager._notifyRenderer();
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
 // ══════════════════════════════════════════
 //  Conversation Storage IPC (SQLite)
 // ══════════════════════════════════════════
@@ -1885,6 +2053,37 @@ ipcMain.handle('conversation-migrate', async (_event, conversations) => {
 });
 
 // ══════════════════════════════════════════
+//  Attachment Storage IPC (project-scoped)
+// ══════════════════════════════════════════
+
+ipcMain.handle('attachment-save', async (_event, att) => {
+    try {
+        attachmentStorage.save(att);
+        return { success: true };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('attachment-list', async (_event, projectId) => {
+    try {
+        const attachments = attachmentStorage.listByProject(projectId);
+        return { success: true, attachments };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+ipcMain.handle('attachment-delete', async (_event, id) => {
+    try {
+        attachmentStorage.delete(id);
+        return { success: true };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
+// ══════════════════════════════════════════
 //  Initialize Permissions Sync
 // ══════════════════════════════════════════
 
@@ -1898,7 +2097,38 @@ setAutoCommitCheck(() => autoCommitEnabled);
 //  App Lifecycle
 // ══════════════════════════════════════════
 
+// Register custom protocol for serving local files (screenshots, etc.)
+// Must be called before app.whenReady()
+protocol.registerSchemesAsPrivileged([{
+    scheme: 'onicode-file',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+}]);
+
 app.whenReady().then(() => {
+    // Register protocol handler for local file access (screenshots, etc.)
+    protocol.handle('onicode-file', (request) => {
+        const filePath = decodeURIComponent(request.url.replace('onicode-file://', ''));
+        // Security: only allow files from ~/.onicode/ and project directories
+        const home = require('os').homedir();
+        const allowedPrefixes = [
+            path.join(home, '.onicode'),
+            path.join(home, 'OniProjects'),
+        ];
+        if (!allowedPrefixes.some(prefix => filePath.startsWith(prefix))) {
+            return new Response('Forbidden', { status: 403 });
+        }
+        try {
+            const data = fs.readFileSync(filePath);
+            const ext = path.extname(filePath).toLowerCase();
+            const mimeTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
+            return new Response(data, {
+                headers: { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' },
+            });
+        } catch {
+            return new Response('Not Found', { status: 404 });
+        }
+    });
+
     createWindow();
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();

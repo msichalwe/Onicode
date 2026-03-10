@@ -48,7 +48,19 @@ function initSchema() {
             created_at TEXT NOT NULL,
             completed_at TEXT,
             project_id TEXT,
-            project_path TEXT
+            project_path TEXT,
+            milestone_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS milestones (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            due_date INTEGER,
+            project_id TEXT,
+            project_path TEXT,
+            created_at INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS conversations (
@@ -76,10 +88,25 @@ function initSchema() {
             summary TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS attachments (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'file',
+            size INTEGER,
+            mime_type TEXT,
+            url TEXT,
+            content TEXT,
+            data_url TEXT,
+            conversation_id TEXT,
+            created_at INTEGER NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
         CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments(project_id);
     `);
 }
 
@@ -108,10 +135,10 @@ const taskStorage = {
     save(task, sessionId, projectId, projectPath) {
         const d = getDB();
         const stmt = d.prepare(`
-            INSERT OR REPLACE INTO tasks (id, session_id, content, status, priority, created_at, completed_at, project_id, project_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO tasks (id, session_id, content, status, priority, created_at, completed_at, project_id, project_path, milestone_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
-        stmt.run(task.id, sessionId, task.content, task.status, task.priority, task.createdAt, task.completedAt, projectId || null, projectPath || null);
+        stmt.run(task.id, sessionId, task.content, task.status, task.priority, task.createdAt, task.completedAt, projectId || null, projectPath || null, task.milestoneId || null);
     },
 
     update(taskId, updates, sessionId) {
@@ -122,6 +149,7 @@ const taskStorage = {
         if (updates.content) { fields.push('content = ?'); values.push(updates.content); }
         if (updates.priority) { fields.push('priority = ?'); values.push(updates.priority); }
         if (updates.completedAt) { fields.push('completed_at = ?'); values.push(updates.completedAt); }
+        if (updates.milestoneId !== undefined) { fields.push('milestone_id = ?'); values.push(updates.milestoneId); }
         if (fields.length === 0) return;
         values.push(taskId, sessionId);
         d.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ? AND session_id = ?`).run(...values);
@@ -140,20 +168,40 @@ const taskStorage = {
         ).all(projectPath);
     },
 
-    /** Load the latest session's tasks for a project */
+    /** Load the latest session's tasks for a project.
+     *  Searches by task project_path first, then falls back to session project_path. */
     loadLatestProjectSession(projectPath) {
         const d = getDB();
-        const row = d.prepare(
+        // Primary: find by task-level project_path
+        let row = d.prepare(
             'SELECT session_id FROM tasks WHERE project_path = ? ORDER BY created_at DESC LIMIT 1'
         ).get(projectPath);
+        // Fallback: find by session-level project_path (covers tasks saved before project_path was set on them)
+        if (!row) {
+            row = d.prepare(
+                'SELECT t.session_id FROM tasks t INNER JOIN sessions s ON t.session_id = s.id WHERE s.project_path = ? ORDER BY t.created_at DESC LIMIT 1'
+            ).get(projectPath);
+        }
         if (!row) return [];
-        return d.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY id').all(row.session_id);
+        return d.prepare("SELECT * FROM tasks WHERE session_id = ? AND status != 'archived' ORDER BY id").all(row.session_id);
+    },
+
+    /** Retroactively update project_path on all tasks in a session (used when init_project runs mid-session) */
+    updateSessionProjectPath(sessionId, projectPath, projectId) {
+        const d = getDB();
+        d.prepare('UPDATE tasks SET project_path = ?, project_id = ? WHERE session_id = ? AND project_path IS NULL')
+            .run(projectPath, projectId || null, sessionId);
     },
 
     /** Archive completed tasks — move done/skipped tasks to an archive flag */
     archiveCompleted(sessionId) {
         const d = getDB();
         d.prepare("UPDATE tasks SET status = 'archived' WHERE session_id = ? AND (status = 'done' OR status = 'skipped')").run(sessionId);
+    },
+
+    deleteTask(taskId, sessionId) {
+        const d = getDB();
+        d.prepare('DELETE FROM tasks WHERE id = ? AND session_id = ?').run(taskId, sessionId);
     },
 
     clearSession(sessionId) {
@@ -177,6 +225,66 @@ const taskStorage = {
             archived: tasks.filter(t => t.status === 'archived'),
             skipped: tasks.filter(t => t.status === 'skipped'),
         };
+    },
+};
+
+// ══════════════════════════════════════════
+//  Milestone Storage
+// ══════════════════════════════════════════
+
+const milestoneStorage = {
+    save(milestone, projectId, projectPath) {
+        const d = getDB();
+        d.prepare(`
+            INSERT OR REPLACE INTO milestones (id, title, description, status, due_date, project_id, project_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(milestone.id, milestone.title, milestone.description || '', milestone.status || 'open', milestone.dueDate || null, projectId || null, projectPath || null, milestone.createdAt || Date.now());
+    },
+
+    update(id, updates) {
+        const d = getDB();
+        const fields = [];
+        const values = [];
+        if (updates.title !== undefined) { fields.push('title = ?'); values.push(updates.title); }
+        if (updates.description !== undefined) { fields.push('description = ?'); values.push(updates.description); }
+        if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
+        if (updates.dueDate !== undefined) { fields.push('due_date = ?'); values.push(updates.dueDate); }
+        if (fields.length === 0) return;
+        values.push(id);
+        d.prepare(`UPDATE milestones SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    },
+
+    delete(id) {
+        const d = getDB();
+        // Unlink tasks from this milestone
+        d.prepare('UPDATE tasks SET milestone_id = NULL WHERE milestone_id = ?').run(id);
+        d.prepare('DELETE FROM milestones WHERE id = ?').run(id);
+    },
+
+    loadProject(projectPath) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM milestones WHERE project_path = ? ORDER BY created_at').all(projectPath);
+    },
+
+    get(id) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM milestones WHERE id = ?').get(id);
+    },
+
+    /** Get milestones with task counts */
+    getProjectSummary(projectPath) {
+        const d = getDB();
+        const milestones = d.prepare('SELECT * FROM milestones WHERE project_path = ? ORDER BY created_at').all(projectPath);
+        return milestones.map(ms => {
+            const tasks = d.prepare('SELECT status FROM tasks WHERE milestone_id = ?').all(ms.id);
+            return {
+                ...ms,
+                dueDate: ms.due_date,
+                taskCount: tasks.length,
+                tasksDone: tasks.filter(t => t.status === 'done').length,
+                tasksInProgress: tasks.filter(t => t.status === 'in_progress').length,
+            };
+        });
     },
 };
 
@@ -275,6 +383,13 @@ const sessionStorage = {
             .run(id, Date.now(), projectId || null, projectPath || null);
     },
 
+    /** Update session's project info (used when init_project assigns a project mid-session) */
+    updateProjectPath(id, projectId, projectPath) {
+        const d = getDB();
+        d.prepare('UPDATE sessions SET project_id = ?, project_path = ? WHERE id = ?')
+            .run(projectId || null, projectPath || null, id);
+    },
+
     update(id, updates) {
         const d = getDB();
         const fields = [];
@@ -302,6 +417,40 @@ const sessionStorage = {
 };
 
 // ══════════════════════════════════════════
+//  Attachment Storage (project-scoped)
+// ══════════════════════════════════════════
+
+const attachmentStorage = {
+    save(att) {
+        const d = getDB();
+        d.prepare(`
+            INSERT OR REPLACE INTO attachments (id, project_id, name, type, size, mime_type, url, content, data_url, conversation_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(att.id, att.projectId, att.name, att.type || 'file', att.size || null, att.mimeType || null, att.url || null, att.content || null, att.dataUrl || null, att.conversationId || null, att.createdAt || Date.now());
+    },
+
+    listByProject(projectId) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM attachments WHERE project_id = ? ORDER BY created_at DESC').all(projectId);
+    },
+
+    get(id) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM attachments WHERE id = ?').get(id);
+    },
+
+    delete(id) {
+        const d = getDB();
+        d.prepare('DELETE FROM attachments WHERE id = ?').run(id);
+    },
+
+    deleteByProject(projectId) {
+        const d = getDB();
+        d.prepare('DELETE FROM attachments WHERE project_id = ?').run(projectId);
+    },
+};
+
+// ══════════════════════════════════════════
 //  Close / Cleanup
 // ══════════════════════════════════════════
 
@@ -316,6 +465,8 @@ module.exports = {
     getDB,
     closeDB,
     taskStorage,
+    milestoneStorage,
     conversationStorage,
     sessionStorage,
+    attachmentStorage,
 };

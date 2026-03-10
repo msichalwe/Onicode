@@ -181,8 +181,20 @@ function levenshtein(a, b, maxDist = Infinity) {
 let _currentSessionId = null;
 let _currentProjectId = null;
 let _currentProjectPath = null;
+let _aiStreamingActive = false; // Lock: true when AI is actively executing tool calls
 
 function startSession(projectId, projectPath) {
+    // GUARD: Never reset session while AI is actively streaming (prevents task wipe race condition)
+    if (_aiStreamingActive && _currentSessionId) {
+        // If we're already streaming for this project, just update references
+        if (projectPath) {
+            _currentProjectId = projectId || _currentProjectId;
+            _currentProjectPath = projectPath || _currentProjectPath;
+        }
+        logger.info('session', `AI streaming active — kept existing session ${_currentSessionId} (no reset)`);
+        return _currentSessionId;
+    }
+
     // If same project is still active, keep the session (don't reset tasks)
     if (_currentProjectPath && _currentProjectPath === projectPath && _currentSessionId) {
         logger.info('session', `Continuing session ${_currentSessionId} for project ${projectPath}`);
@@ -213,6 +225,7 @@ function startSession(projectId, projectPath) {
                     priority: r.priority,
                     createdAt: r.created_at,
                     completedAt: r.completed_at,
+                    milestoneId: r.milestone_id || null,
                 }));
                 taskManager.nextId = Math.max(...taskManager.tasks.map(t => t.id), 0) + 1;
                 taskManager._notifyRenderer();
@@ -453,7 +466,7 @@ class TaskManager {
         } catch { /* storage not available */ }
     }
 
-    addTask(content, priority = 'medium') {
+    addTask(content, priority = 'medium', milestoneId = null) {
         const task = {
             id: this.nextId++,
             content,
@@ -461,10 +474,11 @@ class TaskManager {
             priority,
             createdAt: new Date().toISOString(),
             completedAt: null,
+            milestoneId,
         };
         this.tasks.push(task);
         this._persist(task);
-        logger.info('task-mgr', `Added task #${task.id}: ${content}`);
+        logger.info('task-mgr', `Added task #${task.id}: ${content}${milestoneId ? ` (milestone: ${milestoneId})` : ''}`);
         this._notifyRenderer();
         return task;
     }
@@ -511,18 +525,20 @@ class TaskManager {
     }
 
     getSummary() {
-        const total = this.tasks.length;
-        const done = this.tasks.filter(t => t.status === 'done').length;
-        const pending = this.tasks.filter(t => t.status === 'pending').length;
-        const inProgress = this.tasks.filter(t => t.status === 'in_progress').length;
+        // Exclude archived tasks from the active summary
+        const activeTasks = this.tasks.filter(t => t.status !== 'archived');
+        const total = activeTasks.length;
+        const done = activeTasks.filter(t => t.status === 'done').length;
+        const pending = activeTasks.filter(t => t.status === 'pending').length;
+        const inProgress = activeTasks.filter(t => t.status === 'in_progress').length;
         return {
             total,
             done,
             pending,
             inProgress,
-            allDone: this.allDone(),
+            allDone: total > 0 && activeTasks.every(t => t.status === 'done' || t.status === 'skipped'),
             nextTask: this.getNextTask(),
-            tasks: this.tasks,
+            tasks: activeTasks,
         };
     }
 
@@ -536,25 +552,69 @@ class TaskManager {
         this._notifyRenderer();
     }
 
-    /** Load tasks for a project from the latest session */
+    /** Load tasks for a project from the latest session.
+     *  NEVER wipe in-memory tasks when:
+     *  1. AI is actively streaming (executing tool calls)
+     *  2. The current session already has tasks for this project */
     loadFromProject(projectPath) {
+        // GUARD: Never wipe tasks while AI is actively working
+        if (_aiStreamingActive) {
+            logger.info('task-mgr', `AI streaming active — broadcasting current ${this.tasks.length} tasks instead of reloading`);
+            this._notifyRenderer();
+            return;
+        }
+
+        // If this project is already active with tasks, just re-broadcast (don't reload from DB)
+        if (_currentProjectPath === projectPath && this.tasks.length > 0) {
+            logger.info('task-mgr', `Project ${projectPath} already active with ${this.tasks.length} tasks, broadcasting`);
+            this._notifyRenderer();
+            return;
+        }
+
+        // If we have tasks but no project path set yet, adopt this project path
+        // (covers the case where init_project ran during streaming and set _currentProjectPath)
+        if (this.tasks.length > 0 && !_currentProjectPath) {
+            _currentProjectPath = projectPath;
+            logger.info('task-mgr', `Adopted project path ${projectPath} for ${this.tasks.length} existing tasks`);
+            this._notifyRenderer();
+            return;
+        }
+
         try {
             const { taskStorage } = require('./storage');
             const rows = taskStorage.loadLatestProjectSession(projectPath);
-            this.tasks = rows.map(r => ({
-                id: r.id,
-                content: r.content,
-                status: r.status,
-                priority: r.priority,
-                createdAt: r.created_at,
-                completedAt: r.completed_at,
-            }));
-            this.nextId = this.tasks.length > 0 ? Math.max(...this.tasks.map(t => t.id)) + 1 : 1;
+            if (rows.length > 0) {
+                this.tasks = rows.map(r => ({
+                    id: r.id,
+                    content: r.content,
+                    status: r.status,
+                    priority: r.priority,
+                    createdAt: r.created_at,
+                    completedAt: r.completed_at,
+                    milestoneId: r.milestone_id || null,
+                }));
+                this.nextId = Math.max(...this.tasks.map(t => t.id)) + 1;
+            }
+            // Update project path reference
+            _currentProjectPath = projectPath;
             this._notifyRenderer();
-            logger.info('task-mgr', `Loaded ${this.tasks.length} tasks for project ${projectPath}`);
+            logger.info('task-mgr', `Loaded ${rows.length} tasks for project ${projectPath}`);
         } catch (err) {
             logger.warn('task-mgr', `Failed to load project tasks: ${err.message}`);
         }
+    }
+
+    /** Remove a task by ID (for manual task deletion from UI) */
+    removeTask(id) {
+        const idx = this.tasks.findIndex(t => t.id === id);
+        if (idx === -1) return { error: `Task #${id} not found` };
+        this.tasks.splice(idx, 1);
+        try {
+            const { taskStorage } = require('./storage');
+            taskStorage.deleteTask(id, getSessionId());
+        } catch { /* storage not available */ }
+        this._notifyRenderer();
+        return { success: true };
     }
 
     /** Load tasks from a previous session (for recovery) */
@@ -569,6 +629,7 @@ class TaskManager {
                 priority: r.priority,
                 createdAt: r.created_at,
                 completedAt: r.completed_at,
+                milestoneId: r.milestone_id || null,
             }));
             this.nextId = this.tasks.length > 0 ? Math.max(...this.tasks.map(t => t.id)) + 1 : 1;
             this._notifyRenderer();
@@ -590,8 +651,18 @@ function setLastProviderConfig(config) { _lastProviderConfig = config; }
 // ══════════════════════════════════════════
 
 const terminalSessions = [];
+let _termSessionCounter = 0; // Monotonic counter to guarantee unique IDs
 
 function getTerminalSessions() {
+    // Cleanup: remove completed sessions older than 100 entries
+    while (terminalSessions.length > 100) {
+        const oldest = terminalSessions[0];
+        if (oldest.status !== 'running') {
+            terminalSessions.shift();
+        } else {
+            break;
+        }
+    }
     return terminalSessions.slice(-50); // Last 50 sessions
 }
 
@@ -1256,12 +1327,13 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'task_add',
-            description: 'Add a task to your work plan. Always create a task list BEFORE starting any multi-step work. This is how you track what needs to be done.',
+            description: 'Add a task to your work plan. Always create a task list BEFORE starting any multi-step work. This is how you track what needs to be done. Optionally assign to a milestone for agile sprint tracking.',
             parameters: {
                 type: 'object',
                 properties: {
                     content: { type: 'string', description: 'Task description' },
                     priority: { type: 'string', description: '"high", "medium", or "low"' },
+                    milestone_id: { type: 'string', description: 'Optional milestone ID to group this task under' },
                 },
                 required: ['content'],
             },
@@ -1299,9 +1371,16 @@ const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
-            name: 'task_clear',
-            description: 'Clear all tasks. Use when starting a completely new work plan.',
-            parameters: { type: 'object', properties: {} },
+            name: 'milestone_create',
+            description: 'Create a milestone to group tasks into sprints/phases. Tasks can be assigned to milestones via task_add(milestone_id).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Milestone title (e.g. "Sprint 1", "Phase 1: Setup")' },
+                    description: { type: 'string', description: 'What this milestone covers' },
+                },
+                required: ['title'],
+            },
         },
     },
     // ── Web Tools ──
@@ -1906,9 +1985,10 @@ async function executeTool(name, args) {
                 // Auto-open terminal panel in renderer
                 sendToRenderer('ai-panel-open', { type: 'terminal' });
 
-                // Track in terminal session history
+                // Track in terminal session history (monotonic counter ensures unique IDs)
+                _termSessionCounter++;
                 const sessionEntry = {
-                    id: Date.now().toString(36),
+                    id: `cmd_${Date.now().toString(36)}_${_termSessionCounter}`,
                     command,
                     cwd: execCwd,
                     startedAt: Date.now(),
@@ -2507,24 +2587,35 @@ async function executeTool(name, args) {
                     }
                 }
 
-                // Clear stale tasks from previous init attempts
-                taskManager.clear();
+                // Update session references for this project (safe during streaming — won't wipe tasks)
+                _currentProjectId = result.project?.id || _currentProjectId;
+                _currentProjectPath = expandedPath;
 
-                // Fire project activation event in the renderer
+                // Retroactively update project_path on session + orphaned tasks (fixes persistence across restarts)
+                try {
+                    const { taskStorage, sessionStorage: sesStore } = require('./storage');
+                    const sid = getSessionId();
+                    sesStore.updateProjectPath(sid, _currentProjectId, expandedPath);
+                    taskStorage.updateSessionProjectPath(sid, expandedPath, _currentProjectId);
+                } catch { /* non-fatal */ }
+
+                // Fire project activation event in the renderer (deferred to avoid race with task_add)
                 if (result.project) {
                     sendToRenderer('ai-panel-open', { type: 'project' });
-                    // Send a custom event to activate project mode
+                    // Defer the event dispatch so it doesn't trigger loadProjectTasks() while AI is adding tasks
                     if (_mainWindow?.webContents) {
-                        _mainWindow.webContents.executeJavaScript(`
-                            window.dispatchEvent(new CustomEvent('onicode-project-activate', {
-                                detail: {
-                                    id: ${JSON.stringify(result.project.id)},
-                                    name: ${JSON.stringify(result.project.name)},
-                                    path: ${JSON.stringify(result.project.path || expandedPath)},
-                                    branch: 'main'
-                                }
-                            }));
-                        `);
+                        setTimeout(() => {
+                            _mainWindow?.webContents.executeJavaScript(`
+                                window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                                    detail: {
+                                        id: ${JSON.stringify(result.project.id)},
+                                        name: ${JSON.stringify(result.project.name)},
+                                        path: ${JSON.stringify(result.project.path || expandedPath)},
+                                        branch: 'main'
+                                    }
+                                }));
+                            `);
+                        }, 500); // 500ms delay — enough for task_add calls to complete first
                     }
                 }
 
@@ -2533,7 +2624,7 @@ async function executeTool(name, args) {
                     project_name: projName,
                     project_path: expandedPath,
                     already_registered: result.alreadyRegistered || false,
-                    onidocs_created: ['architecture.md', 'scope.md', 'changelog.md', 'tasks.md', 'README.md'],
+                    onidocs_created: ['architecture.md', 'project.md', 'changelog.md', 'README.md'],
                     message: result.alreadyRegistered
                         ? `Project "${projName}" is already registered. Task list cleared for fresh start.`
                         : `Project "${projName}" registered in Onicode. Template onidocs/ created.`,
@@ -2635,7 +2726,7 @@ async function executeTool(name, args) {
             // ── Task Management Executors ──
 
             case 'task_add': {
-                const task = taskManager.addTask(args.content, args.priority || 'medium');
+                const task = taskManager.addTask(args.content, args.priority || 'medium', args.milestone_id || null);
                 const summary = taskManager.getSummary();
                 const result = { success: true, task, summary };
                 // If we have tasks but none are in-progress or done, remind AI to start executing
@@ -2669,9 +2760,20 @@ async function executeTool(name, args) {
                 return { success: true, ...taskManager.getSummary() };
             }
 
-            case 'task_clear': {
-                taskManager.clear();
-                return { success: true, message: 'All tasks cleared.' };
+            case 'milestone_create': {
+                const msId = `ms_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
+                const milestone = {
+                    id: msId,
+                    title: args.title,
+                    description: args.description || '',
+                    status: 'open',
+                    createdAt: Date.now(),
+                };
+                try {
+                    const { milestoneStorage } = require('./storage');
+                    milestoneStorage.save(milestone, _currentProjectId, _currentProjectPath);
+                } catch { /* storage not available */ }
+                return { success: true, milestone, message: `Created milestone "${args.title}" (id: ${msId}). Use this ID in task_add(milestone_id) to assign tasks.` };
             }
 
             // ── Logging / Context Executors ──
@@ -3228,9 +3330,28 @@ async function executeTool(name, args) {
                     }
                 }
 
-                // PostCommit — runs after git commit
+                // PostCommit — runs after git commit + auto-update changelog
                 if (name === 'git_commit') {
                     executeHook('PostCommit', { ...hookContext, commitMsg: args.message || '' });
+
+                    // Auto-append to onidocs/changelog.md if it exists
+                    if (_currentProjectPath && args.message) {
+                        try {
+                            const changelogPath = require('path').join(_currentProjectPath, 'onidocs', 'changelog.md');
+                            if (require('fs').existsSync(changelogPath)) {
+                                const content = require('fs').readFileSync(changelogPath, 'utf8');
+                                const date = new Date().toISOString().split('T')[0];
+                                const entry = `- ${args.message} (${date})`;
+                                // Insert after the ## [Unreleased] header if it exists
+                                const marker = '### Added';
+                                if (content.includes(marker)) {
+                                    const updated = content.replace(marker, `${marker}\n${entry}`);
+                                    require('fs').writeFileSync(changelogPath, updated);
+                                    logger.info('changelog', `Auto-appended commit to changelog: ${args.message}`);
+                                }
+                            }
+                        } catch { /* non-fatal */ }
+                    }
                 }
             } catch { /* post-hooks are non-fatal */ }
         }
@@ -3286,6 +3407,8 @@ module.exports = {
     startSession,
     getSessionId,
     checkToolPermission,
+    // AI streaming lock — prevents renderer from wiping tasks mid-stream
+    setAIStreamingActive: (active) => { _aiStreamingActive = active; },
     // Background process management
     killBackgroundProcesses,
     getBackgroundProcesses,

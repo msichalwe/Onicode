@@ -38,8 +38,8 @@ import Sidebar from './components/Sidebar';
 import ChatView from './components/ChatView';
 import SettingsPanel from './components/SettingsPanel';
 import ProjectsView from './components/ProjectsView';
-import DocsView from './components/DocsView';
-import TodoApp from './components/TodoApp';
+import AttachmentGallery from './components/AttachmentGallery';
+import TasksView from './components/TodoApp';
 import MemoriesView from './components/MemoriesView';
 import OnboardingDialog from './components/OnboardingDialog';
 import RightPanel, { type PanelState, type WidgetType } from './components/RightPanel';
@@ -47,7 +47,7 @@ import { type ActiveProject } from './components/ProjectModeBar';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 
 export type ChatScope = 'general' | 'project' | 'documents';
-export type View = 'chat' | 'projects' | 'documents' | 'memories' | 'settings' | 'todo';
+export type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo';
 
 const isElectron = typeof window !== 'undefined' && !!window.onicode;
 
@@ -264,12 +264,12 @@ function AppContent() {
                 return <SettingsPanel />;
             case 'projects':
                 return <ProjectsView />;
-            case 'documents':
-                return <DocsView />;
+            case 'attachments':
+                return <AttachmentGallery />;
             case 'memories':
                 return <MemoriesView />;
             case 'todo':
-                return <TodoApp />;
+                return <TasksView />;
             default:
                 return null;
         }

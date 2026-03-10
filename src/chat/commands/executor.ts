@@ -389,8 +389,8 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
             return { handled: true };
 
         // ── Panels ──
-        case '/browser':
-            requestPanel('browser', args ? { url: args } : undefined);
+        case '/attachments':
+            requestPanel('attachments');
             return { handled: true };
 
         case '/files':
