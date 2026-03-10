@@ -793,6 +793,7 @@ body {
 .messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px 0 16px;
   display: flex;
   flex-direction: column;
@@ -800,12 +801,11 @@ body {
   scroll-behavior: smooth;
 }
 
-/* scrollbar styling handled by global rules above */
-
 .message {
   display: flex;
   gap: 12px;
   animation: messageIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  min-width: 0;
 }
 
 @keyframes messageIn {
@@ -850,13 +850,9 @@ body {
   flex-direction: column;
   gap: 0;
   padding: 0;
-  border-left: 2px solid var(--accent);
-  margin-left: 4px;
-  padding-left: 16px;
 }
 
 .message-ai + .message-ai {
-  border-top: none;
   margin-top: 0;
 }
 
@@ -888,6 +884,8 @@ body {
   box-shadow: none;
   max-width: 100%;
   padding: 4px 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 /* Code blocks in messages */
@@ -902,6 +900,8 @@ body {
   line-height: 1.5;
   color: var(--text-code);
   border: 1px solid var(--border-light);
+  max-width: 100%;
+  min-width: 0;
 }
 
 .message-bubble code {
@@ -2857,6 +2857,7 @@ body {
   gap: 4px;
   max-width: 100%;
   width: 100%;
+  min-width: 0;
 }
 
 .message-user .message-content-wrapper {
@@ -5382,20 +5383,23 @@ body {
 .tool-steps {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   margin: 4px 0;
   font-size: 13px;
+  border-left: 2px solid var(--border-light);
+  margin-left: 2px;
+  padding-left: 12px;
 }
 
 .tool-step {
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding: 2px 0;
+  padding: 1px 0;
   border-radius: 0;
   background: transparent;
   border: none;
-  transition: background-color 0.15s;
+  min-width: 0;
 }
 
 .tool-step-running {
@@ -5406,13 +5410,70 @@ body {
   color: var(--error, #ef4444);
 }
 
+/* ── Grouped tool step (e.g. "Created 5 files") ── */
+.tool-step-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.1s;
+}
+
+.tool-step-group-header:hover {
+  background: var(--bg-tertiary);
+}
+
+.tool-step-group-count {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+}
+
+.tool-step-group-items {
+  padding: 2px 0 4px 8px;
+}
+
+.tool-step-group-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-code);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.tool-step-group-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.tool-step-group-item .file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-step-group-item .file-meta {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .tool-step-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 22px;
+  min-height: 24px;
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-radius: var(--radius-sm);
   transition: background-color 0.1s;
 }
@@ -5437,6 +5498,7 @@ body {
   flex: 1;
   font-family: var(--font-code);
   font-size: 12px;
+  min-width: 0;
 }
 
 .tool-step-detail code {
@@ -5468,7 +5530,7 @@ body {
 .tool-step-error {
   color: var(--error, #ef4444);
   font-size: 12px;
-  padding: 4px 6px;
+  padding: 4px 8px;
   word-break: break-word;
   background: rgba(239, 68, 68, 0.06);
   border-radius: var(--radius-sm);
@@ -5520,8 +5582,6 @@ body {
 .tool-step-clickable:hover {
   background: var(--bg-hover);
   border-radius: 4px;
-  margin: -2px -4px;
-  padding: 2px 4px;
 }
 
 .tool-step-chevron {

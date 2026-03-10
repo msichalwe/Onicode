@@ -1785,38 +1785,91 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             }
         };
 
-        // Group consecutive same-name tool calls (except important ones that always show individually)
-        const alwaysExpand = new Set(['run_command', 'create_file', 'edit_file', 'multi_edit', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'index_codebase']);
-        interface GroupedStep { name: string; steps: ToolStep[]; count: number; allDone: boolean; anyRunning: boolean; anyError: boolean; }
+        // Group consecutive same-type tool calls into action groups
+        // e.g., 5 create_file calls → "Created 5 files" with expandable list
+        // But important unique actions always show individually
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'index_codebase', 'detect_project']);
+        // Group names for display
+        const groupLabels: Record<string, { single: string; plural: string }> = {
+            create_file: { single: 'Created', plural: 'Created' },
+            edit_file: { single: 'Edited', plural: 'Edited' },
+            multi_edit: { single: 'Edited', plural: 'Edited' },
+            read_file: { single: 'Read', plural: 'Read' },
+            search_files: { single: 'Searched', plural: 'Searched' },
+            glob_files: { single: 'Found', plural: 'Found' },
+            task_add: { single: 'Task', plural: 'Tasks' },
+            task_update: { single: 'Task', plural: 'Tasks' },
+            task_list: { single: 'Tasks', plural: 'Tasks' },
+            delete_file: { single: 'Deleted', plural: 'Deleted' },
+            list_directory: { single: 'Listed', plural: 'Listed' },
+            find_references: { single: 'Refs', plural: 'Refs' },
+            list_symbols: { single: 'Symbols', plural: 'Symbols' },
+            semantic_search: { single: 'Search', plural: 'Searched' },
+        };
+        // Merge edit_file and multi_edit into same group key
+        const groupKey = (name: string) => name === 'multi_edit' ? 'edit_file' : name;
+
+        interface GroupedStep { key: string; name: string; steps: ToolStep[]; count: number; allDone: boolean; anyRunning: boolean; anyError: boolean; }
         const grouped: GroupedStep[] = [];
         for (const step of steps) {
+            const key = groupKey(step.name);
             const last = grouped[grouped.length - 1];
-            if (last && last.name === step.name && !alwaysExpand.has(step.name)) {
+            if (last && last.key === key && !alwaysSingle.has(step.name)) {
                 last.steps.push(step);
                 last.count++;
                 last.allDone = last.allDone && step.status === 'done';
                 last.anyRunning = last.anyRunning || step.status === 'running';
                 last.anyError = last.anyError || step.status === 'error';
             } else {
-                grouped.push({ name: step.name, steps: [step], count: 1, allDone: step.status === 'done', anyRunning: step.status === 'running', anyError: step.status === 'error' });
+                grouped.push({ key, name: step.name, steps: [step], count: 1, allDone: step.status === 'done', anyRunning: step.status === 'running', anyError: step.status === 'error' });
             }
         }
 
         return (
             <div className="tool-steps">
                 {grouped.map((group, gi) => {
-                    // Collapsed group
+                    // Multi-item group — accordion style: "Created 5 files" with expandable file list
                     if (group.count > 1) {
                         const status = group.anyRunning ? 'running' : group.anyError ? 'error' : group.allDone ? 'done' : 'running';
+                        const label = groupLabels[group.key] || { single: toolIcon(group.name), plural: toolIcon(group.name) };
+                        const isGroupExpanded = expandedSteps.has(`group-${gi}`);
                         return (
                             <div key={gi} className={`tool-step tool-step-${status}`}>
-                                <div className="tool-step-header">
-                                    <span className="tool-step-label">{toolIcon(group.name)}</span>
-                                    <span className="tool-step-detail">({group.count}x)</span>
+                                <div
+                                    className="tool-step-group-header"
+                                    onClick={() => toggleStepExpand(`group-${gi}`)}
+                                >
+                                    <span className={`tool-step-chevron${isGroupExpanded ? ' expanded' : ''}`}>&#9656;</span>
+                                    <span className="tool-step-label">{label.plural}</span>
+                                    <span className="tool-step-group-count">{group.count}</span>
                                     <span className={`tool-step-status ${status}`}>
                                         {status === 'running' ? <span className="tool-spinner" /> : status === 'done' ? '\u2713' : '\u2717'}
                                     </span>
                                 </div>
+                                {isGroupExpanded && (
+                                    <div className="tool-step-group-items">
+                                        {group.steps.map((step) => {
+                                            const detail = getDetail(step);
+                                            const isItemExpandable = hasExpandableContent(step);
+                                            const isItemExpanded = expandedSteps.has(step.id);
+                                            return (
+                                                <div key={step.id}>
+                                                    <div
+                                                        className="tool-step-group-item"
+                                                        onClick={isItemExpandable ? () => toggleStepExpand(step.id) : undefined}
+                                                    >
+                                                        {isItemExpandable && <span className={`tool-step-chevron${isItemExpanded ? ' expanded' : ''}`}>&#9656;</span>}
+                                                        <span className="file-name">{detail}</span>
+                                                        <span className={`tool-step-status ${step.status}`}>
+                                                            {step.status === 'running' ? <span className="tool-spinner" /> : step.status === 'done' ? '\u2713' : '\u2717'}
+                                                        </span>
+                                                    </div>
+                                                    {isItemExpanded && renderExpandedContent(step)}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
                         );
                     }
