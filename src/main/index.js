@@ -497,8 +497,9 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
     }
 
     // Route based on token type
+    const reasoningEffort = providerConfig.reasoningEffort || 'medium';
     if (providerConfig.id === 'codex' && isOAuthToken(apiKey)) {
-        return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel, projectPath);
+        return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel, projectPath, reasoningEffort);
     } else {
         return streamOpenAI(messages, providerConfig, projectPath);
     }
@@ -515,7 +516,7 @@ function toResponsesAPITools(toolDefs) {
 }
 
 /** Single streaming Responses API call — returns { content, functionCalls } */
-async function streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools = true, forceToolChoice = false) {
+async function streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools = true, forceToolChoice = false, reasoningEffort = 'medium') {
     const isOModel = model.startsWith('o');
 
     const bodyObj = {
@@ -525,6 +526,11 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
         stream: true,
         store: false,
     };
+
+    // Apply reasoning effort for models that support it
+    if (reasoningEffort && reasoningEffort !== 'medium') {
+        bodyObj.reasoning = { effort: reasoningEffort };
+    }
 
     if (includeTools && !isOModel) {
         bodyObj.tools = toResponsesAPITools(getAllToolDefinitions());
@@ -821,7 +827,7 @@ function sendMessageBreak() {
 }
 
 /** Stream chat via ChatGPT backend API with agentic tool-calling loop */
-async function streamChatGPTBackend(messages, accessToken, selectedModel, projectPath) {
+async function streamChatGPTBackend(messages, accessToken, selectedModel, projectPath, reasoningEffort = 'medium') {
     const accountId = getAccountId(accessToken);
     if (!accountId) {
         mainWindow?.webContents.send('ai-stream-done', 'Cannot extract account ID from token. Sign in again.');
@@ -867,6 +873,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const toolsUsed = new Set();
     let _forceNoToolsNextRound = false; // After init_project, force text-only to get discovery questions
     let _browserNavFailures = 0; // Track consecutive browser_navigate failures
+    let _consecutiveTextOnlyRounds = 0; // Track text-only rounds to detect stuck loops
 
     try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -882,7 +889,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             const forceTools = _forceNoToolsNextRound ? false : (autoContinueCount > 0);
             const includeTools = !_forceNoToolsNextRound; // Completely remove tools to force text response
             _forceNoToolsNextRound = false; // Reset for next iteration
-            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools, forceTools);
+            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools, forceTools, reasoningEffort);
 
             // No function calls — check if we should auto-continue
             if (!result.functionCalls || result.functionCalls.length === 0) {
@@ -911,14 +918,42 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
                 if ((hasPendingTasks || justInitProject || announcesIntent) && autoContinueCount < MAX_AUTO_CONTINUES) {
                     autoContinueCount++;
-                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.inProgress} in_progress, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}${announcesIntent ? ' [intent-detected]' : ''}`);
+                    _consecutiveTextOnlyRounds = (_consecutiveTextOnlyRounds || 0) + 1;
+                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.inProgress} in_progress, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}${announcesIntent ? ' [intent-detected]' : ''} [textOnly=${_consecutiveTextOnlyRounds}]`);
+
+                    // Circuit breaker: if AI sent 3+ text-only rounds in a row, it's stuck repeating itself
+                    if (_consecutiveTextOnlyRounds >= 3) {
+                        logger.warn('agent-loop', `AI stuck in text-only loop (${_consecutiveTextOnlyRounds} rounds). Force-closing remaining in_progress tasks and stopping.`);
+                        // Auto-close any in_progress tasks since the AI clearly considers them done
+                        for (const t of summary.tasks) {
+                            if (t.status === 'in_progress') {
+                                taskManager.update(t.id, 'done');
+                                logger.info('agent-loop', `Auto-closed stuck task #${t.id}: ${t.content}`);
+                            }
+                        }
+                        sendCompletionSummary(toolsUsed, _taskStartSnapshot);
+                        mainWindow?.webContents.send('ai-stream-done', null);
+                        return { success: true };
+                    }
 
                     const projectContext = buildContinueContext();
                     const nextTask = summary.nextTask;
                     const roundsLeft = MAX_ROUNDS - round;
                     const taskStatusLine = `${summary.done}/${summary.total} tasks done${summary.inProgress > 0 ? `, ${summary.inProgress} IN PROGRESS (must finish!)` : ''}${summary.pending > 0 ? `, ${summary.pending} pending` : ''}`;
+
+                    // Detect if AI wrote a completion summary but forgot to mark tasks done
+                    const looksLikeDoneSummary = /\b(done|completed|finished|all.*tasks|that's it|everything.*(work|done))\b/i.test(aiTextContent)
+                        && summary.inProgress > 0
+                        && summary.pending === 0;
+                    const inProgressTasks = summary.tasks.filter(t => t.status === 'in_progress');
+
                     let continuePrompt;
-                    if (announcesIntent && !hasPendingTasks) {
+                    if (looksLikeDoneSummary && inProgressTasks.length > 0) {
+                        // AI thinks it's done but forgot to mark tasks — give a very specific prompt
+                        const taskIds = inProgressTasks.map(t => `task_update({ id: ${t.id}, status: "done" })`).join(', then ');
+                        continuePrompt = `You just wrote a completion summary, but ${inProgressTasks.length} task(s) are still marked in_progress. You MUST call ${taskIds} RIGHT NOW. Do NOT write any text — just make the tool calls.`;
+                        logger.info('agent-loop', `Detected done-summary with ${inProgressTasks.length} in_progress tasks — forcing task_update`);
+                    } else if (announcesIntent && !hasPendingTasks) {
                         continuePrompt = `STOP TALKING. You just said "${aiTextContent.slice(0, 100)}..." but made ZERO tool calls. DO NOT describe what you'll do — USE TOOLS NOW. Call task_add to plan tasks, then create_file or edit_file to implement. Every response MUST contain tool calls.\n\n${projectContext}`;
                         logger.info('agent-loop', `Detected intent-without-action — forcing tool use (round ${round})`);
                     } else if (justInitProject && !userWantsToSkipQuestions(inputItems)) {
@@ -947,6 +982,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
             // Execute each function call
             autoContinueCount = 0;
+            _consecutiveTextOnlyRounds = 0; // Reset — AI made tool calls
             mainWindow?.webContents.send('ai-agent-step', { round, status: 'executing' });
             for (const fn of result.functionCalls) {
                 let args = {};
@@ -1098,6 +1134,12 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
         messages: isOModel ? messages.filter((m) => m.role !== 'system') : messages,
         stream: true,
     };
+
+    // Apply reasoning effort for models that support it
+    const reasoningEffort = providerConfig.reasoningEffort || 'medium';
+    if (reasoningEffort && reasoningEffort !== 'medium') {
+        bodyObj.reasoning_effort = reasoningEffort;
+    }
 
     // Add tools for function calling (skip for o-models which may not support tools well)
     if (includeTools && !isOModel) {
@@ -1426,6 +1468,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
     const toolsUsed = new Set(); // Track which tool types have been called
     let _forceNoToolsNextRound = false; // After init_project, force text-only to get discovery questions
     let _browserNavFailures = 0; // Track consecutive browser_navigate failures
+    let _consecutiveTextOnlyRounds = 0; // Track text-only rounds to detect stuck loops
 
     // Snapshot task state at request start so completion summary only shows changes
     const _taskStartSnapshot = { ...taskManager.getSummary() };
@@ -1615,7 +1658,24 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             // 3. AI announced intent but made zero tool calls (stalling)
             if ((hasPendingTasks || justInitProject || announcesIntent) && autoContinueCount < MAX_AUTO_CONTINUES) {
                 autoContinueCount++;
-                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}${announcesIntent ? ' [intent-detected]' : ''}`);
+                _consecutiveTextOnlyRounds++;
+                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}${announcesIntent ? ' [intent-detected]' : ''} [textOnly=${_consecutiveTextOnlyRounds}]`);
+
+                // Circuit breaker: if AI sent 3+ text-only rounds in a row, it's stuck repeating itself
+                if (_consecutiveTextOnlyRounds >= 3) {
+                    logger.warn('agent-loop', `AI stuck in text-only loop (${_consecutiveTextOnlyRounds} rounds). Force-closing remaining in_progress tasks and stopping.`);
+                    for (const t of summary.tasks) {
+                        if (t.status === 'in_progress') {
+                            taskManager.update(t.id, 'done');
+                            logger.info('agent-loop', `Auto-closed stuck task #${t.id}: ${t.content}`);
+                        }
+                    }
+                    currentAIRequest = null;
+                    sendCompletionSummary(toolsUsed, _taskStartSnapshot);
+                    mainWindow?.webContents.send('ai-stream-done', null);
+                    try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
+                    return { success: true };
+                }
 
                 // Add the assistant's text response to conversation
                 if (result.textContent) {
@@ -1627,8 +1687,19 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 const nextTask = summary.nextTask;
                 const roundsLeft = MAX_TOOL_ROUNDS - round;
                 const taskStatusLine = `${summary.done}/${summary.total} tasks done${summary.inProgress > 0 ? `, ${summary.inProgress} IN PROGRESS (must finish!)` : ''}${summary.pending > 0 ? `, ${summary.pending} pending` : ''}`;
+
+                // Detect if AI wrote a completion summary but forgot to mark tasks done
+                const looksLikeDoneSummary = /\b(done|completed|finished|all.*tasks|that's it|everything.*(work|done))\b/i.test(aiTextContent)
+                    && summary.inProgress > 0
+                    && summary.pending === 0;
+                const inProgressTasks = summary.tasks.filter(t => t.status === 'in_progress');
+
                 let continuePrompt;
-                if (announcesIntent && !hasPendingTasks) {
+                if (looksLikeDoneSummary && inProgressTasks.length > 0) {
+                    const taskIds = inProgressTasks.map(t => `task_update({ id: ${t.id}, status: "done" })`).join(', then ');
+                    continuePrompt = `You just wrote a completion summary, but ${inProgressTasks.length} task(s) are still marked in_progress. You MUST call ${taskIds} RIGHT NOW. Do NOT write any text — just make the tool calls.`;
+                    logger.info('agent-loop', `Detected done-summary with ${inProgressTasks.length} in_progress tasks — forcing task_update`);
+                } else if (announcesIntent && !hasPendingTasks) {
                     continuePrompt = `STOP TALKING. You just said "${aiTextContent.slice(0, 100)}..." but made ZERO tool calls. DO NOT describe what you'll do — USE TOOLS NOW. Call task_add to plan tasks, then create_file or edit_file to implement. Every response MUST contain tool calls.\n\n${projectContext}`;
                     logger.info('agent-loop', `Detected intent-without-action — forcing tool use (round ${round})`);
                 } else if (justInitProject && !userWantsToSkipQuestions(conversationMessages)) {
@@ -1665,6 +1736,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
 
         // ── Tool calling round ──
         autoContinueCount = 0; // Reset auto-continue counter on successful tool calls
+        _consecutiveTextOnlyRounds = 0; // Reset — AI made tool calls
 
         // Add assistant message with tool calls to conversation
         const assistantMsg = { role: 'assistant', content: result.textContent || null };

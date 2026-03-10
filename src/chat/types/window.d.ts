@@ -36,6 +36,7 @@ interface OnicodeAPI {
             baseUrl?: string;
             selectedModel?: string;
             projectPath?: string;
+            reasoningEffort?: string;
         }
     ) => Promise<{ success?: boolean; error?: string }>;
     onStreamChunk: (callback: (chunk: string) => void) => () => void;

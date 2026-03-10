@@ -1875,6 +1875,14 @@ async function executeTool(name, args) {
             case 'create_file': {
                 const { file_path, content } = args;
                 const dir = path.dirname(file_path);
+
+                // Block binary files with empty/placeholder content
+                const binaryExts = ['.ico', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.woff', '.woff2', '.ttf', '.eot', '.mp3', '.mp4', '.wav', '.pdf', '.zip', '.tar', '.gz'];
+                const ext = path.extname(file_path).toLowerCase();
+                if (binaryExts.includes(ext) && (!content || content.trim().length === 0)) {
+                    return { error: `Cannot create ${ext} file with empty content — ${ext} files are binary and need real data. Skip this file or use a different approach (e.g., download it, or use an SVG text format for icons).` };
+                }
+
                 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
                 if (fs.existsSync(file_path)) {
                     return { error: `File already exists: ${file_path}. Use edit_file to modify it.` };

@@ -1091,6 +1091,45 @@ body {
   margin-left: 4px;
 }
 
+/* ── Thinking Level Control ── */
+.thinking-level-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.thinking-level-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-secondary);
+}
+
+.thinking-level-label {
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.thinking-level-low {
+  color: var(--text-tertiary);
+}
+
+.thinking-level-medium {
+  color: var(--accent);
+}
+
+.thinking-level-high {
+  color: var(--warning, #f59e0b);
+}
+
 /* ── Input Area ── */
 .input-area {
   padding: 16px 24px 24px;
@@ -6868,6 +6907,39 @@ body {
 .question-submit:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Submitted state */
+.question-dialog-submitted {
+  opacity: 0.85;
+}
+
+.question-dialog-submitted .question-dialog-header {
+  color: var(--success);
+}
+
+.question-item.locked {
+  pointer-events: none;
+  padding: 8px 12px;
+}
+
+.question-item.locked .question-text {
+  margin-bottom: 0;
+}
+
+.question-answer-badge {
+  display: inline;
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-light);
+  border-radius: var(--radius-full);
+}
+
+.question-option .question-check-icon {
+  margin-right: 2px;
 }
 
 /* ══════════════════════════════════════════

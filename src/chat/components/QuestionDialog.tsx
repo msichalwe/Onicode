@@ -1,6 +1,7 @@
 /**
  * QuestionDialog — Renders AI discovery questions as an interactive form
- * with selectable options, text input, and "Let AI Decide" button.
+ * with selectable options (multi-select), text input, and "Let AI Decide" button.
+ * Supports submitted/locked state to retain answers after submission.
  */
 
 import React, { useState, useCallback } from 'react';
@@ -14,6 +15,8 @@ export interface ParsedQuestion {
 interface QuestionDialogProps {
     questions: ParsedQuestion[];
     onSubmit: (answers: string) => void;
+    submitted?: boolean;
+    savedAnswers?: Record<number, string[]>;
 }
 
 /**
@@ -97,118 +100,170 @@ export function isQuestionMessage(content: string): boolean {
     return actualQuestions.length >= 2;
 }
 
-export default function QuestionDialog({ questions, onSubmit }: QuestionDialogProps) {
-    const [answers, setAnswers] = useState<Record<number, string>>({});
+export default function QuestionDialog({ questions, onSubmit, submitted = false, savedAnswers }: QuestionDialogProps) {
+    const [answers, setAnswers] = useState<Record<number, string[]>>(
+        savedAnswers || {}
+    );
     const [customInputs, setCustomInputs] = useState<Record<number, string>>({});
     const [showCustom, setShowCustom] = useState<Record<number, boolean>>({});
+    const [isSubmitted, setIsSubmitted] = useState(submitted);
 
-    const selectOption = useCallback((qNum: number, option: string) => {
-        setAnswers((prev) => ({ ...prev, [qNum]: option }));
+    const toggleOption = useCallback((qNum: number, option: string) => {
+        if (isSubmitted) return;
+        setAnswers((prev) => {
+            const current = prev[qNum] || [];
+            const idx = current.indexOf(option);
+            if (idx >= 0) {
+                // Deselect
+                return { ...prev, [qNum]: current.filter((o) => o !== option) };
+            } else {
+                // Select (add to array)
+                return { ...prev, [qNum]: [...current, option] };
+            }
+        });
         setShowCustom((prev) => ({ ...prev, [qNum]: false }));
-    }, []);
+    }, [isSubmitted]);
 
     const toggleCustom = useCallback((qNum: number) => {
+        if (isSubmitted) return;
         setShowCustom((prev) => ({ ...prev, [qNum]: !prev[qNum] }));
         if (!showCustom[qNum]) {
+            // Clear preset selections when switching to custom
             setAnswers((prev) => {
                 const next = { ...prev };
                 delete next[qNum];
                 return next;
             });
         }
-    }, [showCustom]);
+    }, [showCustom, isSubmitted]);
 
     const handleCustomChange = useCallback((qNum: number, value: string) => {
+        if (isSubmitted) return;
         setCustomInputs((prev) => ({ ...prev, [qNum]: value }));
-        setAnswers((prev) => ({ ...prev, [qNum]: value }));
-    }, []);
+        setAnswers((prev) => ({ ...prev, [qNum]: value ? [value] : [] }));
+    }, [isSubmitted]);
 
     const handleSubmit = useCallback(() => {
+        if (isSubmitted) return;
         const lines = questions.map((q) => {
-            const answer = answers[q.number] || 'recommended';
+            const selected = answers[q.number] || [];
+            const answer = selected.length > 0 ? selected.join(', ') : 'recommended';
             return `${q.number}. ${q.text} → **${answer}**`;
         });
+        setIsSubmitted(true);
         onSubmit(lines.join('\n'));
-    }, [questions, answers, onSubmit]);
+    }, [questions, answers, onSubmit, isSubmitted]);
 
     const handleLetAIDecide = useCallback(() => {
+        if (isSubmitted) return;
+        // Mark all as "recommended"
+        const defaultAnswers: Record<number, string[]> = {};
+        for (const q of questions) {
+            defaultAnswers[q.number] = ['recommended'];
+        }
+        setAnswers(defaultAnswers);
+        setIsSubmitted(true);
         onSubmit('Use recommended defaults for all questions. Just build it.');
-    }, [onSubmit]);
+    }, [onSubmit, isSubmitted, questions]);
 
-    const answeredCount = Object.keys(answers).filter((k) => answers[Number(k)]?.trim()).length;
+    const answeredCount = Object.keys(answers).filter((k) => {
+        const val = answers[Number(k)];
+        return val && val.length > 0 && val.some(v => v.trim());
+    }).length;
 
     return (
-        <div className="question-dialog">
+        <div className={`question-dialog ${isSubmitted ? 'question-dialog-submitted' : ''}`}>
             <div className="question-dialog-header">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
-                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                    {isSubmitted ? (
+                        <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></>
+                    ) : (
+                        <><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></>
+                    )}
                 </svg>
-                <span>Quick Setup ({answeredCount}/{questions.length} answered)</span>
+                <span>
+                    {isSubmitted
+                        ? `Setup Complete (${answeredCount}/${questions.length} answered)`
+                        : `Quick Setup (${answeredCount}/${questions.length} answered)`
+                    }
+                </span>
             </div>
 
             <div className="question-list">
-                {questions.map((q) => (
-                    <div key={q.number} className={`question-item ${answers[q.number] ? 'answered' : ''}`}>
-                        <div className="question-text">
-                            <span className="question-num">{q.number}.</span>
-                            {q.text}
-                        </div>
-
-                        {q.options.length > 0 && (
-                            <div className="question-options">
-                                {q.options.map((opt) => (
-                                    <button
-                                        key={opt}
-                                        className={`question-option ${answers[q.number] === opt ? 'selected' : ''}`}
-                                        onClick={() => selectOption(q.number, opt)}
-                                        title={opt}
-                                    >
-                                        {opt}
-                                    </button>
-                                ))}
-                                <button
-                                    className={`question-option question-option-custom ${showCustom[q.number] ? 'selected' : ''}`}
-                                    onClick={() => toggleCustom(q.number)}
-                                    title="Type your own answer"
-                                >
-                                    Custom...
-                                </button>
+                {questions.map((q) => {
+                    const selected = answers[q.number] || [];
+                    const hasAnswer = selected.length > 0 && selected.some(v => v.trim());
+                    return (
+                        <div key={q.number} className={`question-item ${hasAnswer ? 'answered' : ''} ${isSubmitted ? 'locked' : ''}`}>
+                            <div className="question-text">
+                                <span className="question-num">{q.number}.</span>
+                                {q.text}
+                                {isSubmitted && hasAnswer && (
+                                    <span className="question-answer-badge">{selected.join(', ')}</span>
+                                )}
                             </div>
-                        )}
 
-                        {(showCustom[q.number] || q.options.length === 0) && (
-                            <input
-                                type="text"
-                                className="question-input"
-                                placeholder="Type your preference..."
-                                value={customInputs[q.number] || ''}
-                                onChange={(e) => handleCustomChange(q.number, e.target.value)}
-                                autoFocus={showCustom[q.number]}
-                            />
-                        )}
-                    </div>
-                ))}
+                            {!isSubmitted && q.options.length > 0 && (
+                                <div className="question-options">
+                                    {q.options.map((opt) => (
+                                        <button
+                                            key={opt}
+                                            className={`question-option ${selected.includes(opt) ? 'selected' : ''}`}
+                                            onClick={() => toggleOption(q.number, opt)}
+                                            title={opt}
+                                        >
+                                            {selected.includes(opt) && (
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                                                    <polyline points="20 6 9 17 4 12" />
+                                                </svg>
+                                            )}
+                                            {opt}
+                                        </button>
+                                    ))}
+                                    <button
+                                        className={`question-option question-option-custom ${showCustom[q.number] ? 'selected' : ''}`}
+                                        onClick={() => toggleCustom(q.number)}
+                                        title="Type your own answer"
+                                    >
+                                        Custom...
+                                    </button>
+                                </div>
+                            )}
+
+                            {!isSubmitted && (showCustom[q.number] || q.options.length === 0) && (
+                                <input
+                                    type="text"
+                                    className="question-input"
+                                    placeholder="Type your preference..."
+                                    value={customInputs[q.number] || ''}
+                                    onChange={(e) => handleCustomChange(q.number, e.target.value)}
+                                    autoFocus={showCustom[q.number]}
+                                />
+                            )}
+                        </div>
+                    );
+                })}
             </div>
 
-            <div className="question-actions">
-                <button className="question-action-btn question-ai-decide" onClick={handleLetAIDecide}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                        <path d="M2 17l10 5 10-5" />
-                        <path d="M2 12l10 5 10-5" />
-                    </svg>
-                    Let AI Decide
-                </button>
-                <button
-                    className="question-action-btn question-submit"
-                    onClick={handleSubmit}
-                    disabled={answeredCount === 0}
-                >
-                    Submit Answers
-                </button>
-            </div>
+            {!isSubmitted && (
+                <div className="question-actions">
+                    <button className="question-action-btn question-ai-decide" onClick={handleLetAIDecide}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                            <path d="M2 17l10 5 10-5" />
+                            <path d="M2 12l10 5 10-5" />
+                        </svg>
+                        Let AI Decide
+                    </button>
+                    <button
+                        className="question-action-btn question-submit"
+                        onClick={handleSubmit}
+                        disabled={answeredCount === 0}
+                    >
+                        Submit Answers
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

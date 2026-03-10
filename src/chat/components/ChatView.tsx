@@ -51,6 +51,8 @@ export interface Message {
     timestamp: number;
     attachments?: Attachment[];
     toolSteps?: ToolStep[];
+    questionsAnswered?: boolean;
+    questionAnswers?: Record<number, string[]>;
 }
 
 export interface Attachment {
@@ -246,6 +248,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const [contextInfo, setContextInfo] = useState<{ tokens: number; messages: number } | null>(null);
     const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
     const [sessionTimer, setSessionTimer] = useState<number>(0);
+    const [thinkingLevel, setThinkingLevel] = useState<string>(() =>
+        localStorage.getItem('onicode-thinking-level') || 'medium'
+    );
     const sessionStartRef = useRef<number | null>(null);
 
     // ── Refs ──
@@ -685,6 +690,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             baseUrl: provider.baseUrl,
             selectedModel: provider.selectedModel,
             projectPath: activeProjectRef.current?.path,
+            reasoningEffort: localStorage.getItem('onicode-thinking-level') || 'medium',
         });
 
         if (result.error) {
@@ -2048,16 +2054,24 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                         <div className="message-bubble">
                                             <QuestionDialog
                                                 questions={parseQuestions(message.content)!}
+                                                submitted={message.questionsAnswered || false}
+                                                savedAnswers={message.questionAnswers}
                                                 onSubmit={(answersText) => {
-                                                    const userMsg: Message = {
-                                                        id: generateId(),
-                                                        role: 'user',
-                                                        content: answersText,
-                                                        timestamp: Date.now(),
-                                                    };
+                                                    // Mark the question message as answered with saved selections
                                                     setMessages((prev) => {
-                                                        const updated = [...prev, userMsg];
-                                                        sendToAI(answersText, prev);
+                                                        const updatedPrev = prev.map((m) =>
+                                                            m.id === message.id
+                                                                ? { ...m, questionsAnswered: true }
+                                                                : m
+                                                        );
+                                                        const userMsg: Message = {
+                                                            id: generateId(),
+                                                            role: 'user',
+                                                            content: answersText,
+                                                            timestamp: Date.now(),
+                                                        };
+                                                        const updated = [...updatedPrev, userMsg];
+                                                        sendToAI(answersText, updatedPrev);
                                                         return updated;
                                                     });
                                                 }}
@@ -2322,6 +2336,24 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         <span className="context-model">{getActiveProvider()?.selectedModel || 'gpt-4o'}</span>
                         <span className="context-divider">·</span>
                         <span>~{contextInfo.tokens.toLocaleString()} tokens · {contextInfo.messages} msgs</span>
+                        <span className="context-divider">·</span>
+                        <button
+                            className="thinking-level-btn"
+                            onClick={() => {
+                                const levels = ['low', 'medium', 'high'];
+                                const idx = levels.indexOf(thinkingLevel);
+                                const next = levels[(idx + 1) % levels.length];
+                                setThinkingLevel(next);
+                                localStorage.setItem('onicode-thinking-level', next);
+                            }}
+                            title={`Thinking: ${thinkingLevel} (click to change)`}
+                        >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M12 2a7 7 0 017 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 01-2 2h-4a2 2 0 01-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 017-7z" />
+                                <line x1="9" y1="21" x2="15" y2="21" />
+                            </svg>
+                            <span className={`thinking-level-label thinking-level-${thinkingLevel}`}>{thinkingLevel}</span>
+                        </button>
                         {contextInfo.tokens > 150000 && <span className="context-warning">compacting soon</span>}
                     </div>
                 )}
