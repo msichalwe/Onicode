@@ -209,6 +209,86 @@ function registerGitIPC(ipcMain) {
     ipcMain.handle('git-show', async (_event, repoPath, ref, filePath) => {
         return runGit(`show ${ref}:"${filePath}"`, repoPath);
     });
+
+    // Merge branch
+    ipcMain.handle('git-merge', async (_event, repoPath, branch, noFf = false) => {
+        const flag = noFf ? '--no-ff' : '';
+        return runGit(`merge ${flag} "${branch}"`, repoPath, 30000);
+    });
+
+    // Reset (soft, mixed, hard)
+    ipcMain.handle('git-reset', async (_event, repoPath, mode = 'mixed', ref = 'HEAD') => {
+        if (!['soft', 'mixed', 'hard'].includes(mode)) {
+            return { error: `Invalid reset mode: ${mode}. Use soft, mixed, or hard.` };
+        }
+        return runGit(`reset --${mode} ${ref}`, repoPath);
+    });
+
+    // Tag operations
+    ipcMain.handle('git-tag', async (_event, repoPath, action = 'list', tagName, message) => {
+        if (action === 'list') {
+            const result = runGit('tag -l --sort=-creatordate', repoPath);
+            if (!result.success) return result;
+            return { success: true, tags: result.output.split('\n').filter(Boolean) };
+        }
+        if (action === 'create') {
+            if (!tagName) return { error: 'Tag name is required' };
+            const msg = message ? `-a "${tagName}" -m "${message.replace(/"/g, '\\"')}"` : `"${tagName}"`;
+            return runGit(`tag ${msg}`, repoPath);
+        }
+        if (action === 'delete') {
+            if (!tagName) return { error: 'Tag name is required' };
+            return runGit(`tag -d "${tagName}"`, repoPath);
+        }
+        return { error: `Unknown tag action: ${action}` };
+    });
+
+    // Git log with graph data (for visualization)
+    ipcMain.handle('git-log-graph', async (_event, repoPath, count = 80) => {
+        const format = '%H|%h|%an|%ae|%at|%s|%P|%D';
+        const result = runGit(`log --all -${count} --format="${format}"`, repoPath);
+        if (!result.success) return { error: result.error };
+
+        const commits = result.output
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => {
+                const parts = line.split('|');
+                const hash = parts[0];
+                const shortHash = parts[1];
+                const author = parts[2];
+                const email = parts[3];
+                const timestamp = parseInt(parts[4]) * 1000;
+                const message = parts[5];
+                const parents = (parts[6] || '').split(' ').filter(Boolean);
+                const refs = (parts[7] || '').split(',').map(r => r.trim()).filter(Boolean);
+                return { hash, shortHash, author, email, timestamp, message, parents, refs };
+            });
+
+        return { success: true, commits };
+    });
+
+    // Abort merge
+    ipcMain.handle('git-merge-abort', async (_event, repoPath) => {
+        return runGit('merge --abort', repoPath);
+    });
+
+    // Stash drop specific entry
+    ipcMain.handle('git-stash-drop', async (_event, repoPath, index = 0) => {
+        return runGit(`stash drop stash@{${index}}`, repoPath);
+    });
+
+    // Add remote
+    ipcMain.handle('git-remote-add', async (_event, repoPath, name, url) => {
+        if (!name || !url) return { error: 'Remote name and URL are required' };
+        return runGit(`remote add "${name}" "${url}"`, repoPath);
+    });
+
+    // Remove remote
+    ipcMain.handle('git-remote-remove', async (_event, repoPath, name) => {
+        if (!name) return { error: 'Remote name is required' };
+        return runGit(`remote remove "${name}"`, repoPath);
+    });
 }
 
 module.exports = { registerGitIPC };

@@ -305,6 +305,14 @@ interface OnicodeAPI {
     gitPull: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
     gitPush: (repoPath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
     gitShow: (repoPath: string, ref: string, filePath: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitMerge: (repoPath: string, branch: string, noFf?: boolean) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitReset: (repoPath: string, mode?: string, ref?: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitTag: (repoPath: string, action?: string, tagName?: string, message?: string) => Promise<{ success?: boolean; tags?: string[]; output?: string; error?: string }>;
+    gitLogGraph: (repoPath: string, count?: number) => Promise<{ success?: boolean; commits?: GitGraphCommit[]; error?: string }>;
+    gitMergeAbort: (repoPath: string) => Promise<{ success?: boolean; error?: string }>;
+    gitStashDrop: (repoPath: string, index?: number) => Promise<{ success?: boolean; error?: string }>;
+    gitRemoteAdd: (repoPath: string, name: string, url: string) => Promise<{ success?: boolean; error?: string }>;
+    gitRemoteRemove: (repoPath: string, name: string) => Promise<{ success?: boolean; error?: string }>;
 
     // Hooks
     hooksList: () => Promise<{ hooks: Record<string, HookDefinition[]> }>;
@@ -440,6 +448,17 @@ declare global {
         email: string;
         timestamp: number;
         message: string;
+    }
+
+    interface GitGraphCommit {
+        hash: string;
+        shortHash: string;
+        author: string;
+        email: string;
+        timestamp: number;
+        message: string;
+        parents: string[];
+        refs: string[];
     }
 
     interface GitRemote {

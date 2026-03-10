@@ -1015,7 +1015,10 @@ function TasksWidget() {
 // ══════════════════════════════════════════
 
 interface GitFile { path: string; status: string; staged: boolean }
-interface GitBranch { name: string; current: boolean; remote: boolean }
+interface GitBranch { name: string; current: boolean; remote: boolean; hash?: string; upstream?: string | null }
+interface GitGraphEntry { hash: string; shortHash: string; author: string; timestamp: number; message: string; parents: string[]; refs: string[] }
+
+type GitTab = 'changes' | 'graph' | 'stash';
 
 function GitWidget() {
     const [branch, setBranch] = useState('');
@@ -1030,6 +1033,14 @@ function GitWidget() {
     const [repoPath, setRepoPath] = useState('');
     const [isRepo, setIsRepo] = useState(false);
     const [actionLog, setActionLog] = useState<string[]>([]);
+    const [activeTab, setActiveTab] = useState<GitTab>('changes');
+    const [graphCommits, setGraphCommits] = useState<GitGraphEntry[]>([]);
+    const [stashes, setStashes] = useState<string[]>([]);
+    const [newBranchName, setNewBranchName] = useState('');
+    const [showNewBranch, setShowNewBranch] = useState(false);
+    const [mergeBranch, setMergeBranch] = useState('');
+    const [showMerge, setShowMerge] = useState(false);
+    const [stashMsg, setStashMsg] = useState('');
 
     const addLog = useCallback((msg: string) => {
         setActionLog(prev => [...prev.slice(-10), `${new Date().toLocaleTimeString()} — ${msg}`]);
@@ -1211,6 +1222,114 @@ function GitWidget() {
         }
     }, [getProjectPath, refreshStatus, addLog]);
 
+    // Load git graph
+    const loadGraph = useCallback(async () => {
+        const projPath = repoPath || getProjectPath();
+        if (!projPath || !window.onicode?.gitLogGraph) return;
+        try {
+            const result = await window.onicode.gitLogGraph(projPath, 50);
+            if (result.success && result.commits) setGraphCommits(result.commits);
+        } catch {}
+    }, [repoPath, getProjectPath]);
+
+    // Load stashes
+    const loadStashes = useCallback(async () => {
+        const projPath = repoPath || getProjectPath();
+        if (!projPath || !window.onicode?.gitStash) return;
+        try {
+            const result = await window.onicode.gitStash(projPath, 'list');
+            if (result.success) setStashes(result.stashes || []);
+        } catch {}
+    }, [repoPath, getProjectPath]);
+
+    // Create new branch
+    const createBranch = useCallback(async () => {
+        if (!newBranchName.trim() || !window.onicode?.gitCheckout) return;
+        setLoading(true);
+        const result = await window.onicode.gitCheckout(repoPath, newBranchName.trim(), true);
+        if (result.success) {
+            addLog(`Created branch: ${newBranchName.trim()}`);
+            setNewBranchName('');
+            setShowNewBranch(false);
+            refreshStatus();
+            loadBranches();
+        } else {
+            setError(result.error || 'Branch creation failed');
+        }
+        setLoading(false);
+    }, [repoPath, newBranchName, refreshStatus, loadBranches, addLog]);
+
+    // Merge branch
+    const doMerge = useCallback(async () => {
+        if (!mergeBranch || !window.onicode?.gitMerge) return;
+        setLoading(true);
+        try {
+            const result = await window.onicode.gitMerge(repoPath, mergeBranch);
+            if (result.success) {
+                addLog(`Merged: ${mergeBranch} → ${branch}`);
+                setMergeBranch('');
+                setShowMerge(false);
+                refreshStatus();
+                loadGraph();
+            } else {
+                setError(result.error || 'Merge failed');
+                addLog(`Merge failed: ${result.error}`);
+            }
+        } catch {
+            setError('Merge failed');
+        }
+        setLoading(false);
+    }, [repoPath, mergeBranch, branch, refreshStatus, loadGraph, addLog]);
+
+    // Stash push
+    const doStashPush = useCallback(async () => {
+        if (!window.onicode?.gitStash) return;
+        setLoading(true);
+        const result = await window.onicode.gitStash(repoPath, 'push', stashMsg || undefined);
+        if (result.success) {
+            addLog(`Stashed changes${stashMsg ? `: ${stashMsg}` : ''}`);
+            setStashMsg('');
+            refreshStatus();
+            loadStashes();
+        } else {
+            setError(result.error || 'Stash failed');
+        }
+        setLoading(false);
+    }, [repoPath, stashMsg, refreshStatus, loadStashes, addLog]);
+
+    // Stash pop
+    const doStashPop = useCallback(async () => {
+        if (!window.onicode?.gitStash) return;
+        setLoading(true);
+        const result = await window.onicode.gitStash(repoPath, 'pop');
+        if (result.success) {
+            addLog('Applied and removed latest stash');
+            refreshStatus();
+            loadStashes();
+        } else {
+            setError(result.error || 'Stash pop failed');
+        }
+        setLoading(false);
+    }, [repoPath, refreshStatus, loadStashes, addLog]);
+
+    // Stash drop
+    const doStashDrop = useCallback(async (index: number) => {
+        if (!window.onicode?.gitStashDrop) return;
+        const result = await window.onicode.gitStashDrop(repoPath, index);
+        if (result.success) {
+            addLog(`Dropped stash@{${index}}`);
+            loadStashes();
+        } else {
+            setError(result.error || 'Stash drop failed');
+        }
+    }, [repoPath, loadStashes, addLog]);
+
+    // Load tab-specific data when switching
+    useEffect(() => {
+        if (activeTab === 'graph') loadGraph();
+        if (activeTab === 'stash') loadStashes();
+    }, [activeTab, loadGraph, loadStashes]);
+
     const stagedFiles = files.filter(f => f.staged);
     const unstagedFiles = files.filter(f => !f.staged);
 
@@ -1233,6 +1352,14 @@ function GitWidget() {
         );
     }
 
+    const formatTimeAgo = (ts: number) => {
+        const d = Date.now() - ts;
+        if (d < 60000) return 'just now';
+        if (d < 3600000) return `${Math.floor(d / 60000)}m ago`;
+        if (d < 86400000) return `${Math.floor(d / 3600000)}h ago`;
+        return `${Math.floor(d / 86400000)}d ago`;
+    };
+
     return (
         <div className="widget-git">
             {/* Branch bar */}
@@ -1254,6 +1381,9 @@ function GitWidget() {
                     <button className="git-icon-btn" onClick={doPush} disabled={loading} title="Push">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 16 12 12 8 16" /><line x1="12" y1="12" x2="12" y2="21" /><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3" /></svg>
                     </button>
+                    <button className="git-icon-btn" onClick={() => { setShowMerge(!showMerge); if (!showMerge) loadBranches(); }} disabled={loading} title="Merge">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M6 21V9a9 9 0 009 9" /></svg>
+                    </button>
                     <button className="git-icon-btn" onClick={refreshStatus} title="Refresh">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" /></svg>
                     </button>
@@ -1269,59 +1399,187 @@ function GitWidget() {
                             {b.name}
                         </button>
                     ))}
+                    <div className="git-branch-new">
+                        {showNewBranch ? (
+                            <div className="git-new-branch-form">
+                                <input
+                                    className="git-new-branch-input"
+                                    value={newBranchName}
+                                    onChange={e => setNewBranchName(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter') createBranch(); if (e.key === 'Escape') setShowNewBranch(false); }}
+                                    placeholder="new-branch-name"
+                                    autoFocus
+                                />
+                                <button className="git-new-branch-ok" onClick={createBranch} disabled={!newBranchName.trim()}>Create</button>
+                            </div>
+                        ) : (
+                            <button className="git-branch-option git-new-branch-btn" onClick={() => setShowNewBranch(true)}>
+                                + New Branch
+                            </button>
+                        )}
+                    </div>
                 </div>
             )}
 
-            {error && <div className="git-error">{error}</div>}
-
-            {/* Commit input */}
-            <div className="git-commit-area">
-                <input
-                    className="git-commit-input"
-                    value={commitMsg}
-                    onChange={e => setCommitMsg(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doCommit(); } }}
-                    placeholder="Commit message..."
-                    disabled={loading}
-                />
-                <div className="git-commit-actions">
-                    <button className="git-stage-all-btn" onClick={stageAll} disabled={loading || unstagedFiles.length === 0}>
-                        Stage All
-                    </button>
-                    <button className="git-commit-btn" onClick={doCommit} disabled={loading || !commitMsg.trim() || stagedFiles.length === 0}>
-                        {loading ? 'Working...' : `Commit (${stagedFiles.length})`}
-                    </button>
+            {/* Merge panel */}
+            {showMerge && (
+                <div className="git-merge-panel">
+                    <div className="git-merge-label">Merge into <strong>{branch}</strong>:</div>
+                    <select className="git-merge-select" value={mergeBranch} onChange={e => setMergeBranch(e.target.value)}>
+                        <option value="">Select branch...</option>
+                        {branches.filter(b => !b.current && !b.remote).map(b => (
+                            <option key={b.name} value={b.name}>{b.name}</option>
+                        ))}
+                    </select>
+                    <div className="git-merge-actions">
+                        <button className="git-action-btn" onClick={doMerge} disabled={!mergeBranch || loading}>Merge</button>
+                        <button className="git-action-btn git-action-secondary" onClick={() => setShowMerge(false)}>Cancel</button>
+                    </div>
                 </div>
+            )}
+
+            {error && <div className="git-error">{error} <button className="git-error-dismiss" onClick={() => setError('')}>×</button></div>}
+
+            {/* Tab bar */}
+            <div className="git-tabs">
+                <button className={`git-tab ${activeTab === 'changes' ? 'active' : ''}`} onClick={() => setActiveTab('changes')}>
+                    Changes {files.length > 0 && <span className="git-tab-badge">{files.length}</span>}
+                </button>
+                <button className={`git-tab ${activeTab === 'graph' ? 'active' : ''}`} onClick={() => setActiveTab('graph')}>
+                    Graph
+                </button>
+                <button className={`git-tab ${activeTab === 'stash' ? 'active' : ''}`} onClick={() => setActiveTab('stash')}>
+                    Stash {stashes.length > 0 && <span className="git-tab-badge">{stashes.length}</span>}
+                </button>
             </div>
 
-            {/* File changes */}
-            <div className="git-files-section">
-                {stagedFiles.length > 0 && (
-                    <div className="git-file-group">
-                        <div className="git-file-group-label">Staged ({stagedFiles.length})</div>
-                        {stagedFiles.map(f => (
-                            <div key={f.path} className={`git-file-item git-file-${f.status}`}>
-                                <span className="git-file-status">{f.status[0].toUpperCase()}</span>
-                                <span className="git-file-path">{f.path}</span>
-                                <button className="git-file-action" onClick={() => unstageFile(f.path)} title="Unstage">−</button>
-                            </div>
-                        ))}
+            {/* Changes tab */}
+            {activeTab === 'changes' && (
+                <>
+                    <div className="git-commit-area">
+                        <input
+                            className="git-commit-input"
+                            value={commitMsg}
+                            onChange={e => setCommitMsg(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doCommit(); } }}
+                            placeholder="Commit message..."
+                            disabled={loading}
+                        />
+                        <div className="git-commit-actions">
+                            <button className="git-stage-all-btn" onClick={stageAll} disabled={loading || unstagedFiles.length === 0}>
+                                Stage All
+                            </button>
+                            <button className="git-commit-btn" onClick={doCommit} disabled={loading || !commitMsg.trim() || stagedFiles.length === 0}>
+                                {loading ? 'Working...' : `Commit (${stagedFiles.length})`}
+                            </button>
+                        </div>
                     </div>
-                )}
-                {unstagedFiles.length > 0 && (
-                    <div className="git-file-group">
-                        <div className="git-file-group-label">Changes ({unstagedFiles.length})</div>
-                        {unstagedFiles.map(f => (
-                            <div key={f.path} className={`git-file-item git-file-${f.status}`}>
-                                <span className="git-file-status">{f.status[0].toUpperCase()}</span>
-                                <span className="git-file-path">{f.path}</span>
-                                <button className="git-file-action" onClick={() => stageFile(f.path)} title="Stage">+</button>
+
+                    <div className="git-files-section">
+                        {stagedFiles.length > 0 && (
+                            <div className="git-file-group">
+                                <div className="git-file-group-label">Staged ({stagedFiles.length})</div>
+                                {stagedFiles.map(f => (
+                                    <div key={f.path} className={`git-file-item git-file-${f.status}`}>
+                                        <span className="git-file-status">{f.status[0].toUpperCase()}</span>
+                                        <span className="git-file-path">{f.path}</span>
+                                        <button className="git-file-action" onClick={() => unstageFile(f.path)} title="Unstage">−</button>
+                                    </div>
+                                ))}
                             </div>
-                        ))}
+                        )}
+                        {unstagedFiles.length > 0 && (
+                            <div className="git-file-group">
+                                <div className="git-file-group-label">Changes ({unstagedFiles.length})</div>
+                                {unstagedFiles.map(f => (
+                                    <div key={f.path} className={`git-file-item git-file-${f.status}`}>
+                                        <span className="git-file-status">{f.status[0].toUpperCase()}</span>
+                                        <span className="git-file-path">{f.path}</span>
+                                        <button className="git-file-action" onClick={() => stageFile(f.path)} title="Stage">+</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {files.length === 0 && <div className="git-clean">Working tree clean</div>}
                     </div>
-                )}
-                {files.length === 0 && <div className="git-clean">Working tree clean</div>}
-            </div>
+                </>
+            )}
+
+            {/* Graph tab — commit history with branch/merge visualization */}
+            {activeTab === 'graph' && (
+                <div className="git-graph-section">
+                    {graphCommits.length === 0 ? (
+                        <div className="git-clean">No commits yet</div>
+                    ) : (
+                        <div className="git-graph-list">
+                            {graphCommits.map((c, i) => {
+                                const isMerge = c.parents.length > 1;
+                                const branchRefs = c.refs.filter(r => !r.startsWith('tag:'));
+                                const tagRefs = c.refs.filter(r => r.startsWith('tag:')).map(r => r.replace('tag: ', ''));
+                                return (
+                                    <div key={c.hash} className={`git-graph-commit ${i === 0 ? 'git-graph-head' : ''}`}>
+                                        <div className="git-graph-line">
+                                            <div className={`git-graph-dot ${isMerge ? 'git-graph-merge-dot' : ''}`} />
+                                            {i < graphCommits.length - 1 && <div className="git-graph-connector" />}
+                                        </div>
+                                        <div className="git-graph-content">
+                                            <div className="git-graph-msg">
+                                                <span className="git-graph-hash">{c.shortHash}</span>
+                                                {branchRefs.length > 0 && branchRefs.map(r => (
+                                                    <span key={r} className={`git-graph-ref ${r.includes('HEAD') ? 'git-graph-ref-head' : ''}`}>{r.replace('HEAD -> ', '')}</span>
+                                                ))}
+                                                {tagRefs.length > 0 && tagRefs.map(t => (
+                                                    <span key={t} className="git-graph-tag">{t}</span>
+                                                ))}
+                                                <span className="git-graph-text">{c.message}</span>
+                                            </div>
+                                            <div className="git-graph-meta">
+                                                <span>{c.author}</span>
+                                                <span>{formatTimeAgo(c.timestamp)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Stash tab */}
+            {activeTab === 'stash' && (
+                <div className="git-stash-section">
+                    <div className="git-stash-form">
+                        <input
+                            className="git-stash-input"
+                            value={stashMsg}
+                            onChange={e => setStashMsg(e.target.value)}
+                            placeholder="Stash message (optional)..."
+                            disabled={loading}
+                        />
+                        <div className="git-stash-actions">
+                            <button className="git-action-btn" onClick={doStashPush} disabled={loading || files.length === 0}>
+                                Stash Changes
+                            </button>
+                            <button className="git-action-btn git-action-secondary" onClick={doStashPop} disabled={loading || stashes.length === 0}>
+                                Pop Latest
+                            </button>
+                        </div>
+                    </div>
+                    {stashes.length > 0 ? (
+                        <div className="git-stash-list">
+                            {stashes.map((s, i) => (
+                                <div key={i} className="git-stash-item">
+                                    <span className="git-stash-text">{s}</span>
+                                    <button className="git-file-action" onClick={() => doStashDrop(i)} title="Drop">×</button>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="git-clean">No stashes</div>
+                    )}
+                </div>
+            )}
 
             {/* Action log */}
             {actionLog.length > 0 && (

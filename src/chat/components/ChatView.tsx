@@ -1410,6 +1410,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 get_type_info: 'Type', semantic_search: 'Search', index_codebase: 'Index',
                 git_diff: 'Diff', git_log: 'Log', git_branches: 'Branch',
                 git_checkout: 'Checkout', git_stash: 'Stash', git_pull: 'Pull',
+                git_stage: 'Staged', git_unstage: 'Unstaged', git_merge: 'Merged',
+                git_reset: 'Reset', git_tag: 'Tag', git_remotes: 'Remotes', git_show: 'Show',
             };
             return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
@@ -1536,6 +1538,41 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const summary = r?.summary || r?.output;
                     return ok ? (summary ? String(summary).slice(0, 60) : 'success') : 'failed';
                 }
+                case 'git_stage': {
+                    const files = Array.isArray(a.files) ? a.files as string[] : [];
+                    return files.length > 0 ? `${files.length} file(s)` : String(a.files || '.');
+                }
+                case 'git_unstage': {
+                    const files = Array.isArray(a.files) ? a.files as string[] : [];
+                    return files.length > 0 ? `${files.length} file(s)` : '';
+                }
+                case 'git_merge': {
+                    const branch = String(a.branch || '');
+                    const ok = r?.success;
+                    const conflicts = r?.conflicts;
+                    return conflicts ? `${branch} (conflicts!)` : ok ? branch : `${branch} (failed)`;
+                }
+                case 'git_reset': {
+                    const mode = String(a.mode || 'mixed');
+                    const target = a.target ? String(a.target).slice(0, 10) : 'HEAD';
+                    return `--${mode} ${target}`;
+                }
+                case 'git_tag': {
+                    const action = String(a.action || 'list');
+                    if (action === 'list') {
+                        const tags = Array.isArray(r?.tags) ? (r.tags as unknown[]).length : '?';
+                        return `${tags} tags`;
+                    }
+                    return `${action} ${a.name || ''}`;
+                }
+                case 'git_remotes': {
+                    const remotes = Array.isArray(r?.remotes) ? (r.remotes as unknown[]).length : '?';
+                    return `${remotes} remote(s)`;
+                }
+                case 'git_show': {
+                    const ref = String(a.ref || r?.hash || 'HEAD').slice(0, 10);
+                    return ref;
+                }
                 default:
                     return '';
             }
@@ -1557,6 +1594,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'git_diff': return !!(r.diff || r.output);
                 case 'git_log': return !!(r.commits && Array.isArray(r.commits) && (r.commits as unknown[]).length > 0);
                 case 'git_branches': return !!(r.branches && Array.isArray(r.branches) && (r.branches as unknown[]).length > 0);
+                case 'git_merge': return !!(r.output || r.conflicts);
+                case 'git_show': return !!(r.diff || r.output || r.message);
+                case 'git_tag': return !!(r.tags && Array.isArray(r.tags) && (r.tags as unknown[]).length > 0);
+                case 'git_remotes': return !!(r.remotes && Array.isArray(r.remotes) && (r.remotes as unknown[]).length > 0);
                 default: return false;
             }
         };
@@ -1791,6 +1832,81 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </div>
                     );
                 }
+                case 'git_merge': {
+                    const output = String(r.output || r.message || '');
+                    const conflicts = r.conflicts;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">$ git merge {String(step.args.branch || '')}</span>
+                                    <span className={`tool-step-exit-code ${conflicts ? 'error' : 'success'}`}>
+                                        {conflicts ? 'CONFLICTS' : 'OK'}
+                                    </span>
+                                </div>
+                                {output && <pre className="tool-step-stdout">{output.slice(0, 2000)}</pre>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_show': {
+                    const diffText = String(r.diff || r.output || '');
+                    const msg = String(r.message || '');
+                    const diffLines = diffText.split('\n');
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                {msg && <div className="tool-step-terminal-header"><span className="tool-step-terminal-prompt">{msg.slice(0, 120)}</span></div>}
+                                <pre className="tool-step-stdout">
+                                    {diffLines.slice(0, 30).map((line, i) => (
+                                        <div key={i} className={line.startsWith('+') ? 'diff-line diff-line-added' : line.startsWith('-') ? 'diff-line diff-line-removed' : line.startsWith('@@') ? 'diff-line diff-hunk' : ''}>
+                                            {line}
+                                        </div>
+                                    ))}
+                                    {diffLines.length > 30 && <div className="diff-line diff-truncated">{`... +${diffLines.length - 30} more lines`}</div>}
+                                </pre>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_tag': {
+                    const tags = r.tags as Array<string | { name?: string; message?: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-git-status">
+                                {tags.slice(0, 15).map((t, i) => {
+                                    const name = typeof t === 'string' ? t : (t.name || '');
+                                    return (
+                                        <div key={i} className="git-status-file">
+                                            <span className="git-status-indicator">🏷</span>
+                                            <span>{name}</span>
+                                        </div>
+                                    );
+                                })}
+                                {tags.length > 15 && <div className="diff-line diff-truncated">... +{tags.length - 15} more tags</div>}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'git_remotes': {
+                    const remotes = r.remotes as Array<{ name?: string; url?: string; type?: string } | string>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-git-status">
+                                {remotes.map((rem, i) => {
+                                    const name = typeof rem === 'string' ? rem : (rem.name || '');
+                                    const url = typeof rem === 'string' ? '' : (rem.url || '');
+                                    return (
+                                        <div key={i} className="git-status-file">
+                                            <span className="git-status-indicator">{name}</span>
+                                            <span>{url}</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    );
+                }
                 default:
                     return null;
             }
@@ -1799,7 +1915,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'index_codebase', 'detect_project']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'browser_navigate', 'browser_screenshot', 'create_restore_point', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },

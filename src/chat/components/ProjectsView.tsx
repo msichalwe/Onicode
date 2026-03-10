@@ -51,28 +51,37 @@ function GitTab({ projectPath }: { projectPath: string }) {
     const [commitMsg, setCommitMsg] = useState('');
     const [diffContent, setDiffContent] = useState('');
     const [diffFile, setDiffFile] = useState('');
-    const [gitSubTab, setGitSubTab] = useState<'status' | 'branches' | 'log'>('status');
+    const [gitSubTab, setGitSubTab] = useState<'status' | 'branches' | 'log' | 'stash'>('status');
     const [newBranch, setNewBranch] = useState('');
     const [loading, setLoading] = useState(false);
+    const [stashes, setStashes] = useState<string[]>([]);
+    const [stashMsg, setStashMsg] = useState('');
+    const [mergeBranch, setMergeBranch] = useState('');
+    const [showMerge, setShowMerge] = useState(false);
+    const [error, setError] = useState('');
 
     const refresh = useCallback(async () => {
         if (!isElectron) return;
         setLoading(true);
-        const repoCheck = await window.onicode!.gitIsRepo(projectPath);
-        setIsRepo(repoCheck.isRepo);
-        if (repoCheck.isRepo) {
-            const status = await window.onicode!.gitStatus(projectPath);
-            if (status.success) {
-                setBranch(status.branch || '');
-                setFiles(status.files || []);
-                setAhead(status.ahead || 0);
-                setBehind(status.behind || 0);
+        try {
+            const repoCheck = await window.onicode!.gitIsRepo(projectPath);
+            setIsRepo(repoCheck.isRepo);
+            if (repoCheck.isRepo) {
+                const status = await window.onicode!.gitStatus(projectPath);
+                if (status.success) {
+                    setBranch(status.branch || '');
+                    setFiles(status.files || []);
+                    setAhead(status.ahead || 0);
+                    setBehind(status.behind || 0);
+                }
+                const logRes = await window.onicode!.gitLog(projectPath, 30);
+                if (logRes.commits) setCommits(logRes.commits);
+                const brRes = await window.onicode!.gitBranches(projectPath);
+                if (brRes.branches) setBranches(brRes.branches);
+                const stashRes = await window.onicode!.gitStash(projectPath, 'list');
+                if (stashRes.stashes) setStashes(stashRes.stashes);
             }
-            const logRes = await window.onicode!.gitLog(projectPath, 30);
-            if (logRes.commits) setCommits(logRes.commits);
-            const brRes = await window.onicode!.gitBranches(projectPath);
-            if (brRes.branches) setBranches(brRes.branches);
-        }
+        } catch (e) { console.error('GitTab refresh error:', e); }
         setLoading(false);
     }, [projectPath]);
 
@@ -100,19 +109,22 @@ function GitTab({ projectPath }: { projectPath: string }) {
 
     const doCommit = async () => {
         if (!commitMsg.trim()) return;
-        await window.onicode!.gitCommit(projectPath, commitMsg);
+        const res = await window.onicode!.gitCommit(projectPath, commitMsg);
+        if (res.error) { setError(res.error); return; }
         setCommitMsg('');
         refresh();
     };
 
     const checkoutBranch = async (name: string) => {
-        await window.onicode!.gitCheckout(projectPath, name);
+        const res = await window.onicode!.gitCheckout(projectPath, name);
+        if (res.error) { setError(res.error); return; }
         refresh();
     };
 
     const createBranch = async () => {
         if (!newBranch.trim()) return;
-        await window.onicode!.gitCheckout(projectPath, newBranch.trim(), true);
+        const res = await window.onicode!.gitCheckout(projectPath, newBranch.trim(), true);
+        if (res.error) { setError(res.error); return; }
         setNewBranch('');
         refresh();
     };
@@ -123,14 +135,58 @@ function GitTab({ projectPath }: { projectPath: string }) {
         setDiffContent(res.output || '(no diff)');
     };
 
-    const doPull = async () => { setLoading(true); await window.onicode!.gitPull(projectPath); refresh(); };
-    const doPush = async () => { setLoading(true); await window.onicode!.gitPush(projectPath); refresh(); };
+    const doPull = async () => {
+        setLoading(true);
+        const res = await window.onicode!.gitPull(projectPath);
+        if (res.error) setError(res.error);
+        refresh();
+    };
+    const doPush = async () => {
+        setLoading(true);
+        const res = await window.onicode!.gitPush(projectPath);
+        if (res.error) setError(res.error);
+        refresh();
+    };
 
-    if (isRepo === null) return <div className="git-loading">Checking repository...</div>;
+    const doMerge = async () => {
+        if (!mergeBranch) return;
+        setLoading(true);
+        const res = await window.onicode!.gitMerge(projectPath, mergeBranch);
+        if (res.error) setError(res.error);
+        setShowMerge(false);
+        setMergeBranch('');
+        refresh();
+    };
+
+    const doStashPush = async () => {
+        await window.onicode!.gitStash(projectPath, 'push', stashMsg || undefined);
+        setStashMsg('');
+        refresh();
+    };
+
+    const doStashPop = async () => {
+        await window.onicode!.gitStash(projectPath, 'pop');
+        refresh();
+    };
+
+    const doStashDrop = async (index: number) => {
+        await window.onicode!.gitStashDrop(projectPath, index);
+        refresh();
+    };
+
+    const formatTimeAgo = (ts: number) => {
+        const s = Math.floor((Date.now() - ts) / 1000);
+        if (s < 60) return 'just now';
+        if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+        if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+        return `${Math.floor(s / 86400)}d ago`;
+    };
+
+    if (isRepo === null) return <div className="pv-git-loading">Checking repository...</div>;
 
     if (!isRepo) {
         return (
-            <div className="git-no-repo">
+            <div className="pv-git-no-repo">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="1.5">
                     <circle cx="12" cy="12" r="3" /><line x1="3" y1="12" x2="9" y2="12" /><line x1="15" y1="12" x2="21" y2="12" />
                     <circle cx="12" cy="3" r="2" /><circle cx="12" cy="21" r="2" /><line x1="12" y1="5" x2="12" y2="9" /><line x1="12" y1="15" x2="12" y2="19" />
@@ -143,117 +199,146 @@ function GitTab({ projectPath }: { projectPath: string }) {
 
     const stagedFiles = files.filter(f => f.staged);
     const unstagedFiles = files.filter(f => !f.staged);
+    const localBranches = branches.filter(b => !b.remote);
+    const remoteBranches = branches.filter(b => b.remote);
 
     const statusIcon = (s: string) => {
         const colors: Record<string, string> = { modified: 'var(--warning)', added: 'var(--success)', deleted: 'var(--error)', untracked: 'var(--text-tertiary)', conflicted: 'var(--error)' };
         const labels: Record<string, string> = { modified: 'M', added: 'A', deleted: 'D', untracked: '?', renamed: 'R', copied: 'C', conflicted: 'U' };
-        return <span className="git-status-badge" style={{ color: colors[s] || 'var(--text-secondary)' }}>{labels[s] || s[0].toUpperCase()}</span>;
+        return <span className="pv-git-status-badge" style={{ color: colors[s] || 'var(--text-secondary)' }}>{labels[s] || s[0].toUpperCase()}</span>;
     };
 
     return (
-        <div className="git-tab">
-            <div className="git-header">
-                <div className="git-branch-info">
+        <div className="pv-git">
+            {error && (
+                <div className="pv-git-error">
+                    <span>{error}</span>
+                    <button onClick={() => setError('')}>✕</button>
+                </div>
+            )}
+
+            <div className="pv-git-header">
+                <div className="pv-git-branch-info">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 01-9 9" /></svg>
                     <strong>{branch}</strong>
-                    {ahead > 0 && <span className="git-sync-badge">↑{ahead}</span>}
-                    {behind > 0 && <span className="git-sync-badge">↓{behind}</span>}
-                    {files.length === 0 && <span className="git-clean-badge">Clean</span>}
+                    {ahead > 0 && <span className="pv-git-sync-badge">↑{ahead}</span>}
+                    {behind > 0 && <span className="pv-git-sync-badge">↓{behind}</span>}
+                    {files.length === 0 && <span className="pv-git-clean-badge">Clean</span>}
                 </div>
-                <div className="git-header-actions">
-                    <button className="git-action-btn" onClick={doPull} title="Pull" disabled={loading}>↓ Pull</button>
-                    <button className="git-action-btn" onClick={doPush} title="Push" disabled={loading}>↑ Push</button>
-                    <button className="git-action-btn" onClick={refresh} title="Refresh" disabled={loading}>⟳</button>
+                <div className="pv-git-actions">
+                    <button className="pv-git-btn" onClick={() => setShowMerge(!showMerge)} title="Merge" disabled={loading}>Merge</button>
+                    <button className="pv-git-btn" onClick={doPull} title="Pull" disabled={loading}>↓ Pull</button>
+                    <button className="pv-git-btn" onClick={doPush} title="Push" disabled={loading}>↑ Push</button>
+                    <button className="pv-git-btn" onClick={refresh} title="Refresh" disabled={loading}>⟳</button>
                 </div>
             </div>
 
-            <div className="git-sub-tabs">
-                {(['status', 'branches', 'log'] as const).map(t => (
-                    <button key={t} className={`git-sub-tab ${gitSubTab === t ? 'active' : ''}`} onClick={() => setGitSubTab(t)}>
-                        {t === 'status' ? `Changes (${files.length})` : t === 'branches' ? 'Branches' : 'History'}
+            {showMerge && (
+                <div className="pv-git-merge-bar">
+                    <span className="pv-git-merge-label">Merge into {branch}:</span>
+                    <select className="pv-git-select" value={mergeBranch} onChange={e => setMergeBranch(e.target.value)}>
+                        <option value="">Select branch...</option>
+                        {localBranches.filter(b => !b.current).map(b => (
+                            <option key={b.name} value={b.name}>{b.name}</option>
+                        ))}
+                    </select>
+                    <button className="pv-git-btn pv-git-btn-accent" onClick={doMerge} disabled={!mergeBranch || loading}>Merge</button>
+                    <button className="pv-git-btn" onClick={() => { setShowMerge(false); setMergeBranch(''); }}>Cancel</button>
+                </div>
+            )}
+
+            <div className="pv-git-tabs">
+                {([
+                    { key: 'status' as const, label: `Changes (${files.length})` },
+                    { key: 'branches' as const, label: `Branches (${localBranches.length})` },
+                    { key: 'log' as const, label: 'History' },
+                    { key: 'stash' as const, label: `Stash${stashes.length ? ` (${stashes.length})` : ''}` },
+                ]).map(t => (
+                    <button key={t.key} className={`pv-git-tab ${gitSubTab === t.key ? 'active' : ''}`} onClick={() => setGitSubTab(t.key)}>
+                        {t.label}
                     </button>
                 ))}
             </div>
 
             {gitSubTab === 'status' && (
-                <div className="git-status-panel">
+                <div className="pv-git-panel">
                     {stagedFiles.length > 0 && (
-                        <div className="git-file-group">
-                            <div className="git-group-header">
+                        <div className="pv-git-file-group">
+                            <div className="pv-git-group-header">
                                 <span>Staged ({stagedFiles.length})</span>
                             </div>
                             {stagedFiles.map(f => (
-                                <div key={f.path} className="git-file-row">
+                                <div key={f.path} className="pv-git-file-row">
                                     {statusIcon(f.status)}
-                                    <span className="git-file-path" onClick={() => showDiff(f.path, true)}>{f.path}</span>
-                                    <button className="git-file-action" onClick={() => unstageFile(f.path)} title="Unstage">−</button>
+                                    <span className="pv-git-file-path" onClick={() => showDiff(f.path, true)}>{f.path}</span>
+                                    <button className="pv-git-file-btn" onClick={() => unstageFile(f.path)} title="Unstage">−</button>
                                 </div>
                             ))}
                         </div>
                     )}
                     {unstagedFiles.length > 0 && (
-                        <div className="git-file-group">
-                            <div className="git-group-header">
+                        <div className="pv-git-file-group">
+                            <div className="pv-git-group-header">
                                 <span>Changes ({unstagedFiles.length})</span>
-                                <button className="git-file-action" onClick={stageAll} title="Stage all">+ All</button>
+                                <button className="pv-git-file-btn" onClick={stageAll} title="Stage all">+ All</button>
                             </div>
                             {unstagedFiles.map(f => (
-                                <div key={f.path} className="git-file-row">
+                                <div key={f.path} className="pv-git-file-row">
                                     {statusIcon(f.status)}
-                                    <span className="git-file-path" onClick={() => showDiff(f.path, false)}>{f.path}</span>
-                                    <button className="git-file-action" onClick={() => stageFile(f.path)} title="Stage">+</button>
+                                    <span className="pv-git-file-path" onClick={() => showDiff(f.path, false)}>{f.path}</span>
+                                    <button className="pv-git-file-btn" onClick={() => stageFile(f.path)} title="Stage">+</button>
                                 </div>
                             ))}
                         </div>
                     )}
-                    {files.length === 0 && <div className="git-empty">Working tree clean</div>}
+                    {files.length === 0 && <div className="pv-git-empty">Working tree clean</div>}
 
                     {stagedFiles.length > 0 && (
-                        <div className="git-commit-box">
+                        <div className="pv-git-commit-box">
                             <input
-                                className="git-commit-input"
+                                className="pv-git-input"
                                 placeholder="Commit message..."
                                 value={commitMsg}
                                 onChange={e => setCommitMsg(e.target.value)}
                                 onKeyDown={e => { if (e.key === 'Enter') doCommit(); }}
                             />
-                            <button className="test-btn" onClick={doCommit} disabled={!commitMsg.trim()}>Commit</button>
+                            <button className="pv-git-btn pv-git-btn-accent" onClick={doCommit} disabled={!commitMsg.trim()}>Commit</button>
                         </div>
                     )}
 
                     {diffContent && (
-                        <div className="git-diff-viewer">
-                            <div className="git-diff-header">
+                        <div className="pv-git-diff">
+                            <div className="pv-git-diff-header">
                                 <span>{diffFile}</span>
-                                <button className="git-file-action" onClick={() => { setDiffContent(''); setDiffFile(''); }}>✕</button>
+                                <button className="pv-git-file-btn" onClick={() => { setDiffContent(''); setDiffFile(''); }}>✕</button>
                             </div>
-                            <pre className="git-diff-content">{diffContent}</pre>
+                            <pre className="pv-git-diff-content">{diffContent}</pre>
                         </div>
                     )}
                 </div>
             )}
 
             {gitSubTab === 'branches' && (
-                <div className="git-branches-panel">
-                    <div className="git-new-branch">
-                        <input className="git-commit-input" placeholder="New branch name..." value={newBranch} onChange={e => setNewBranch(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createBranch(); }} />
-                        <button className="test-btn" onClick={createBranch} disabled={!newBranch.trim()}>Create</button>
+                <div className="pv-git-panel">
+                    <div className="pv-git-new-branch">
+                        <input className="pv-git-input" placeholder="New branch name..." value={newBranch} onChange={e => setNewBranch(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createBranch(); }} />
+                        <button className="pv-git-btn pv-git-btn-accent" onClick={createBranch} disabled={!newBranch.trim()}>Create</button>
                     </div>
-                    <div className="git-branch-list">
-                        {branches.filter(b => !b.remote).map(b => (
-                            <div key={b.name} className={`git-branch-row ${b.current ? 'current' : ''}`} onClick={() => !b.current && checkoutBranch(b.name)}>
-                                {b.current && <span className="git-current-dot" />}
-                                <span className="git-branch-name">{b.name}</span>
-                                <span className="git-branch-hash">{b.hash}</span>
+                    <div className="pv-git-branch-list">
+                        {localBranches.map(b => (
+                            <div key={b.name} className={`pv-git-branch-row ${b.current ? 'current' : ''}`} onClick={() => !b.current && checkoutBranch(b.name)}>
+                                {b.current && <span className="pv-git-current-dot" />}
+                                <span className="pv-git-branch-name">{b.name}</span>
+                                <span className="pv-git-branch-hash">{b.hash}</span>
                             </div>
                         ))}
-                        {branches.filter(b => b.remote).length > 0 && (
+                        {remoteBranches.length > 0 && (
                             <>
-                                <div className="git-group-header"><span>Remote</span></div>
-                                {branches.filter(b => b.remote).map(b => (
-                                    <div key={b.name} className="git-branch-row remote">
-                                        <span className="git-branch-name">{b.name}</span>
-                                        <span className="git-branch-hash">{b.hash}</span>
+                                <div className="pv-git-group-header"><span>Remote</span></div>
+                                {remoteBranches.map(b => (
+                                    <div key={b.name} className="pv-git-branch-row remote">
+                                        <span className="pv-git-branch-name">{b.name}</span>
+                                        <span className="pv-git-branch-hash">{b.hash}</span>
                                     </div>
                                 ))}
                             </>
@@ -263,21 +348,45 @@ function GitTab({ projectPath }: { projectPath: string }) {
             )}
 
             {gitSubTab === 'log' && (
-                <div className="git-log-panel">
+                <div className="pv-git-log">
                     {commits.map(c => (
-                        <div key={c.hash} className="git-commit-row">
-                            <div className="git-commit-dot" />
-                            <div className="git-commit-info">
-                                <div className="git-commit-msg">{c.message}</div>
-                                <div className="git-commit-meta">
+                        <div key={c.hash} className="pv-git-commit-row">
+                            <div className="pv-git-commit-dot" />
+                            <div className="pv-git-commit-info">
+                                <div className="pv-git-commit-msg">{c.message}</div>
+                                <div className="pv-git-commit-meta">
                                     <span>{c.shortHash}</span>
                                     <span>{c.author}</span>
-                                    <span>{new Date(c.timestamp).toLocaleDateString()}</span>
+                                    <span>{formatTimeAgo(c.timestamp)}</span>
                                 </div>
                             </div>
                         </div>
                     ))}
-                    {commits.length === 0 && <div className="git-empty">No commits yet</div>}
+                    {commits.length === 0 && <div className="pv-git-empty">No commits yet</div>}
+                </div>
+            )}
+
+            {gitSubTab === 'stash' && (
+                <div className="pv-git-panel">
+                    <div className="pv-git-stash-form">
+                        <input className="pv-git-input" placeholder="Stash message (optional)..." value={stashMsg} onChange={e => setStashMsg(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') doStashPush(); }} />
+                        <div className="pv-git-stash-btns">
+                            <button className="pv-git-btn pv-git-btn-accent" onClick={doStashPush} disabled={files.length === 0}>Stash Changes</button>
+                            {stashes.length > 0 && <button className="pv-git-btn" onClick={doStashPop}>Pop Latest</button>}
+                        </div>
+                    </div>
+                    {stashes.length > 0 ? (
+                        <div className="pv-git-stash-list">
+                            {stashes.map((s, i) => (
+                                <div key={i} className="pv-git-stash-item">
+                                    <span className="pv-git-stash-text">{s}</span>
+                                    <button className="pv-git-file-btn" onClick={() => doStashDrop(i)} title="Drop">✕</button>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="pv-git-empty">No stashed changes</div>
+                    )}
                 </div>
             )}
         </div>
@@ -416,7 +525,7 @@ function TasksTab({ projectId, projectPath }: { projectId: string; projectPath: 
 
             {showForm && (
                 <div className="task-form">
-                    <input className="git-commit-input" placeholder="Task description..." value={formTitle} onChange={e => setFormTitle(e.target.value)} autoFocus
+                    <input className="pv-git-input" placeholder="Task description..." value={formTitle} onChange={e => setFormTitle(e.target.value)} autoFocus
                         onKeyDown={e => { if (e.key === 'Enter') addTask(); }}
                     />
                     <div className="task-form-row">
@@ -493,7 +602,7 @@ function TasksTab({ projectId, projectPath }: { projectId: string; projectPath: 
                 )}
 
                 {total === 0 && (
-                    <div className="git-empty">
+                    <div className="pv-git-empty">
                         No tasks yet. Add tasks manually or let the AI agent create them.
                     </div>
                 )}
@@ -595,10 +704,10 @@ function MilestonesTab({ projectId, projectPath }: { projectId: string; projectP
 
             {showForm && (
                 <div className="task-form">
-                    <input className="git-commit-input" placeholder="Milestone title" value={formTitle} onChange={e => setFormTitle(e.target.value)} autoFocus />
-                    <input className="git-commit-input" placeholder="Description (optional)" value={formDesc} onChange={e => setFormDesc(e.target.value)} />
+                    <input className="pv-git-input" placeholder="Milestone title" value={formTitle} onChange={e => setFormTitle(e.target.value)} autoFocus />
+                    <input className="pv-git-input" placeholder="Description (optional)" value={formDesc} onChange={e => setFormDesc(e.target.value)} />
                     <div className="task-form-row">
-                        <input className="git-commit-input" type="date" value={formDue} onChange={e => setFormDue(e.target.value)} title="Due date" placeholder="Due date" />
+                        <input className="pv-git-input" type="date" value={formDue} onChange={e => setFormDue(e.target.value)} title="Due date" placeholder="Due date" />
                         <button className="test-btn" onClick={addMilestone} disabled={!formTitle.trim()}>Add</button>
                         <button className="disconnect-btn" onClick={() => setShowForm(false)}>Cancel</button>
                     </div>
@@ -636,7 +745,7 @@ function MilestonesTab({ projectId, projectPath }: { projectId: string; projectP
                     );
                 })}
                 {milestones.length === 0 && (
-                    <div className="git-empty">No milestones yet. Create milestones to organize tasks into phases.</div>
+                    <div className="pv-git-empty">No milestones yet. Create milestones to organize tasks into phases.</div>
                 )}
             </div>
         </div>

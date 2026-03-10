@@ -302,6 +302,13 @@ When \`task_list\` shows all tasks done:
 - \`git_push(cwd?, set_upstream?)\` — Push to remote repository
 - \`git_pull(cwd?)\` — Pull latest from remote
 - \`git_stash(action, message?, cwd?)\` — Stash management (push/pop/list/drop)
+- \`git_stage(files, cwd?)\` — Stage files for commit (array of paths, or "." for all)
+- \`git_unstage(files, cwd?)\` — Unstage files (array of paths)
+- \`git_merge(branch, cwd?, no_ff?)\` — Merge a branch into current branch
+- \`git_reset(mode?, target?, cwd?)\` — Reset HEAD (soft/mixed/hard)
+- \`git_tag(action, name?, message?, cwd?)\` — Tag management (list/create/delete)
+- \`git_remotes(cwd?)\` — List remote repositories with URLs
+- \`git_show(ref?, cwd?)\` — Show commit details (message, diff, stats)
 
 ### Multi-Agent System
 - \`orchestrate(description, nodes[], max_parallel?)\` — Launch parallel specialist agents with dependency graph. Nodes have: id, task, role, deps, file_scope, context_files.

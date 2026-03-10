@@ -273,6 +273,14 @@ contextBridge.exposeInMainWorld('onicode', {
     gitPull: (repoPath) => ipcRenderer.invoke('git-pull', repoPath),
     gitPush: (repoPath) => ipcRenderer.invoke('git-push', repoPath),
     gitShow: (repoPath, ref, filePath) => ipcRenderer.invoke('git-show', repoPath, ref, filePath),
+    gitMerge: (repoPath, branch, noFf) => ipcRenderer.invoke('git-merge', repoPath, branch, noFf),
+    gitReset: (repoPath, mode, ref) => ipcRenderer.invoke('git-reset', repoPath, mode, ref),
+    gitTag: (repoPath, action, tagName, message) => ipcRenderer.invoke('git-tag', repoPath, action, tagName, message),
+    gitLogGraph: (repoPath, count) => ipcRenderer.invoke('git-log-graph', repoPath, count),
+    gitMergeAbort: (repoPath) => ipcRenderer.invoke('git-merge-abort', repoPath),
+    gitStashDrop: (repoPath, index) => ipcRenderer.invoke('git-stash-drop', repoPath, index),
+    gitRemoteAdd: (repoPath, name, url) => ipcRenderer.invoke('git-remote-add', repoPath, name, url),
+    gitRemoteRemove: (repoPath, name) => ipcRenderer.invoke('git-remote-remove', repoPath, name),
 
     // ── Hooks ──
     hooksList: (projectPath) => ipcRenderer.invoke('hooks-list', projectPath),

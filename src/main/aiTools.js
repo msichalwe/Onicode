@@ -1656,6 +1656,129 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    // ── Git: Stage & Unstage ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_stage',
+            description: 'Stage specific files for commit. Use this to selectively stage files before committing (instead of staging everything).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    files: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'File paths to stage. Use ["."] to stage all.',
+                    },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+                required: ['files'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_unstage',
+            description: 'Unstage files that were staged for commit, keeping the working directory changes.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    files: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'File paths to unstage.',
+                    },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+                required: ['files'],
+            },
+        },
+    },
+    // ── Git: Merge ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_merge',
+            description: 'Merge a branch into the current branch. Use --no-ff for explicit merge commits.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    branch: { type: 'string', description: 'Branch to merge into current branch' },
+                    no_ff: { type: 'boolean', description: 'Force a merge commit even for fast-forward merges (default false)' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+                required: ['branch'],
+            },
+        },
+    },
+    // ── Git: Reset ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_reset',
+            description: 'Reset current HEAD to a specified state. Modes: soft (keep staged+working), mixed (keep working, unstage), hard (discard all changes). DANGEROUS with hard mode.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    mode: { type: 'string', enum: ['soft', 'mixed', 'hard'], description: 'Reset mode (default: mixed)' },
+                    ref: { type: 'string', description: 'Commit reference to reset to (default: HEAD)' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+            },
+        },
+    },
+    // ── Git: Tag ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_tag',
+            description: 'Create, list, or delete git tags. Use for versioning releases.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    action: { type: 'string', enum: ['list', 'create', 'delete'], description: 'Tag action (default: list)' },
+                    tag_name: { type: 'string', description: 'Tag name (required for create/delete)' },
+                    message: { type: 'string', description: 'Annotated tag message (optional, for create)' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+            },
+        },
+    },
+    // ── Git: Remotes ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_remotes',
+            description: 'List, add, or remove remote repositories.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    action: { type: 'string', enum: ['list', 'add', 'remove'], description: 'Remote action (default: list)' },
+                    name: { type: 'string', description: 'Remote name (required for add/remove)' },
+                    url: { type: 'string', description: 'Remote URL (required for add)' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+            },
+        },
+    },
+    // ── Git: Show file at commit ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_show',
+            description: 'Show the contents of a file at a specific commit or branch. Useful for comparing versions.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ref: { type: 'string', description: 'Commit hash, branch name, or tag (e.g., "HEAD~1", "main", "v1.0")' },
+                    file_path: { type: 'string', description: 'Path to the file within the repository' },
+                    cwd: { type: 'string', description: 'Repository path (defaults to current project path)' },
+                },
+                required: ['ref', 'file_path'],
+            },
+        },
+    },
 ];
 
 // ══════════════════════════════════════════
@@ -3534,6 +3657,138 @@ async function executeTool(name, args) {
                     return { success: true, output: output || 'Already up to date.' };
                 } catch (err) {
                     return { error: `Git pull failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_stage': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const files = args.files || ['.'];
+                try {
+                    const fileArgs = files.map(f => `"${f}"`).join(' ');
+                    execSync(`git add ${fileArgs}`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                    return { success: true, staged: files };
+                } catch (err) {
+                    return { error: `Git stage failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_unstage': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const files = args.files || [];
+                try {
+                    const fileArgs = files.map(f => `"${f}"`).join(' ');
+                    execSync(`git restore --staged ${fileArgs}`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                    return { success: true, unstaged: files };
+                } catch (err) {
+                    return { error: `Git unstage failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_merge': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const branch = args.branch;
+                if (!branch) return { error: 'Branch name is required for merge' };
+                try {
+                    const flag = args.no_ff ? '--no-ff' : '';
+                    const output = execSync(`git merge ${flag} "${branch}"`, { cwd, encoding: 'utf-8', timeout: 30000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    logger.info('git', `Merge ${branch}: ${output.slice(0, 100)}`);
+                    return { success: true, branch, output };
+                } catch (err) {
+                    const stderr = err.stderr?.slice(0, 500) || err.message?.slice(0, 500);
+                    if (stderr.includes('CONFLICT') || stderr.includes('Automatic merge failed')) {
+                        return { error: `Merge conflict detected. Use git_status to see conflicted files, resolve them with edit_file, then git_stage + git_commit. Or call git_reset({ mode: "hard", ref: "HEAD" }) to abort.`, conflicts: true };
+                    }
+                    return { error: `Git merge failed: ${stderr}` };
+                }
+            }
+
+            case 'git_reset': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const mode = args.mode || 'mixed';
+                const ref = args.ref || 'HEAD';
+                if (!['soft', 'mixed', 'hard'].includes(mode)) {
+                    return { error: `Invalid reset mode: ${mode}. Use soft, mixed, or hard.` };
+                }
+                try {
+                    const output = execSync(`git reset --${mode} ${ref}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+                    logger.info('git', `Reset --${mode} ${ref}: ${output.slice(0, 100)}`);
+                    return { success: true, mode, ref, output: output || `Reset to ${ref} (${mode})` };
+                } catch (err) {
+                    return { error: `Git reset failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_tag': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const action = args.action || 'list';
+                try {
+                    if (action === 'list') {
+                        const output = execSync('git tag -l --sort=-creatordate', { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+                        return { success: true, tags: output ? output.split('\n').filter(Boolean) : [] };
+                    }
+                    if (action === 'create') {
+                        if (!args.tag_name) return { error: 'Tag name is required' };
+                        const cmd = args.message
+                            ? `git tag -a "${args.tag_name}" -m "${args.message.replace(/"/g, '\\"')}"`
+                            : `git tag "${args.tag_name}"`;
+                        execSync(cmd, { cwd, encoding: 'utf-8', timeout: 10000 });
+                        logger.info('git', `Created tag: ${args.tag_name}`);
+                        return { success: true, tag: args.tag_name, annotated: !!args.message };
+                    }
+                    if (action === 'delete') {
+                        if (!args.tag_name) return { error: 'Tag name is required' };
+                        execSync(`git tag -d "${args.tag_name}"`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                        return { success: true, deleted: args.tag_name };
+                    }
+                    return { error: `Unknown tag action: ${action}` };
+                } catch (err) {
+                    return { error: `Git tag failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_remotes': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const action = args.action || 'list';
+                try {
+                    if (action === 'list') {
+                        const output = execSync('git remote -v', { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+                        const remotes = {};
+                        output.split('\n').filter(Boolean).forEach(line => {
+                            const [rname, url, type] = line.split(/\s+/);
+                            if (!remotes[rname]) remotes[rname] = {};
+                            remotes[rname][type?.replace(/[()]/g, '')] = url;
+                        });
+                        return {
+                            success: true,
+                            remotes: Object.entries(remotes).map(([rname, urls]) => ({
+                                name: rname, fetchUrl: urls.fetch || '', pushUrl: urls.push || '',
+                            })),
+                        };
+                    }
+                    if (action === 'add') {
+                        if (!args.name || !args.url) return { error: 'Remote name and URL are required' };
+                        execSync(`git remote add "${args.name}" "${args.url}"`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                        return { success: true, added: args.name, url: args.url };
+                    }
+                    if (action === 'remove') {
+                        if (!args.name) return { error: 'Remote name is required' };
+                        execSync(`git remote remove "${args.name}"`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                        return { success: true, removed: args.name };
+                    }
+                    return { error: `Unknown remote action: ${action}` };
+                } catch (err) {
+                    return { error: `Git remotes failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_show': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                if (!args.ref || !args.file_path) return { error: 'Both ref and file_path are required' };
+                try {
+                    const output = execSync(`git show ${args.ref}:"${args.file_path}"`, { cwd, encoding: 'utf-8', timeout: 10000, maxBuffer: 5 * 1024 * 1024 }).trim();
+                    return { success: true, ref: args.ref, file_path: args.file_path, content: output };
+                } catch (err) {
+                    return { error: `Git show failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
                 }
             }
 
