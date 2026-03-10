@@ -35,6 +35,7 @@ interface OnicodeAPI {
             apiKey: string;
             baseUrl?: string;
             selectedModel?: string;
+            projectPath?: string;
         }
     ) => Promise<{ success?: boolean; error?: string }>;
     onStreamChunk: (callback: (chunk: string) => void) => () => void;
@@ -332,10 +333,42 @@ interface OnicodeAPI {
     codeIndexStats: () => Promise<{ files: number; uniqueTokens: number; projectPath: string | null }>;
     codeIndexUpdate: () => Promise<{ updated: number; removed: number; added: number }>;
 
+    // MCP (Model Context Protocol)
+    mcpListServers: () => Promise<{ servers: MCPServerInfo[] }>;
+    mcpConnectServer: (name: string) => Promise<{ success: boolean; error?: string; toolCount?: number }>;
+    mcpDisconnectServer: (name: string) => Promise<{ success: boolean; error?: string }>;
+    mcpAddServer: (name: string, serverDef: MCPServerDef) => Promise<{ success: boolean; error?: string }>;
+    mcpRemoveServer: (name: string) => Promise<{ success: boolean; error?: string }>;
+    mcpGetToolsForPrompt: () => Promise<{ tools: MCPToolInfo[] }>;
+    onMcpServerStatus: (callback: (data: { name: string; status: string; toolCount?: number; error?: string }) => void) => () => void;
+
     platform: string;
 }
 
 declare global {
+    interface MCPServerDef {
+        command: string;
+        args: string[];
+        env?: Record<string, string>;
+        enabled: boolean;
+    }
+
+    interface MCPServerInfo {
+        name: string;
+        config: MCPServerDef;
+        status: 'disconnected' | 'connecting' | 'connected' | 'error';
+        toolCount: number;
+        tools: Array<{ name: string; description: string }>;
+        error: string | null;
+    }
+
+    interface MCPToolInfo {
+        serverName: string;
+        toolName: string;
+        fullName: string;
+        description: string;
+    }
+
     interface HookDefinition {
         matcher?: string;
         command: string;

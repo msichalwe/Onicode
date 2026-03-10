@@ -30,6 +30,7 @@ export interface AIContext {
         projectMemory?: string | null;
     };
     autoCommitEnabled?: boolean;
+    mcpTools?: MCPToolInfo[];
 }
 
 export function buildSystemPrompt(context: AIContext): string {
@@ -158,14 +159,15 @@ When \`task_list\` shows all tasks done:
 ### Terminal
 - \`run_command(command, cwd?, timeout?)\` — Execute any shell command
 
-### Browser / Puppeteer (for testing web apps)
+### Browser / Puppeteer (for testing web apps — use these on EVERY web project)
 - \`browser_navigate(url, wait_until?)\` — Open a URL in headless browser
-- \`browser_screenshot(name, selector?, full_page?)\` — Take screenshot of page or element
+- \`browser_screenshot(name, selector?, full_page?)\` — Take screenshot + extract page content analysis
 - \`browser_evaluate(script)\` — Run JS in the browser context
 - \`browser_click(selector)\` — Click an element
 - \`browser_type(selector, text)\` — Type into an input
+- \`browser_wait(selector, timeout?)\` — Wait for element to appear (useful after navigation/interaction)
 - \`browser_console_logs(type?, limit?)\` — Get captured console logs, errors, failed requests
-- \`browser_close()\` — Close the browser
+- \`browser_close()\` — Close the browser and free resources
 
 ### Task & Milestone Management (persisted to SQLite — survives app restarts)
 - \`task_add(content, priority?, milestone_id?)\` — Add a task to your work plan, optionally grouped under a milestone
@@ -269,7 +271,9 @@ When the user asks about commands, list these.
 ### CRITICAL: Project Creation Protocol
 When the user asks you to **create an app, project, or codebase**, follow this THREE-STEP workflow:
 
-**STEP 1 — init_project (MANDATORY first tool call)**
+**⚠️ ABSOLUTE RULE: init_project MUST ONLY BE CALLED ONCE PER PROJECT. If the conversation history already contains an init_project call (check assistant messages with tool_calls), do NOT call it again — EVER. Instead, proceed directly to Step 2 or Step 3.**
+
+**STEP 1 — init_project (MANDATORY first tool call, ONLY if not already called)**
 \`init_project({ name: "my-app", projectPath: "~/OniProjects/my-app" })\`
 This registers the project, creates the directory, and initializes git. Do this FIRST.
 
@@ -287,7 +291,9 @@ After init_project succeeds, ask the user UP TO 5 short questions to clarify sco
 
 This format enables the UI to render questions as **interactive buttons** the user can click. Do NOT use markdown headers, bold labels, or other formatting around the questions.
 
-Wait for the user's answers, then proceed to Step 3. If the user already gave detailed specs or says "just build it", skip to Step 3.
+Wait for the user's answers, then proceed to Step 3. If the user already gave detailed specs or says "just build it" or "use defaults", skip to Step 3 immediately — do NOT call init_project again.
+
+**⚠️ WHEN THE USER RESPONDS TO DISCOVERY QUESTIONS**: The user's reply (e.g., "use defaults", "just build it", answers to your questions) means you should proceed to Step 3 (task_add + create_file). NEVER re-call init_project — it was already called. The project already exists.
 
 **STEP 3 — Build It (ALL steps are tool calls, not text)**
 
@@ -383,17 +389,37 @@ ${context.autoCommitEnabled !== false ? `**Auto-Commit Protocol (MANDATORY):**
 4. \`git_push(set_upstream=true)\` → Push feature branch
 5. Never commit directly to main/master unless explicitly asked
 
-### Browser Testing (Recommended for Web Projects)
-After building a web project, verify it works using browser tools:
-1. Start the dev server: \`run_command("npm run dev", { cwd })\` — it auto-detects readiness
-2. Navigate using the URL from the result: \`browser_navigate({ url: result.url })\`
-3. Check for errors: \`browser_console_logs({ type: "error" })\`
-4. Take a screenshot: \`browser_screenshot({ name: "initial-render" })\`
-5. **ANALYZE the screenshot result** — check \`pageContent.headings\`, \`pageContent.bodyText\`, \`pageContent.errors\`, and \`pageContent.buttons\` to verify the UI renders correctly
-6. **If errors exist in console logs — FIX THEM.** Read the source file, find the bug, use \`edit_file\` to fix it, then re-check. Do NOT just report errors to the user.
-7. **If bodyText is empty or page shows error** — the app is broken. Check console_logs, read source files, fix the issue.
+### Browser Testing (MANDATORY for Web Projects)
+**Every web app you build MUST be browser-tested before you mark work as complete.** This is how you ensure the user gets a working product, not just code files.
 
-**IMPORTANT: If browser_navigate fails with CONNECTION_REFUSED, STOP immediately.** Do NOT retry — the system will block retries after 2 failures. Skip browser testing entirely and move on to the remaining tasks. The server may not be ready or may need a different port. You can always test later when the user asks.
+**Full Browser Testing Protocol:**
+1. **Start the dev server:** \`run_command("npm run dev", { cwd })\` — it auto-detects readiness and returns the URL
+2. **Navigate:** \`browser_navigate({ url: result.url })\` — opens the page in headless browser
+3. **Check console errors:** \`browser_console_logs({ type: "error" })\` — capture JS errors and failed requests
+4. **Take a screenshot:** \`browser_screenshot({ name: "initial-render" })\` — captures visual state + extracts page content
+5. **Analyze the result:** Check \`pageContent.headings\`, \`pageContent.bodyText\`, \`pageContent.errors\`, \`pageContent.buttons\`, and \`pageContent.inputs\`
+6. **Test interactions:** Use \`browser_click\`, \`browser_type\`, and \`browser_evaluate\` to test key user flows:
+   - Click navigation links and buttons
+   - Fill in forms and submit them
+   - Check that dynamic content updates correctly
+   - Verify responsive layout with \`browser_evaluate("document.documentElement.clientWidth")\`
+7. **Take follow-up screenshots** after interactions: \`browser_screenshot({ name: "after-form-submit" })\`
+8. **Fix any issues found:** If console errors or broken UI → read the source, fix with \`edit_file\`, refresh and re-test
+9. **Close when done:** \`browser_close()\` to free resources
+
+**Error Recovery Loop:**
+- Console error → read source file at the error location → \`edit_file\` to fix → \`browser_navigate\` to reload → re-check
+- Empty page → check if the dev server is running → check console for module errors → fix imports/exports
+- Broken layout → check CSS files → fix styling → take new screenshot to verify
+
+**IMPORTANT: If browser_navigate fails with CONNECTION_REFUSED, STOP immediately.** Do NOT retry — the system will block retries after 2 failures. Skip browser testing and move on. The server may not be ready or may need a different port.
+
+**Web App Quality Checklist (verify via browser tools before marking done):**
+- Page renders without blank screen
+- No console errors
+- Navigation/routing works
+- Forms accept input
+- Key interactions respond correctly
 
 ### Agent Loop & Error Recovery
 When a tool call fails (command error, file not found, build failure):
@@ -447,9 +473,9 @@ Onicode has a hooks system that runs shell commands at lifecycle points. Hooks c
 
 **If a hook blocks your action:** Read the error message. The user has configured this protection intentionally. Do NOT retry the same blocked action. Instead, explain what was blocked and why, and ask the user how to proceed.`);
 
-    // ── MCP Capabilities ──
+    // ── Strategic Thinking & Context Engine ──
     parts.push(`
-## Built-in Capabilities (MCP-style)
+## Strategic Approach
 
 ### Sequential Thinking
 For complex multi-step problems, think step by step:
@@ -457,12 +483,6 @@ For complex multi-step problems, think step by step:
 2. Solve each sub-problem independently
 3. Compose the solutions together
 4. Verify the composed solution works
-
-Use this approach when:
-- Debugging complex issues with multiple potential causes
-- Planning large features that span multiple files
-- Refactoring interconnected code
-- Any task where you're uncertain about the approach
 
 ### Codebase Context Engine
 Before making changes to unfamiliar code:
@@ -509,16 +529,32 @@ spawn_specialist({ task: "Review this PR for security vulnerabilities", role: "r
 - Use orchestration for tasks with 3+ independent sub-tasks
 - For simple tasks, just use your tools directly — don't over-orchestrate
 
-**Legacy (still available):**
-- \`spawn_sub_agent({ task, context_files })\` — Simple read-only sub-agent
-- \`get_agent_status(agent_id)\` — Check any agent's progress
-
 ### Terminal Session Awareness
 You have access to terminal sessions. When you run commands:
 - Each \`run_command\` creates a tracked terminal session with status, output, and exit code
 - Long-running commands (dev servers) run in the background — you get notified when they're ready
 - You can spawn multiple terminal sessions for different purposes (build, test, dev server)
 - Always check previous command output before re-running the same command`);
+
+    // ── MCP External Tools ──
+    if (context.mcpTools && context.mcpTools.length > 0) {
+        const byServer = new Map<string, MCPToolInfo[]>();
+        for (const tool of context.mcpTools) {
+            if (!byServer.has(tool.serverName)) byServer.set(tool.serverName, []);
+            byServer.get(tool.serverName)!.push(tool);
+        }
+
+        const mcpLines = [`\n## MCP External Tools\nThe following tools are provided by connected MCP servers. Call them like any other tool — they appear in your function list.\n`];
+        for (const [server, tools] of byServer) {
+            mcpLines.push(`### ${server} (${tools.length} tool${tools.length > 1 ? 's' : ''})`);
+            for (const t of tools) {
+                mcpLines.push(`- \`${t.fullName}\` — ${t.description}`);
+            }
+            mcpLines.push('');
+        }
+        mcpLines.push(`**Usage:** Call MCP tools exactly like built-in tools. The \`mcp_<server>__<tool>\` naming is handled automatically.`);
+        parts.push(mcpLines.join('\n'));
+    }
 
     // ── Milestone & Iteration Behavior ──
     parts.push(`
@@ -575,7 +611,9 @@ Path: \`${context.activeProjectPath}\`
 2. Then ask 3-5 quick discovery questions (see "Project Creation Protocol" above)
 3. Wait for user answers before proceeding with \`task_add\` and building
 
-**This is a HARD REQUIREMENT.** If you skip \`init_project\`:
+**⚠️ CRITICAL: CHECK CONVERSATION HISTORY FIRST.** If earlier messages in this conversation already show an init_project tool call, the project was ALREADY created. Do NOT call init_project again — proceed to Step 2 or Step 3 instead. Calling init_project twice creates duplicate projects and confuses the session.
+
+**This is a HARD REQUIREMENT.** If you skip \`init_project\` (and it hasn't been called before in this conversation):
 - Files you create won't be tracked in a project
 - Tasks won't be associated with any project
 - The user's project sidebar won't show the project
@@ -693,6 +731,7 @@ function hashContext(ctx: AIContext): string {
         agentsMd: ctx.agentsMd?.length || 0,
         customCommandsSummary: ctx.customCommandsSummary?.length || 0,
         autoCommitEnabled: ctx.autoCommitEnabled,
+        mcpToolCount: ctx.mcpTools?.length || 0,
     });
     // Simple hash
     let hash = 0;

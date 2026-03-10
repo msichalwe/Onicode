@@ -77,6 +77,15 @@ export default function SettingsPanel() {
     const [autoCommit, setAutoCommit] = useState(() => localStorage.getItem('onicode-auto-commit') !== 'false');
     const [dangerousCommandProtection, setDangerousCommandProtection] = useState(() => localStorage.getItem('onicode-dangerous-cmd-protection') !== 'false');
 
+    // ── MCP State ──
+    const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([]);
+    const [showAddMCP, setShowAddMCP] = useState(false);
+    const [mcpName, setMcpName] = useState('');
+    const [mcpCommand, setMcpCommand] = useState('');
+    const [mcpArgs, setMcpArgs] = useState('');
+    const [mcpEnv, setMcpEnv] = useState('');
+    const [mcpLoading, setMcpLoading] = useState<Set<string>>(new Set());
+
     const loadConnectors = useCallback(async () => {
         if (!isElectron) return;
         const res = await window.onicode!.connectorList();
@@ -102,6 +111,60 @@ export default function SettingsPanel() {
     }, []);
 
     useEffect(() => { loadHooksAndCommands(); }, [loadHooksAndCommands]);
+
+    // ── Load MCP Servers ──
+    const loadMCPServers = useCallback(async () => {
+        if (!isElectron) return;
+        try {
+            const res = await window.onicode!.mcpListServers();
+            setMcpServers(res.servers || []);
+        } catch { /* MCP not ready */ }
+    }, []);
+
+    useEffect(() => { loadMCPServers(); }, [loadMCPServers]);
+
+    // Subscribe to real-time MCP status updates
+    useEffect(() => {
+        if (!isElectron) return;
+        const cleanup = window.onicode!.onMcpServerStatus(() => {
+            loadMCPServers(); // Refresh the full list on any status change
+        });
+        return cleanup;
+    }, [loadMCPServers]);
+
+    const handleMCPConnect = useCallback(async (name: string) => {
+        setMcpLoading(prev => new Set(prev).add(name));
+        try {
+            await window.onicode!.mcpConnectServer(name);
+        } catch { /* handled via status event */ }
+        setMcpLoading(prev => { const s = new Set(prev); s.delete(name); return s; });
+        loadMCPServers();
+    }, [loadMCPServers]);
+
+    const handleMCPDisconnect = useCallback(async (name: string) => {
+        await window.onicode!.mcpDisconnectServer(name);
+        loadMCPServers();
+    }, [loadMCPServers]);
+
+    const handleMCPRemove = useCallback(async (name: string) => {
+        if (!confirm(`Remove MCP server "${name}"?`)) return;
+        await window.onicode!.mcpRemoveServer(name);
+        loadMCPServers();
+    }, [loadMCPServers]);
+
+    const handleMCPAdd = useCallback(async () => {
+        if (!mcpName.trim() || !mcpCommand.trim()) return;
+        const args = mcpArgs.split(',').map(s => s.trim()).filter(Boolean);
+        const env: Record<string, string> = {};
+        mcpEnv.split('\n').forEach(line => {
+            const [k, ...v] = line.split('=');
+            if (k?.trim()) env[k.trim()] = v.join('=').trim();
+        });
+        await window.onicode!.mcpAddServer(mcpName.trim(), { command: mcpCommand.trim(), args, env, enabled: true });
+        setShowAddMCP(false);
+        setMcpName(''); setMcpCommand(''); setMcpArgs(''); setMcpEnv('');
+        loadMCPServers();
+    }, [mcpName, mcpCommand, mcpArgs, mcpEnv, loadMCPServers]);
 
     const addHook = useCallback(async () => {
         if (!newHookCmd.trim()) return;
@@ -682,16 +745,18 @@ export default function SettingsPanel() {
             {activeTab === 'mcp' && (
                 <div className="settings-tab-content">
                     <div className="settings-section">
-                        <h3>Built-in Servers</h3>
-                        <p className="settings-section-desc">These MCP servers are bundled with Onicode and always available.</p>
+                        <h3>Built-in Capabilities</h3>
+                        <p className="settings-section-desc">Native tools bundled with Onicode — always available to the AI.</p>
                         <div className="mcp-server-list">
                             {[
-                                { name: 'Sequential Thinking', desc: 'Step-by-step reasoning for complex problems' },
-                                { name: 'Filesystem', desc: 'Enhanced file operations, search, and glob' },
-                                { name: 'Web Fetch', desc: 'Fetch and parse web pages, APIs, documentation' },
-                                { name: 'Puppeteer', desc: 'Browser automation, screenshots, testing' },
-                                { name: 'Memory', desc: 'Persistent memory across sessions' },
-                                { name: 'Git', desc: '15 git operations — status, branches, commits, diffs' },
+                                { name: 'Filesystem', desc: '7 file operations — read, edit, create, delete, search, glob, list' },
+                                { name: 'Browser', desc: '8 browser tools — navigate, screenshot, click, type, wait, evaluate, console, close' },
+                                { name: 'Terminal', desc: 'Shell execution, background processes, dev server management' },
+                                { name: 'Git', desc: '9 git tools — status, diff, log, branches, commit, push, pull, stash, checkout' },
+                                { name: 'Memory', desc: 'Persistent cross-session memory — read, write, append' },
+                                { name: 'Web Research', desc: 'Web fetch and search — fetch pages, search DuckDuckGo' },
+                                { name: 'Code Intelligence', desc: 'LSP + semantic search — symbols, references, types, TF-IDF' },
+                                { name: 'Orchestrator', desc: 'Multi-agent system — 5 specialist roles, parallel execution' },
                             ].map(s => (
                                 <div key={s.name} className="mcp-server-item mcp-server-builtin">
                                     <div className="mcp-server-status connected" />
@@ -706,16 +771,76 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="settings-section">
-                        <h3>External Servers</h3>
-                        <p className="settings-section-desc">Connect external MCP servers for additional capabilities.</p>
-                        <div className="mcp-placeholder">
-                            <div className="mcp-placeholder-icon">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                                    <rect x="2" y="2" width="20" height="20" rx="3" /><path d="M12 8v8M8 12h8" />
-                                </svg>
+                        <h3>MCP Servers</h3>
+                        <p className="settings-section-desc">
+                            Connect external MCP servers to extend the AI&apos;s capabilities. Tools from connected servers are automatically available.
+                        </p>
+
+                        {mcpServers.length > 0 && (
+                            <div className="mcp-server-list">
+                                {mcpServers.map(s => (
+                                    <div key={s.name} className="mcp-server-item mcp-server-external">
+                                        <div className="mcp-server-status-row">
+                                            <div className={`mcp-server-status ${s.status}`} />
+                                            <div className="mcp-server-info">
+                                                <div className="mcp-server-name">{s.name}</div>
+                                                <div className="mcp-server-command">{s.config.command} {(s.config.args || []).join(' ')}</div>
+                                                {s.error && <div className="mcp-server-error">{s.error}</div>}
+                                            </div>
+                                        </div>
+                                        <div className="mcp-server-actions">
+                                            {s.status === 'connected' && s.toolCount > 0 && (
+                                                <span className="mcp-server-tools-badge">{s.toolCount} tool{s.toolCount !== 1 ? 's' : ''}</span>
+                                            )}
+                                            {s.status === 'connected' ? (
+                                                <button className="mcp-server-toggle disconnect" onClick={() => handleMCPDisconnect(s.name)}>
+                                                    Disconnect
+                                                </button>
+                                            ) : s.status === 'connecting' || mcpLoading.has(s.name) ? (
+                                                <button className="mcp-server-toggle" disabled>Connecting...</button>
+                                            ) : (
+                                                <button className="mcp-server-toggle connect" onClick={() => handleMCPConnect(s.name)}>
+                                                    Connect
+                                                </button>
+                                            )}
+                                            <button className="mcp-server-remove" onClick={() => handleMCPRemove(s.name)} title="Remove server">
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
-                            <span>Add External MCP Server</span>
-                            <span className="mcp-placeholder-hint">Configure in <code>~/.onicode/mcp.json</code> — supports PostgreSQL, Figma, Slack, etc.</span>
+                        )}
+
+                        {!showAddMCP ? (
+                            <button className="mcp-add-btn" onClick={() => setShowAddMCP(true)}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14" /></svg>
+                                Add MCP Server
+                            </button>
+                        ) : (
+                            <div className="mcp-add-form">
+                                <label>Name</label>
+                                <input type="text" placeholder="e.g. postgres, github, slack" value={mcpName} onChange={e => setMcpName(e.target.value)} />
+                                <label>Command</label>
+                                <input type="text" placeholder="e.g. npx, node, python" value={mcpCommand} onChange={e => setMcpCommand(e.target.value)} />
+                                <label>Arguments (comma-separated)</label>
+                                <input type="text" placeholder="e.g. -y, @modelcontextprotocol/server-postgres, postgresql://localhost/mydb" value={mcpArgs} onChange={e => setMcpArgs(e.target.value)} />
+                                <label>Environment Variables (optional, KEY=VALUE per line)</label>
+                                <textarea rows={2} placeholder="DATABASE_URL=postgresql://..." value={mcpEnv} onChange={e => setMcpEnv(e.target.value)} />
+                                <div className="mcp-add-form-actions">
+                                    <button className="mcp-server-toggle" onClick={() => setShowAddMCP(false)}>Cancel</button>
+                                    <button className="mcp-server-toggle connect" onClick={handleMCPAdd} disabled={!mcpName.trim() || !mcpCommand.trim()}>Add & Connect</button>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="mcp-examples">
+                            <p className="settings-section-desc" style={{ marginTop: 12 }}>
+                                Popular servers: <code>@modelcontextprotocol/server-postgres</code>, <code>@modelcontextprotocol/server-github</code>, <code>@modelcontextprotocol/server-puppeteer</code>, <code>@modelcontextprotocol/server-filesystem</code>
+                            </p>
+                            <p className="settings-section-desc">
+                                Config file: <code>~/.onicode/mcp.json</code> — you can also edit this file directly.
+                            </p>
                         </div>
                     </div>
                 </div>

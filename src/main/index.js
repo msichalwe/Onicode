@@ -14,26 +14,32 @@ const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive } = require('./aiTools');
+const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath } = require('./aiTools');
 const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
 const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITIONS, executeOrchestratorTool } = require('./orchestrator');
+const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
 
 let mainWindow = null;
 
-// Combine all tool definitions from all modules
+// Combine all tool definitions from all modules (including MCP)
 function getAllToolDefinitions() {
     return [
         ...TOOL_DEFINITIONS,
         ...getLSPToolDefinitions(),
         ...getCodeIndexToolDefinitions(),
         ...ORCHESTRATOR_TOOL_DEFINITIONS,
+        ...getMCPToolDefinitions(),
     ];
 }
 
 // Route tool calls to the right executor
 async function executeAnyTool(name, args) {
+    // MCP tools (prefixed with mcp_)
+    if (name.startsWith('mcp_')) {
+        return executeMCPTool(name, args);
+    }
     // LSP tools
     if (['find_symbol', 'find_references', 'list_symbols', 'get_type_info'].includes(name)) {
         return executeLSPTool(name, args, _currentProjectPath);
@@ -451,6 +457,22 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
     if (systemMsg?.content) {
         const pathMatch = systemMsg.content.match(/## Active Project:.*?\nPath:\s*`([^`]+)`/);
         if (pathMatch) projectPath = pathMatch[1];
+    }
+
+    // Fallback 1: explicit projectPath from renderer (covers race between init_project and project activation)
+    if (!projectPath && providerConfig.projectPath) {
+        projectPath = providerConfig.projectPath;
+        logger.info('session', `Using explicit projectPath from renderer: ${projectPath}`);
+    }
+
+    // Fallback 2: project path persisted from previous streaming session (aiTools module state)
+    // Only use this if the conversation looks like it's continuing project work (has >2 messages, meaning it's a follow-up)
+    if (!projectPath && messages.length > 2) {
+        const prevPath = getCurrentProjectPath();
+        if (prevPath) {
+            projectPath = prevPath;
+            logger.info('session', `Using projectPath from previous streaming session: ${projectPath}`);
+        }
     }
 
     // Reload hooks for current project (ensures project-level hooks are fresh)
@@ -886,7 +908,19 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 });
 
                 logger.toolCall(fn.name, args, round);
-                const toolResult = await executeAnyTool(fn.name, args);
+                let toolResult;
+                if (fn.name === 'init_project' && _currentProjectPath) {
+                    // HARD GUARD: Block duplicate init_project when a project is already active
+                    logger.warn('agent-loop', `Blocked duplicate init_project call — project already active at ${_currentProjectPath}`);
+                    toolResult = {
+                        success: true,
+                        already_registered: true,
+                        project_path: _currentProjectPath,
+                        message: `A project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
+                    };
+                } else {
+                    toolResult = await executeAnyTool(fn.name, args);
+                }
                 logger.toolResult(fn.name, toolResult, round);
 
                 // Track browser_navigate failures — block retries after 2 failures
@@ -936,10 +970,21 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 // Parse the tool result to check if it's a new project
                 const initResultStr = inputItems.findLast(item => item.type === 'function_call_output' && item.call_id === initThisRound.call_id);
                 let isNewProject = true;
+                let initProjectPath = null;
                 try {
                     const parsed = JSON.parse(initResultStr?.output || '{}');
                     isNewProject = !parsed.already_registered;
+                    initProjectPath = parsed.project_path;
                 } catch {}
+
+                // Update projectPath for this session so follow-up calls use the correct project
+                if (initProjectPath) {
+                    projectPath = initProjectPath;
+                    _currentProjectPath = initProjectPath;
+                    // Re-init session with correct project (won't wipe tasks — same path check will pass on subsequent calls)
+                    startSession(null, initProjectPath);
+                    logger.info('agent-loop', `Updated session projectPath after init_project: ${initProjectPath}`);
+                }
                 if (isNewProject) {
                     logger.info('agent-loop', 'init_project created NEW project — forcing text-only next round for discovery questions');
                     _forceNoToolsNextRound = true;
@@ -1575,9 +1620,21 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 round,
             });
 
-            // Execute the tool
+            // Execute the tool (with init_project guard)
             logger.toolCall(tc.name, args, round);
-            const toolResult = await executeAnyTool(tc.name, args);
+            let toolResult;
+            if (tc.name === 'init_project' && _currentProjectPath) {
+                // HARD GUARD: Block duplicate init_project when a project is already active
+                logger.warn('agent-loop', `Blocked duplicate init_project call — project already active at ${_currentProjectPath}`);
+                toolResult = {
+                    success: true,
+                    already_registered: true,
+                    project_path: _currentProjectPath,
+                    message: `A project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
+                };
+            } else {
+                toolResult = await executeAnyTool(tc.name, args);
+            }
             logger.toolResult(tc.name, toolResult, round);
 
             // Track browser_navigate failures — block retries after 2 failures
@@ -1621,10 +1678,21 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         if (initCallThisRound) {
             const initResultMsg = conversationMessages.findLast(m => m.role === 'tool' && m.tool_call_id === initCallThisRound.id);
             let isNewProject = true;
+            let initProjectPath = null;
             try {
                 const parsed = JSON.parse(initResultMsg?.content || '{}');
                 isNewProject = !parsed.already_registered;
+                initProjectPath = parsed.project_path;
             } catch {}
+
+            // Update projectPath for this session so follow-up calls use the correct project
+            if (initProjectPath) {
+                projectPath = initProjectPath;
+                _currentProjectPath = initProjectPath;
+                startSession(null, initProjectPath);
+                logger.info('agent-loop', `Updated session projectPath after init_project: ${initProjectPath}`);
+            }
+
             if (isNewProject) {
                 logger.info('agent-loop', 'init_project created NEW project — forcing text-only next round for discovery questions');
                 _forceNoToolsNextRound = true;
@@ -2080,6 +2148,7 @@ registerCompactorIPC(ipcMain);
 registerLSPIPC(ipcMain);
 registerCodeIndexIPC(ipcMain);
 registerOrchestratorIPC(ipcMain);
+registerMCPIPC(ipcMain, () => mainWindow);
 
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {
@@ -2317,6 +2386,10 @@ app.whenReady().then(() => {
     });
 
     createWindow();
+
+    // Auto-connect enabled MCP servers after window is ready
+    connectAllMCP().catch(err => logger.warn('mcp', `Auto-connect failed: ${err?.message}`));
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -2329,5 +2402,6 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
     killAllSessions();
     killBackgroundProcesses();
+    disconnectAllMCP();
     try { closeDB(); } catch { }
 });

@@ -674,6 +674,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             apiKey: provider.apiKey!,
             baseUrl: provider.baseUrl,
             selectedModel: provider.selectedModel,
+            projectPath: activeProject?.path,
         });
 
         if (result.error) {
@@ -910,6 +911,17 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             } catch { /* commands not ready */ }
         }
 
+        // Load MCP tools for system prompt injection
+        let mcpTools: MCPToolInfo[] | undefined;
+        if (isElectron) {
+            try {
+                const mcpRes = await window.onicode!.mcpGetToolsForPrompt();
+                if (mcpRes.tools && mcpRes.tools.length > 0) {
+                    mcpTools = mcpRes.tools;
+                }
+            } catch { /* MCP not ready */ }
+        }
+
         // Build context-aware system prompt
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
         const systemContent = buildSystemPromptCached({
@@ -922,6 +934,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             hooksSummary,
             customCommandsSummary,
             autoCommitEnabled: localStorage.getItem('onicode-auto-commit') !== 'false',
+            mcpTools,
         });
 
         // Auto-compact if context is getting large

@@ -1304,6 +1304,21 @@ const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'browser_wait',
+            description: 'Wait for an element to appear on the page by CSS selector. Useful after navigation or interaction to wait for dynamic content to load before taking screenshots or clicking.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    selector: { type: 'string', description: 'CSS selector of element to wait for' },
+                    timeout: { type: 'integer', description: 'Max time to wait in ms (default 10000)' },
+                },
+                required: ['selector'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'browser_console_logs',
             description: 'Get browser console logs (errors, warnings, info). IMPORTANT: When you see errors, ACT on them — read the relevant source file, fix the bug with edit_file, then re-check. Do NOT just report errors to the user.',
             parameters: {
@@ -2542,10 +2557,27 @@ async function executeTool(name, args) {
                         }
                     } catch { projects = []; }
 
-                    // Check if already registered
+                    // Check if already registered (by exact path OR by name match in same parent dir)
                     const existing = projects.find(p => p.path === expandedPath);
                     if (existing) {
                         resolve({ success: true, project: existing, alreadyRegistered: true });
+                        return;
+                    }
+                    // Also detect near-duplicates: same name or similar name in ~/OniProjects/
+                    const parentDir = path.dirname(expandedPath);
+                    const nameMatch = projects.find(p => {
+                        const pDir = path.dirname(p.path);
+                        const pBase = path.basename(p.path).toLowerCase();
+                        const newBase = path.basename(expandedPath).toLowerCase();
+                        // Same parent directory and names are similar (one contains the other, or differ by suffix like -v2)
+                        return pDir === parentDir && pBase !== newBase && (
+                            pBase.includes(newBase) || newBase.includes(pBase) ||
+                            pBase.replace(/[-_]?v?\d+$/, '') === newBase.replace(/[-_]?v?\d+$/, '')
+                        );
+                    });
+                    if (nameMatch) {
+                        logger.warn('init_project', `Near-duplicate detected: "${projName}" ≈ "${nameMatch.name}" at ${nameMatch.path}`);
+                        resolve({ success: true, project: nameMatch, alreadyRegistered: true });
                         return;
                     }
 
@@ -2708,6 +2740,15 @@ async function executeTool(name, args) {
                 const browserMod = require('./browser');
                 const result = await browserMod.type(args.selector, args.text);
                 logger.tool('browser', `type → ${args.selector}`, result);
+                return result;
+            }
+
+            case 'browser_wait': {
+                const browserMod = require('./browser');
+                const result = await browserMod.waitForSelector(args.selector, {
+                    timeout: args.timeout || 10000,
+                });
+                logger.tool('browser', `wait → ${args.selector}`, result);
                 return result;
             }
 
@@ -3417,6 +3458,8 @@ module.exports = {
     checkToolPermission,
     // AI streaming lock — prevents renderer from wiping tasks mid-stream
     setAIStreamingActive: (active) => { _aiStreamingActive = active; },
+    // Get current project path (persists across streaming sessions — used by index.js fallback)
+    getCurrentProjectPath: () => _currentProjectPath,
     // Background process management
     killBackgroundProcesses,
     getBackgroundProcesses,

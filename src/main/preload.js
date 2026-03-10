@@ -307,6 +307,19 @@ contextBridge.exposeInMainWorld('onicode', {
     codeIndexStats: () => ipcRenderer.invoke('code-index-stats'),
     codeIndexUpdate: () => ipcRenderer.invoke('code-index-update'),
 
+    // ── MCP ──
+    mcpListServers: () => ipcRenderer.invoke('mcp-list-servers'),
+    mcpConnectServer: (name) => ipcRenderer.invoke('mcp-connect-server', name),
+    mcpDisconnectServer: (name) => ipcRenderer.invoke('mcp-disconnect-server', name),
+    mcpAddServer: (name, serverDef) => ipcRenderer.invoke('mcp-add-server', name, serverDef),
+    mcpRemoveServer: (name) => ipcRenderer.invoke('mcp-remove-server', name),
+    mcpGetToolsForPrompt: () => ipcRenderer.invoke('mcp-get-tools-for-prompt'),
+    onMcpServerStatus: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('mcp-server-status', handler);
+        return () => ipcRenderer.removeListener('mcp-server-status', handler);
+    },
+
     // Platform
     platform: process.platform,
 });

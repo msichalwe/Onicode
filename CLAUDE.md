@@ -46,6 +46,7 @@ src/
     memory.js               # Persistent memory system (soul, user, long-term, daily)
     browser.js              # Puppeteer headless browser integration
     connectors.js           # OAuth connectors (GitHub, Gmail)
+    mcp.js                  # MCP client: stdio server management, JSON-RPC 2.0, tool discovery
     logger.js               # Structured logging system
 
   chat/                    # Chat Shell (React 19, TypeScript)
@@ -232,7 +233,8 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] System prompt caching
 - [x] Semantic compaction (AI-powered conversation summarization)
 - [x] Browser widget (Puppeteer preview with URL navigation + screenshots)
-- [x] 48+ AI tools total (45 base + 3 orchestrator)
+- [x] 49+ AI tools total (46 base + 3 orchestrator + MCP dynamic tools)
+- [x] MCP client (stdio JSON-RPC, tool discovery, dynamic tool injection, Settings UI)
 
 ## What's Missing
 
@@ -241,7 +243,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [ ] **Anthropic provider** — Claude API
 - [ ] **Ollama provider** — local models
 - [ ] **Editor Shell** — VS Code workbench (lazy-loaded)
-- [ ] **MCP client** — extensible tool system for external integrations
+- [x] **MCP client** — stdio server management, JSON-RPC 2.0, dynamic tool injection
 - [ ] **Auto-update** — electron-updater for seamless updates
 - [ ] **SQLite conversation migration** — full migration from localStorage
 - [ ] **Mobile companion** — React Native app
@@ -255,6 +257,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - **IPC**: Electron contextBridge via `window.onicode` (see `preload.js` + `window.d.ts`)
 - **SVGs**: Inline in JSX (no icon library)
 - **Font**: Inter (UI) + JetBrains Mono (code)
+- **MCP**: Config at `~/.onicode/mcp.json`, stdio JSON-RPC 2.0, tool name format: `mcp_<server>__<tool>`
 - **Register pattern**: Main process modules export `registerXxxIPC(ipcMain, getWindow)` functions
 
 ## Next Steps
@@ -262,6 +265,6 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 1. **Connectors** — GitHub OAuth, Gmail OAuth (no manual API key generation)
 3. **API Key Store** — AES-256 encrypted vault with OS keychain
 4. **Anthropic provider** — Claude API support
-5. **MCP client** — Extensible tool system for external integrations
+5. ~~**MCP client** — Extensible tool system for external integrations~~ (DONE)
 6. **Editor Shell** — VS Code workbench (lazy-loaded)
 7. **Auto-update** — electron-updater for seamless updates
