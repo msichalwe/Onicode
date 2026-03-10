@@ -401,10 +401,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // ── Slash command menu ──
     useEffect(() => {
-        if (input.startsWith('/')) {
+        // Detect / at start of input or after whitespace, at end of current typing
+        const match = input.match(/(^|\s)(\/\S*)$/);
+        if (match) {
             setShowSlashMenu(true);
             setShowMentionMenu(false);
-            setSlashFilter(input.slice(1).toLowerCase());
+            setSlashFilter(match[2].slice(1).toLowerCase());
             setSlashIndex(0);
         } else {
             setShowSlashMenu(false);
@@ -1277,7 +1279,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             }
             if (e.key === 'Tab' || (e.key === 'Enter' && filteredCommands[slashIndex])) {
                 e.preventDefault();
-                setInput(filteredCommands[slashIndex].name + ' ');
+                const cmd = filteredCommands[slashIndex].name;
+                // Replace only the /filter part at the end of input
+                const newInput = input.replace(/(^|\s)(\/\S*)$/, (_m, space) => space + cmd + ' ');
+                setInput(newInput);
                 setShowSlashMenu(false);
                 return;
             }
@@ -2188,7 +2193,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                 key={cmd.name}
                                 className={`slash-menu-item ${i === slashIndex ? 'active' : ''}`}
                                 onClick={() => {
-                                    setInput(cmd.name + ' ');
+                                    const newVal = input.replace(/(^|\s)(\/\S*)$/, (_m, space) => space + cmd.name + ' ');
+                                    setInput(newVal);
                                     setShowSlashMenu(false);
                                     textareaRef.current?.focus();
                                 }}
