@@ -1976,19 +1976,14 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     <div className="messages" ref={messagesContainerRef}>
                         {messages.map((message) => (
                             <div key={message.id} className={`message message-${message.role}`}>
-                                <div className={`message-avatar ${message.role}`}>
-                                    {message.role === 'ai' ? (
-                                        <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
-                                            <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="currentColor" opacity="0.9" />
-                                            <path d="M24 14l8 6v12l-8-4V14z" fill="currentColor" opacity="0.6" />
-                                        </svg>
-                                    ) : (
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                {message.role === 'user' && (
+                                    <div className="message-avatar user">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                             <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
                                             <circle cx="12" cy="7" r="4" />
                                         </svg>
-                                    )}
-                                </div>
+                                    </div>
+                                )}
                                 <div className="message-content-wrapper">
                                     {message.toolSteps && message.toolSteps.length > 0 && renderToolSteps(message.toolSteps)}
                                     {message.role === 'ai' && isQuestionMessage(message.content) ? (
@@ -2039,12 +2034,6 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         ))}
                         {isTyping && (streamingContent || activeToolSteps.length > 0 || agentStatus) && (
                             <div className="message message-ai">
-                                <div className="message-avatar ai">
-                                    <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
-                                        <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="currentColor" opacity="0.9" />
-                                        <path d="M24 14l8 6v12l-8-4V14z" fill="currentColor" opacity="0.6" />
-                                    </svg>
-                                </div>
                                 <div className="message-content-wrapper">
                                     {(agentStatus || sessionTimer > 0) && (
                                         <div className={`agent-status ${agentStatus ? `agent-status-${agentStatus.status}` : ''}`}>
@@ -2072,12 +2061,6 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         )}
                         {isTyping && !streamingContent && activeToolSteps.length === 0 && !agentStatus && (
                             <div className="message message-ai">
-                                <div className="message-avatar ai">
-                                    <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
-                                        <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="currentColor" opacity="0.9" />
-                                        <path d="M24 14l8 6v12l-8-4V14z" fill="currentColor" opacity="0.6" />
-                                    </svg>
-                                </div>
                                 <div className="message-bubble">
                                     <div className="typing-indicator">
                                         <div className="typing-dot" />
