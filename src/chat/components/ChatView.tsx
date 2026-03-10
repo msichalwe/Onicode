@@ -607,11 +607,34 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             setActiveToolSteps([...toolStepsRef.current]);
         });
 
+        // Listen for message breaks — finalize current bubble, start a new one
+        const removeMessageBreakListener = window.onicode!.onMessageBreak(() => {
+            const currentContent = streamContentRef.current;
+            const currentSteps = [...toolStepsRef.current];
+
+            // Only create a message if there's content or tool steps
+            if (currentContent.trim() || currentSteps.length > 0) {
+                setMessages((prev) => [...prev, {
+                    id: generateId(), role: 'ai' as const,
+                    content: currentContent || '*(Completed using tools)*',
+                    timestamp: Date.now(),
+                    toolSteps: currentSteps.length > 0 ? currentSteps : undefined,
+                }]);
+            }
+
+            // Reset for the next bubble
+            streamContentRef.current = '';
+            toolStepsRef.current = [];
+            setStreamingContent('');
+            setActiveToolSteps([]);
+        });
+
         const removeDoneListener = window.onicode!.onStreamDone((error: string | null) => {
             removeChunkListener();
             removeDoneListener();
             removeToolCallListener();
             removeToolResultListener();
+            removeMessageBreakListener();
             cleanupRef.current = null;
             setIsTyping(false);
 
@@ -643,6 +666,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         cleanupRef.current = () => {
             removeChunkListener(); removeDoneListener();
             removeToolCallListener(); removeToolResultListener();
+            removeMessageBreakListener();
         };
 
         const result = await window.onicode!.sendMessage(apiMessages, {

@@ -26,6 +26,13 @@ contextBridge.exposeInMainWorld('onicode', {
 
     abortAI: () => ipcRenderer.invoke('ai-abort'),
 
+    // Message break — finalize current message bubble, start a new one
+    onMessageBreak: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-message-break', handler);
+        return () => ipcRenderer.removeListener('ai-message-break', handler);
+    },
+
     // AI Agentic Events — tool calls, results, agent steps
     onToolCall: (callback) => {
         const handler = (_event, data) => callback(data);

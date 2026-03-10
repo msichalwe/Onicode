@@ -12,6 +12,7 @@ function runGit(args, cwd, timeout = 10000) {
             encoding: 'utf-8',
             timeout,
             maxBuffer: 1024 * 1024,
+            stdio: ['pipe', 'pipe', 'pipe'], // Suppress stderr from polluting Electron console
         });
         return { success: true, output: result.trim() };
     } catch (err) {
@@ -26,9 +27,9 @@ function registerGitIPC(ipcMain) {
         return { isRepo: result.success && result.output === 'true' };
     });
 
-    // Initialize a git repo
+    // Initialize a git repo (use main as default branch)
     ipcMain.handle('git-init', async (_event, repoPath) => {
-        return runGit('init', repoPath);
+        return runGit('init -b main', repoPath);
     });
 
     // Git status (parsed)

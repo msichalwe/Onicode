@@ -748,34 +748,20 @@ function sendCompletionSummary(toolsUsed, startSnapshot) {
     }
 
     if (parts.length > 0) {
-        const summaryText = '\n\n---\n' + parts.join(' ');
+        // Break into a new message bubble so the summary is separate from AI text
+        sendMessageBreak();
+        const summaryText = parts.join(' ');
         mainWindow?.webContents.send('ai-stream-chunk', summaryText);
     }
 }
 
 /**
- * Emit a per-round status message so the user sees progress between tool rounds.
- * Only emits when a task status changed or files were created/edited this round.
+ * Send a message break — tells the renderer to finalize the current message bubble
+ * and start a new one. This creates the multi-bubble experience where each task
+ * gets its own message, similar to how Claude Code works.
  */
-function sendRoundStatus(round, roundToolNames, prevTaskDone, currentTaskDone, totalTasks) {
-    // Don't emit on round 0 or if nothing meaningful happened
-    if (round < 1 || roundToolNames.length === 0) return;
-
-    const parts = [];
-    const tasksDoneThisRound = currentTaskDone - prevTaskDone;
-    if (tasksDoneThisRound > 0) {
-        parts.push(`✓ ${tasksDoneThisRound} task${tasksDoneThisRound > 1 ? 's' : ''} done (${currentTaskDone}/${totalTasks})`);
-    }
-
-    // Show key actions this round
-    const fileOps = roundToolNames.filter(n => n === 'create_file' || n === 'edit_file' || n === 'multi_edit');
-    const commands = roundToolNames.filter(n => n === 'run_command');
-    if (fileOps.length > 0) parts.push(`${fileOps.length} file op${fileOps.length > 1 ? 's' : ''}`);
-    if (commands.length > 0) parts.push(`${commands.length} command${commands.length > 1 ? 's' : ''}`);
-
-    if (parts.length > 0) {
-        mainWindow?.webContents.send('ai-stream-chunk', `\n\n> _Round ${round}: ${parts.join(' · ')}_\n\n`);
-    }
+function sendMessageBreak() {
+    mainWindow?.webContents.send('ai-message-break', {});
 }
 
 /** Stream chat via ChatGPT backend API with agentic tool-calling loop */
@@ -794,10 +780,10 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const provConfig = { id: 'codex', apiKey: accessToken, selectedModel: model };
     setLastProviderConfig(provConfig);
     _lastProviderConfig = provConfig;
-    startSession(null, projectPath);
     setPermissions(activePermissions);
     setAgentModeRef(agentMode);
-    setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks
+    setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks (BEFORE startSession)
+    startSession(null, projectPath);
 
     // Snapshot task state at request start so completion summary only shows changes
     const _taskStartSnapshot = { ...taskManager.getSummary() };
@@ -937,10 +923,12 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 });
             }
 
-            // ── Per-round status update so user sees progress ──
-            const roundToolNames = result.functionCalls.map(fn => fn.name);
+            // ── Per-round: break message bubble when a task is completed ──
             const postRoundSummary = taskManager.getSummary();
-            sendRoundStatus(round, roundToolNames, _taskStartSnapshot.done, postRoundSummary.done, postRoundSummary.total);
+            if (postRoundSummary.done > _taskStartSnapshot.done) {
+                sendMessageBreak();
+                _taskStartSnapshot.done = postRoundSummary.done;
+            }
 
             // ── Post-round: check if init_project was called for a NEW project ──
             const initThisRound = result.functionCalls.find(fn => fn.name === 'init_project');
@@ -1621,10 +1609,12 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             });
         }
 
-        // ── Per-round status update so user sees progress ──
-        const roundToolNames = (result.toolCalls || []).map(tc => tc.name);
+        // ── Per-round: break message bubble when a task is completed ──
         const postRoundSummary = taskManager.getSummary();
-        sendRoundStatus(round, roundToolNames, _taskStartSnapshot.done, postRoundSummary.done, postRoundSummary.total);
+        if (postRoundSummary.done > _taskStartSnapshot.done) {
+            sendMessageBreak();
+            _taskStartSnapshot.done = postRoundSummary.done;
+        }
 
         // ── Post-round: check if init_project was called for a NEW project ──
         const initCallThisRound = result.toolCalls?.find(tc => tc.name === 'init_project');

@@ -42,6 +42,9 @@ interface OnicodeAPI {
     abortAI: () => Promise<{ success: boolean }>;
     openExternal: (url: string) => Promise<void>;
 
+    // Message break — finalize current bubble, start new one
+    onMessageBreak: (callback: (data: Record<string, unknown>) => void) => () => void;
+
     // AI Agentic Events
     onToolCall: (callback: (data: { id: string; name: string; args: Record<string, unknown>; round: number }) => void) => () => void;
     onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;

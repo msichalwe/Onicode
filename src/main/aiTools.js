@@ -195,9 +195,9 @@ function startSession(projectId, projectPath) {
         return _currentSessionId;
     }
 
-    // If same project is still active, keep the session (don't reset tasks)
-    if (_currentProjectPath && _currentProjectPath === projectPath && _currentSessionId) {
-        logger.info('session', `Continuing session ${_currentSessionId} for project ${projectPath}`);
+    // If same project is still active (or both are general/null), keep the session (don't reset tasks)
+    if (_currentSessionId && _currentProjectPath === projectPath) {
+        logger.info('session', `Continuing session ${_currentSessionId} for ${projectPath || 'general'}`);
         return _currentSessionId;
     }
 
@@ -2571,7 +2571,7 @@ async function executeTool(name, args) {
                     try {
                         const gitDir = path.join(expandedPath, '.git');
                         if (!fs.existsSync(gitDir)) {
-                            execSync('git init', { cwd: expandedPath, timeout: 5000 });
+                            execSync('git init -b main', { cwd: expandedPath, timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
                             // Create .gitignore
                             const gitignorePath = path.join(expandedPath, '.gitignore');
                             if (!fs.existsSync(gitignorePath)) {
@@ -2579,6 +2579,7 @@ async function executeTool(name, args) {
                             }
                             execSync('git add -A && git commit -m "Initial commit — project scaffolded by Onicode"', {
                                 cwd: expandedPath, timeout: 10000,
+                                stdio: ['pipe', 'pipe', 'pipe'],
                                 env: { ...process.env, GIT_AUTHOR_NAME: 'Onicode', GIT_AUTHOR_EMAIL: 'ai@onicode.dev', GIT_COMMITTER_NAME: 'Onicode', GIT_COMMITTER_EMAIL: 'ai@onicode.dev' },
                             });
                             logger.info('git', `Initialized git repo and made initial commit at ${expandedPath}`);
@@ -2732,6 +2733,10 @@ async function executeTool(name, args) {
                 const task = taskManager.addTask(args.content, args.priority || 'medium', args.milestone_id || null);
                 const summary = taskManager.getSummary();
                 const result = { success: true, task, summary };
+                // Auto-open tasks panel on first task creation
+                if (summary.total === 1) {
+                    sendToRenderer('ai-panel-open', { type: 'tasks' });
+                }
                 // If we have tasks but none are in-progress or done, remind AI to start executing
                 if (summary.total > 0 && summary.done === 0 && summary.inProgress === 0) {
                     result.REMINDER = 'Tasks are just a plan. You MUST now call task_update to mark a task in_progress, then call create_file and run_command to ACTUALLY build the project files. Do not respond with only text.';
