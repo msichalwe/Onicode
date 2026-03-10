@@ -666,6 +666,23 @@ function buildContinueContext() {
     return parts.join('\n\n');
 }
 
+/**
+ * Detect if AI text response contains numbered discovery questions.
+ * Used to avoid auto-continuing when the AI is asking the user for input.
+ */
+function looksLikeDiscoveryQuestions(text) {
+    if (!text || text.length < 30) return false;
+    const lines = text.split('\n');
+    let questionCount = 0;
+    for (const line of lines) {
+        // Match: "1. Question text?" or "1) Question?" or "- 1. Question?"
+        if (/^\s*[-*]?\s*\d+[.)]\s*.+\?/.test(line)) {
+            questionCount++;
+        }
+    }
+    return questionCount >= 2;
+}
+
 /** Generate a completion summary when the AI finishes an agentic session with tools */
 function sendCompletionSummary(toolsUsed) {
     if (toolsUsed.size === 0) return; // No tools were used, no summary needed
@@ -761,18 +778,32 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 const summary = taskManager.getSummary();
                 const hasPendingTasks = summary.pending > 0 || summary.inProgress > 0;
                 const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
+                const justInitProject = toolsUsed.has('init_project') && !hasBuiltAnything && summary.total === 0;
+                const aiTextContent = result.text || result.content || '';
 
-                if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
+                // If the AI is asking discovery questions after init_project, let the response
+                // end naturally so the user can answer. Don't force auto-continue.
+                if (justInitProject && looksLikeDiscoveryQuestions(aiTextContent)) {
+                    logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
+                    sendCompletionSummary(toolsUsed);
+                    mainWindow?.webContents.send('ai-stream-done', null);
+                    return { success: true };
+                }
+
+                if ((hasPendingTasks || justInitProject) && autoContinueCount < MAX_AUTO_CONTINUES) {
                     autoContinueCount++;
-                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.done}/${summary.total} done`);
+                    logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES}: ${summary.pending} pending, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}`);
 
                     const projectContext = buildContinueContext();
                     const nextTask = summary.nextTask;
+                    const roundsLeft = MAX_ROUNDS - round;
                     let continuePrompt;
-                    if (!hasBuiltAnything) {
-                        continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n${projectContext}`;
+                    if (justInitProject) {
+                        continuePrompt = `MANDATORY: You just initialized the project. Before adding tasks, ask the user 3-5 quick setup questions to clarify their preferences (tech stack, features, design style, etc.). Format as numbered questions with options in parentheses so the UI can render them as interactive buttons. Example:\n1. What tech stack? (React + Vite, Next.js, Vue)\n2. Auth needed? (yes, no, later)\n\nDo NOT add tasks or create files yet — ask questions first.\n\n${projectContext}`;
+                    } else if (!hasBuiltAnything) {
+                        continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                     } else {
-                        continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. You MUST continue with tool calls NOW. Do not explain — execute the next task immediately.\nNext: "${nextTask?.content || 'check task_list'}"\n\n${projectContext}`;
+                        continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. Continue with tool calls NOW.\nNext: "${nextTask?.content || 'check task_list'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task's files are all created, call task_update(done) before starting the next task\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
                     }
 
                     inputItems.push({ role: 'user', content: continuePrompt });
@@ -1353,25 +1384,42 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             const summary = taskManager.getSummary();
             const hasPendingTasks = summary.pending > 0 || summary.inProgress > 0;
             const hasBuiltAnything = toolsUsed.has('create_file') || toolsUsed.has('run_command');
+            const justInitProject = toolsUsed.has('init_project') && !hasBuiltAnything && summary.total === 0;
 
-            // Auto-continue if tasks are pending
-            if (hasPendingTasks && autoContinueCount < MAX_AUTO_CONTINUES) {
+            // If the AI is asking discovery questions after init_project, let the response
+            // end naturally so the user can answer. Don't force auto-continue.
+            if (justInitProject && looksLikeDiscoveryQuestions(result.textContent || '')) {
+                logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
+                currentAIRequest = null;
+                sendCompletionSummary(toolsUsed);
+                mainWindow?.webContents.send('ai-stream-done', null);
+                try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
+                return { success: true };
+            }
+
+            // Auto-continue if:
+            // 1. Tasks are pending (normal case)
+            // 2. init_project was called but no tasks or files were created yet (post-init stall)
+            if ((hasPendingTasks || justInitProject) && autoContinueCount < MAX_AUTO_CONTINUES) {
                 autoContinueCount++;
-                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done`);
+                logger.info('agent-loop', `Auto-continue #${autoContinueCount}/${MAX_AUTO_CONTINUES} (force tool_choice:required): ${summary.pending} pending, ${summary.inProgress} active, ${summary.done}/${summary.total} done${justInitProject ? ' [post-init]' : ''}`);
 
                 // Add the assistant's text response to conversation
                 if (result.textContent) {
                     conversationMessages.push({ role: 'assistant', content: result.textContent });
                 }
 
-                // Build aggressive continuation prompt — the AI MUST call tools
+                // Build continuation prompt
                 const projectContext = buildContinueContext();
                 const nextTask = summary.nextTask;
+                const roundsLeft = MAX_TOOL_ROUNDS - round;
                 let continuePrompt;
-                if (!hasBuiltAnything) {
-                    continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n${projectContext}`;
+                if (justInitProject) {
+                    continuePrompt = `MANDATORY: You just initialized the project. Before adding tasks, ask the user 3-5 quick setup questions to clarify their preferences (tech stack, features, design style, etc.). Format as numbered questions with options in parentheses so the UI can render them as interactive buttons. Example:\n1. What tech stack? (React + Vite, Next.js, Vue)\n2. Auth needed? (yes, no, later)\n\nDo NOT add tasks or create files yet — ask questions first.\n\n${projectContext}`;
+                } else if (!hasBuiltAnything) {
+                    continuePrompt = `MANDATORY: You have ${summary.pending} pending tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First pending task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
                 } else {
-                    continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. You MUST continue with tool calls NOW. Do not explain — execute the next task immediately.\nNext: "${nextTask?.content || 'check task_list'}"\n\n${projectContext}`;
+                    continuePrompt = `MANDATORY: ${summary.done}/${summary.total} tasks done, ${summary.pending} pending. Continue with tool calls NOW.\nNext: "${nextTask?.content || 'check task_list'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY RULES:\n- Call create_file MULTIPLE TIMES per response (batch 3-5 files)\n- Mark task as done IMMEDIATELY after its files are created — don't wait\n- If a task's files are all created, call task_update(done) before starting the next task\n${roundsLeft < 15 ? '- ⚠️ RUNNING LOW ON ROUNDS — batch aggressively, finish remaining tasks NOW\n' : ''}\n${projectContext}`;
                 }
 
                 conversationMessages.push({ role: 'user', content: continuePrompt });

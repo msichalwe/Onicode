@@ -26,11 +26,17 @@ export function parseQuestions(content: string): ParsedQuestion[] | null {
     const questions: ParsedQuestion[] = [];
 
     for (const line of lines) {
-        const match = line.match(/^\s*(\d+)\.\s+(.+)/);
+        // Match numbered questions: "1. text", "1.**text**", "1) text", "- 1. text"
+        // Flexible: allows optional bold markers, colon after number, no space after period
+        const match = line.match(/^\s*[-*]?\s*(\d+)[.)]\s*\**\s*(.+)/);
         if (!match) continue;
 
         const num = parseInt(match[1], 10);
         let text = match[2].trim();
+        // Strip leading/trailing markdown bold markers
+        text = text.replace(/^\*{1,2}/, '').replace(/\*{1,2}$/, '').trim();
+        // Strip leading colon after bold label
+        text = text.replace(/^\*{0,2}:?\s*/, '').trim();
         let options: string[] = [];
 
         // Extract parenthetical options: (opt1, opt2, opt3)
@@ -46,7 +52,21 @@ export function parseQuestions(content: string): ParsedQuestion[] | null {
             options = egMatch[1].split(/,\s*|\sor\s/).map((o) => o.trim().replace(/^["']|["']$/g, ''));
         }
 
+        // Extract options from quoted alternatives: "option1", "option2", or "option3"
+        const quotedMatch = text.match(/["""]([^"""]+)["""]/g);
+        if (quotedMatch && options.length === 0) {
+            options = quotedMatch.map(q => q.replace(/["""]/g, '').trim());
+        }
+
+        // Extract options from bold alternatives: **option1**, **option2**, **option3**
+        const boldMatch = text.match(/\*\*([^*]+)\*\*/g);
+        if (boldMatch && boldMatch.length >= 2 && options.length === 0) {
+            options = boldMatch.map(b => b.replace(/\*\*/g, '').trim());
+        }
+
         if (text) {
+            // Clean up remaining markdown from text
+            text = text.replace(/\*\*/g, '').replace(/`/g, '').trim();
             questions.push({ number: num, text, options });
         }
     }
