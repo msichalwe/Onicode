@@ -49,9 +49,16 @@ interface OnicodeAPI {
     onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
 
     // Agent & Process Runtime
-    listAgents: () => Promise<Array<{ id: string; task: string; status: string; createdAt: number; result?: string }>>;
+    listAgents: () => Promise<Array<{ id: string; task: string; status: string; createdAt: number; result?: string; role?: string }>>;
     listBackgroundProcesses: () => Promise<Array<{ id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number }>>;
     killBackgroundProcess: (processId: string) => Promise<{ success?: boolean; error?: string }>;
+
+    // Multi-Agent Orchestration
+    orchestrationList: () => Promise<Array<OrchestrationSummary>>;
+    orchestrationGet: (id: string) => Promise<OrchestrationDetail | null>;
+    onOrchestrationStart: (callback: (data: { id: string; description: string; nodeCount: number; graph: WorkGraphSummary }) => void) => () => void;
+    onOrchestrationProgress: (callback: (data: { id: string; graph: WorkGraphSummary; completedBatch: Array<{ nodeId: string; agentId: string; success: boolean }> }) => void) => () => void;
+    onOrchestrationDone: (callback: (data: { id: string; summary: WorkGraphSummary; report: string; duration: number }) => void) => () => void;
     readFileContent: (filePath: string) => Promise<{ content?: string; size?: number; modified?: string; error?: string }>;
     readScreenshotBase64: (filePath: string) => Promise<{ dataUri?: string; error?: string }>;
 
@@ -402,6 +409,57 @@ declare global {
         name: string;
         fetchUrl: string;
         pushUrl: string;
+    }
+
+    interface WorkGraphNode {
+        id: string;
+        task: string;
+        role: string;
+        status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+        agentId: string | null;
+        deps: string[];
+        rounds: number;
+        duration: number | null;
+    }
+
+    interface WorkGraphSummary {
+        total: number;
+        pending: number;
+        running: number;
+        done: number;
+        failed: number;
+        skipped: number;
+        nodes: WorkGraphNode[];
+    }
+
+    interface OrchestrationSummary {
+        id: string;
+        description: string;
+        status: string;
+        startedAt: number;
+        completedAt: number | null;
+        nodeCount: number;
+        summary: WorkGraphSummary;
+    }
+
+    interface OrchestrationDetail {
+        id: string;
+        description: string;
+        status: string;
+        startedAt: number;
+        completedAt: number | null;
+        duration: number;
+        graph: WorkGraphSummary;
+        fileLocks: Array<{ path: string; agentId: string; role: string; acquiredAt: number }>;
+        nodeResults: Array<{
+            id: string;
+            task: string;
+            role: string;
+            status: string;
+            result: string | null;
+            error: string | null;
+            rounds: number;
+        }>;
     }
 
     interface Window {

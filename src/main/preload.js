@@ -52,6 +52,25 @@ contextBridge.exposeInMainWorld('onicode', {
     listAgents: () => ipcRenderer.invoke('list-agents'),
     listBackgroundProcesses: () => ipcRenderer.invoke('list-background-processes'),
     killBackgroundProcess: (processId) => ipcRenderer.invoke('kill-background-process', processId),
+
+    // Multi-agent orchestration
+    orchestrationList: () => ipcRenderer.invoke('orchestration-list'),
+    orchestrationGet: (id) => ipcRenderer.invoke('orchestration-get', id),
+    onOrchestrationStart: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-orchestration-start', handler);
+        return () => ipcRenderer.removeListener('ai-orchestration-start', handler);
+    },
+    onOrchestrationProgress: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-orchestration-progress', handler);
+        return () => ipcRenderer.removeListener('ai-orchestration-progress', handler);
+    },
+    onOrchestrationDone: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-orchestration-done', handler);
+        return () => ipcRenderer.removeListener('ai-orchestration-done', handler);
+    },
     readFileContent: (filePath) => ipcRenderer.invoke('read-file-content', filePath),
     readScreenshotBase64: (filePath) => ipcRenderer.invoke('read-screenshot-base64', filePath),
 

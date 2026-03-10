@@ -435,12 +435,53 @@ function FileViewerWidget({ data }: { data?: Record<string, unknown> }) {
 interface AgentEntry { id: string; task: string; status: string; createdAt: number; result?: string; }
 interface BgProcess { id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number; }
 
+const ROLE_BADGES: Record<string, { icon: string; color: string }> = {
+    researcher: { icon: '🔍', color: '#60a5fa' },
+    implementer: { icon: '🔨', color: '#f59e0b' },
+    reviewer: { icon: '👁️', color: '#a78bfa' },
+    tester: { icon: '🧪', color: '#34d399' },
+    planner: { icon: '📋', color: '#fb923c' },
+};
+
 function AgentsWidget() {
     const [agents, setAgents] = useState<AgentEntry[]>([]);
     const [bgProcesses, setBgProcesses] = useState<BgProcess[]>([]);
-    const [agentStatus, setAgentStatus] = useState<{ round: number; status: string } | null>(null);
+    const [agentStatus, setAgentStatus] = useState<{ round: number; status: string; role?: string } | null>(null);
+    const [orchestrations, setOrchestrations] = useState<Array<{
+        id: string; description: string; status: string; nodeCount: number;
+        summary?: { total: number; done: number; running: number; failed: number; nodes: Array<{ id: string; task: string; role: string; status: string }> };
+    }>>([]);
+    const [taskSummary, setTaskSummary] = useState<{ total: number; done: number; inProgress: number; pending: number } | null>(null);
+    const [projectName, setProjectName] = useState<string | null>(null);
 
-    // Poll agents + background processes
+    // Load project context for idle display
+    useEffect(() => {
+        try {
+            const stored = localStorage.getItem('onicode-active-project');
+            if (stored) {
+                const proj = JSON.parse(stored);
+                setProjectName(proj.name || null);
+            }
+        } catch { /* ignore */ }
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail?.name) setProjectName(detail.name);
+        };
+        window.addEventListener('onicode-project-activate', handler);
+        return () => window.removeEventListener('onicode-project-activate', handler);
+    }, []);
+
+    // Listen for task updates to show in idle state
+    useEffect(() => {
+        if (!window.onicode?.onTasksUpdated) return;
+        const unsub = window.onicode.onTasksUpdated((data) => {
+            const d = data as { total: number; done: number; inProgress: number; pending?: number; tasks?: unknown[] };
+            setTaskSummary({ total: d.total, done: d.done, inProgress: d.inProgress, pending: d.pending ?? (d.total - d.done - d.inProgress) });
+        });
+        return unsub;
+    }, []);
+
+    // Poll agents + background processes + orchestrations
     const refresh = useCallback(async () => {
         if (!isElectron) return;
         try {
@@ -450,6 +491,13 @@ function AgentsWidget() {
             ]);
             setAgents(agentList || []);
             setBgProcesses(procList || []);
+            // Poll orchestrations — wrapped separately so IPC errors don't break agent/process polling
+            try {
+                if (window.onicode?.orchestrationList) {
+                    const orchList = await window.onicode.orchestrationList();
+                    setOrchestrations(orchList || []);
+                }
+            } catch { /* orchestration IPC not registered yet — silent */ }
         } catch { /* ignore */ }
     }, []);
 
@@ -463,10 +511,22 @@ function AgentsWidget() {
     useEffect(() => {
         if (!window.onicode?.onAgentStep) return;
         const unsub = window.onicode.onAgentStep((data) => {
-            setAgentStatus(data as { round: number; status: string });
-            // Also refresh on sub-agent events
+            setAgentStatus(data as { round: number; status: string; role?: string });
             if (data.agentId) refresh();
         });
+        return unsub;
+    }, [refresh]);
+
+    // Real-time orchestration events
+    useEffect(() => {
+        if (!window.onicode?.onOrchestrationProgress) return;
+        const unsub = window.onicode.onOrchestrationProgress(() => refresh());
+        return unsub;
+    }, [refresh]);
+
+    useEffect(() => {
+        if (!window.onicode?.onOrchestrationDone) return;
+        const unsub = window.onicode.onOrchestrationDone(() => refresh());
         return unsub;
     }, [refresh]);
 
@@ -484,12 +544,17 @@ function AgentsWidget() {
     };
 
     const running = agents.filter(a => a.status === 'running').length + bgProcesses.filter(p => p.status === 'running').length;
-    const hasAnything = agents.length > 0 || bgProcesses.length > 0 || agentStatus;
+    const activeOrchs = orchestrations.filter(o => o.status === 'running');
+    const hasAnything = agents.length > 0 || bgProcesses.length > 0 || agentStatus || orchestrations.length > 0;
 
     return (
         <div className="widget-agents">
             <div className="agents-header">
-                {running > 0 && <span className="agents-running-badge">{running} active</span>}
+                {(running > 0 || activeOrchs.length > 0) && (
+                    <span className="agents-running-badge">
+                        {running + activeOrchs.length} active
+                    </span>
+                )}
                 {agentStatus && (
                     <span className="agents-current-status">
                         {agentStatus.status === 'thinking' && 'AI thinking...'}
@@ -497,6 +562,7 @@ function AgentsWidget() {
                         {agentStatus.status === 'streaming' && 'Generating...'}
                         {agentStatus.status === 'continuing' && 'Auto-continuing...'}
                         {agentStatus.status === 'sub-agent' && 'Sub-agent working...'}
+                        {agentStatus.status === 'specialist' && `${ROLE_BADGES[agentStatus.role || '']?.icon || '⚡'} Specialist working...`}
                         {agentStatus.round > 0 && ` (round ${agentStatus.round + 1})`}
                     </span>
                 )}
@@ -504,30 +570,107 @@ function AgentsWidget() {
 
             {!hasAnything ? (
                 <div className="widget-placeholder">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4">
-                        <circle cx="12" cy="12" r="3" />
-                        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4" />
-                    </svg>
-                    <p>No active agents</p>
-                    <span>Agents, processes, and runtime status appear here during AI workflows</span>
+                    {projectName || taskSummary ? (
+                        <>
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.5">
+                                <circle cx="12" cy="12" r="3" />
+                                <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4" />
+                            </svg>
+                            <p style={{ marginBottom: 4 }}>Idle{projectName ? ` — ${projectName}` : ''}</p>
+                            {taskSummary && taskSummary.total > 0 && (
+                                <div style={{ fontSize: '0.8rem', opacity: 0.7, lineHeight: 1.5 }}>
+                                    <span>{taskSummary.done}/{taskSummary.total} tasks done</span>
+                                    {taskSummary.inProgress > 0 && <span> · {taskSummary.inProgress} active</span>}
+                                    {taskSummary.pending > 0 && <span> · {taskSummary.pending} pending</span>}
+                                </div>
+                            )}
+                            <span>Agents appear here during AI workflows</span>
+                        </>
+                    ) : (
+                        <>
+                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4">
+                                <circle cx="12" cy="12" r="3" />
+                                <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4" />
+                            </svg>
+                            <p>No active agents</p>
+                            <span>Agents and processes appear here during AI workflows</span>
+                        </>
+                    )}
                 </div>
             ) : (
                 <div className="agents-list">
-                    {agents.length > 0 && (
+                    {/* Orchestrations */}
+                    {orchestrations.length > 0 && (
                         <div className="agents-section">
-                            <div className="agents-section-label">Sub-Agents</div>
-                            {agents.map(a => (
-                                <div key={a.id} className={`agent-item agent-item-${a.status}`}>
-                                    <span className={`agent-dot ${a.status}`} />
+                            <div className="agents-section-label">Orchestrations</div>
+                            {orchestrations.map(o => (
+                                <div key={o.id} className={`agent-item agent-item-${o.status}`}>
+                                    <span className={`agent-dot ${o.status}`} />
                                     <div className="agent-item-info">
-                                        <span className="agent-item-id">{a.id.slice(0, 8)}</span>
-                                        <span className="agent-item-task">{a.task}</span>
-                                        {a.result && <span className="agent-item-result">{String(a.result).slice(0, 100)}</span>}
+                                        <span className="agent-item-task">{o.description}</span>
+                                        {o.summary && (
+                                            <div className="orchestration-progress">
+                                                <div className="orchestration-bar">
+                                                    <div
+                                                        className="orchestration-bar-fill"
+                                                        style={{ width: `${o.summary.total > 0 ? (o.summary.done / o.summary.total) * 100 : 0}%` }}
+                                                    />
+                                                </div>
+                                                <span className="orchestration-counts">
+                                                    {o.summary.done}/{o.summary.total}
+                                                    {o.summary.running > 0 && ` (${o.summary.running} running)`}
+                                                    {o.summary.failed > 0 && ` (${o.summary.failed} failed)`}
+                                                </span>
+                                            </div>
+                                        )}
+                                        {o.summary?.nodes && (
+                                            <div className="orchestration-nodes">
+                                                {o.summary.nodes.map(n => {
+                                                    const badge = ROLE_BADGES[n.role];
+                                                    const statusClass = n.status === 'done' ? 'done' : n.status === 'running' ? 'running' : n.status === 'failed' ? 'error' : 'pending';
+                                                    return (
+                                                        <span key={n.id} className={`orch-node orch-node-${statusClass}`} title={`${n.task} (${n.role})`}>
+                                                            {badge?.icon || '⚡'} {n.id}
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ))}
                         </div>
                     )}
+
+                    {/* Specialist & Sub-Agents */}
+                    {agents.length > 0 && (
+                        <div className="agents-section">
+                            <div className="agents-section-label">Agents</div>
+                            {agents.map(a => {
+                                const role = (a as AgentEntry & { role?: string }).role;
+                                const badge = role ? ROLE_BADGES[role] : null;
+                                return (
+                                    <div key={a.id} className={`agent-item agent-item-${a.status}`}>
+                                        <span className={`agent-dot ${a.status}`} />
+                                        <div className="agent-item-info">
+                                            <div className="agent-item-header">
+                                                {badge && (
+                                                    <span className="agent-role-badge" style={{ color: badge.color }}>
+                                                        {badge.icon} {role}
+                                                    </span>
+                                                )}
+                                                <span className="agent-item-id">{a.id.slice(0, 12)}</span>
+                                            </div>
+                                            <span className="agent-item-task">{a.task}</span>
+                                            {a.result && <span className="agent-item-result">{String(a.result).slice(0, 100)}</span>}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {/* Background Processes */}
                     {bgProcesses.length > 0 && (
                         <div className="agents-section">
                             <div className="agents-section-label">Background Processes</div>

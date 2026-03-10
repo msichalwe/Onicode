@@ -3767,6 +3767,89 @@ body {
   background: var(--bg-hover);
 }
 
+/* Agent role badges */
+.agent-role-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.agent-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Orchestration progress */
+.orchestration-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.orchestration-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-hover);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.orchestration-bar-fill {
+  height: 100%;
+  background: var(--accent, #10b981);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.orchestration-counts {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.orchestration-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.orch-node {
+  font-size: 0.65rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.orch-node-done {
+  background: color-mix(in srgb, var(--accent, #10b981) 15%, transparent);
+  color: var(--accent, #10b981);
+}
+
+.orch-node-running {
+  background: color-mix(in srgb, #3b82f6 15%, transparent);
+  color: #3b82f6;
+  animation: pulse-subtle 1.5s ease-in-out infinite;
+}
+
+.orch-node-error {
+  background: color-mix(in srgb, var(--error, #ef4444) 15%, transparent);
+  color: var(--error, #ef4444);
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* ── Projects View ── */
 .projects-view {
   flex: 1;

@@ -18,6 +18,7 @@ const { TOOL_DEFINITIONS, executeTool, fileContext, restorePoints, listAgents, s
 const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
+const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITIONS, executeOrchestratorTool } = require('./orchestrator');
 
 let mainWindow = null;
 
@@ -27,6 +28,7 @@ function getAllToolDefinitions() {
         ...TOOL_DEFINITIONS,
         ...getLSPToolDefinitions(),
         ...getCodeIndexToolDefinitions(),
+        ...ORCHESTRATOR_TOOL_DEFINITIONS,
     ];
 }
 
@@ -40,9 +42,15 @@ async function executeAnyTool(name, args) {
     if (['semantic_search', 'index_codebase'].includes(name)) {
         return executeCodeIndexTool(name, args, _currentProjectPath);
     }
+    // Orchestrator tools
+    if (['orchestrate', 'spawn_specialist', 'get_orchestration_status'].includes(name)) {
+        return executeOrchestratorTool(name, args, _lastProviderConfig);
+    }
     // Default: aiTools executor
     return executeTool(name, args);
 }
+
+let _lastProviderConfig = null;
 
 let _currentProjectPath = null;
 
@@ -95,6 +103,15 @@ function createWindow() {
     setAIToolsWindow(mainWindow);
     setMemoryWindow(mainWindow);
     setHooksWindow(mainWindow);
+
+    // Wire orchestrator dependencies
+    setOrchestratorDeps({
+        mainWindow,
+        makeAICall: (...args) => makeSubAgentAICall(...args),
+        executeTool: (...args) => executeAnyTool(...args),
+        TOOL_DEFINITIONS: getAllToolDefinitions(),
+        activeAgents: require('./aiTools').activeAgents,
+    });
 
     // Load global hooks on startup
     loadHooks();
@@ -683,15 +700,26 @@ function looksLikeDiscoveryQuestions(text) {
     return questionCount >= 2;
 }
 
-/** Generate a completion summary when the AI finishes an agentic session with tools */
-function sendCompletionSummary(toolsUsed) {
+/**
+ * Generate a completion summary when the AI finishes an agentic session with tools.
+ * @param {Set} toolsUsed — tools called in this request
+ * @param {Object} [startSnapshot] — task snapshot at request start { done, total, pending }
+ */
+function sendCompletionSummary(toolsUsed, startSnapshot) {
     if (toolsUsed.size === 0) return; // No tools were used, no summary needed
 
     const summary = taskManager.getSummary();
     const parts = [];
 
-    if (summary.total > 0) {
-        parts.push(`**${summary.done}/${summary.total} tasks completed.**`);
+    // Only show task progress if tasks changed during this request
+    const tasksChanged = !startSnapshot || summary.done !== startSnapshot.done || summary.total !== startSnapshot.total;
+    if (summary.total > 0 && tasksChanged) {
+        if (startSnapshot && startSnapshot.done < summary.done) {
+            const newDone = summary.done - startSnapshot.done;
+            parts.push(`**${newDone} task${newDone > 1 ? 's' : ''} completed this round** (${summary.done}/${summary.total} total).`);
+        } else {
+            parts.push(`**${summary.done}/${summary.total} tasks completed.**`);
+        }
         if (summary.pending > 0) parts.push(`${summary.pending} still pending.`);
     }
 
@@ -725,6 +753,31 @@ function sendCompletionSummary(toolsUsed) {
     }
 }
 
+/**
+ * Emit a per-round status message so the user sees progress between tool rounds.
+ * Only emits when a task status changed or files were created/edited this round.
+ */
+function sendRoundStatus(round, roundToolNames, prevTaskDone, currentTaskDone, totalTasks) {
+    // Don't emit on round 0 or if nothing meaningful happened
+    if (round < 1 || roundToolNames.length === 0) return;
+
+    const parts = [];
+    const tasksDoneThisRound = currentTaskDone - prevTaskDone;
+    if (tasksDoneThisRound > 0) {
+        parts.push(`✓ ${tasksDoneThisRound} task${tasksDoneThisRound > 1 ? 's' : ''} done (${currentTaskDone}/${totalTasks})`);
+    }
+
+    // Show key actions this round
+    const fileOps = roundToolNames.filter(n => n === 'create_file' || n === 'edit_file' || n === 'multi_edit');
+    const commands = roundToolNames.filter(n => n === 'run_command');
+    if (fileOps.length > 0) parts.push(`${fileOps.length} file op${fileOps.length > 1 ? 's' : ''}`);
+    if (commands.length > 0) parts.push(`${commands.length} command${commands.length > 1 ? 's' : ''}`);
+
+    if (parts.length > 0) {
+        mainWindow?.webContents.send('ai-stream-chunk', `\n\n> _Round ${round}: ${parts.join(' · ')}_\n\n`);
+    }
+}
+
 /** Stream chat via ChatGPT backend API with agentic tool-calling loop */
 async function streamChatGPTBackend(messages, accessToken, selectedModel, projectPath) {
     const accountId = getAccountId(accessToken);
@@ -737,12 +790,17 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const MAX_ROUNDS = 75;
     const MAX_AUTO_CONTINUES = 15;
 
-    // Wire provider config for sub-agent use
-    setLastProviderConfig({ id: 'codex', apiKey: accessToken, selectedModel: model });
+    // Wire provider config for sub-agent + orchestrator use
+    const provConfig = { id: 'codex', apiKey: accessToken, selectedModel: model };
+    setLastProviderConfig(provConfig);
+    _lastProviderConfig = provConfig;
     startSession(null, projectPath);
     setPermissions(activePermissions);
     setAgentModeRef(agentMode);
     setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks
+
+    // Snapshot task state at request start so completion summary only shows changes
+    const _taskStartSnapshot = { ...taskManager.getSummary() };
 
     // Separate system/developer instructions from user/assistant messages
     const systemMessages = messages.filter((m) => m.role === 'system');
@@ -759,6 +817,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
     let autoContinueCount = 0;
     const toolsUsed = new Set();
+    let _forceNoToolsNextRound = false; // After init_project, force text-only to get discovery questions
+    let _browserNavFailures = 0; // Track consecutive browser_navigate failures
 
     try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -770,8 +830,11 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             }
 
             // Force tool_choice on auto-continue rounds to guarantee the model makes tool calls
-            const forceTools = autoContinueCount > 0;
-            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, true, forceTools);
+            // BUT if we just did init_project, force text-only so AI asks discovery questions
+            const forceTools = _forceNoToolsNextRound ? false : (autoContinueCount > 0);
+            const includeTools = !_forceNoToolsNextRound; // Completely remove tools to force text response
+            _forceNoToolsNextRound = false; // Reset for next iteration
+            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools, forceTools);
 
             // No function calls — check if we should auto-continue
             if (!result.functionCalls || result.functionCalls.length === 0) {
@@ -785,7 +848,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 // end naturally so the user can answer. Don't force auto-continue.
                 if (justInitProject && looksLikeDiscoveryQuestions(aiTextContent)) {
                     logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
-                    sendCompletionSummary(toolsUsed);
+                    sendCompletionSummary(toolsUsed, _taskStartSnapshot);
                     mainWindow?.webContents.send('ai-stream-done', null);
                     return { success: true };
                 }
@@ -815,7 +878,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     logger.warn('agent-loop', `Max auto-continues (${MAX_AUTO_CONTINUES}) reached with ${summary.pending} tasks still pending`);
                     mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
                 }
-                sendCompletionSummary(toolsUsed);
+                sendCompletionSummary(toolsUsed, _taskStartSnapshot);
                 mainWindow?.webContents.send('ai-stream-done', null);
                 return { success: true };
             }
@@ -840,6 +903,19 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 const toolResult = await executeAnyTool(fn.name, args);
                 logger.toolResult(fn.name, toolResult, round);
 
+                // Track browser_navigate failures — block retries after 2 failures
+                if (fn.name === 'browser_navigate') {
+                    if (toolResult?.error && /ECONNREFUSED|CONNECTION_REFUSED|ERR_CONNECTION_REFUSED/i.test(toolResult.error)) {
+                        _browserNavFailures++;
+                        if (_browserNavFailures >= 2) {
+                            toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED. The dev server is not running or not ready. Do NOT retry browser_navigate — skip browser testing and move on to the next task.';
+                            logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times — injecting stop-retry directive`);
+                        }
+                    } else if (!toolResult?.error) {
+                        _browserNavFailures = 0; // Reset on success
+                    }
+                }
+
                 mainWindow?.webContents.send('ai-tool-result', {
                     id: fn.call_id,
                     name: fn.name,
@@ -860,17 +936,43 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     output: JSON.stringify(toolResult).slice(0, 16000),
                 });
             }
+
+            // ── Per-round status update so user sees progress ──
+            const roundToolNames = result.functionCalls.map(fn => fn.name);
+            const postRoundSummary = taskManager.getSummary();
+            sendRoundStatus(round, roundToolNames, _taskStartSnapshot.done, postRoundSummary.done, postRoundSummary.total);
+
+            // ── Post-round: check if init_project was called for a NEW project ──
+            const initThisRound = result.functionCalls.find(fn => fn.name === 'init_project');
+            if (initThisRound) {
+                // Parse the tool result to check if it's a new project
+                const initResultStr = inputItems.findLast(item => item.type === 'function_call_output' && item.call_id === initThisRound.call_id);
+                let isNewProject = true;
+                try {
+                    const parsed = JSON.parse(initResultStr?.output || '{}');
+                    isNewProject = !parsed.already_registered;
+                } catch {}
+                if (isNewProject) {
+                    logger.info('agent-loop', 'init_project created NEW project — forcing text-only next round for discovery questions');
+                    _forceNoToolsNextRound = true;
+                    // Inject instruction into input (as system-level guidance)
+                    inputItems.push({
+                        role: 'user',
+                        content: 'CRITICAL: You just created a NEW project. Before calling task_add or create_file, you MUST respond with 3-5 numbered discovery questions asking the user about their preferences. Do NOT make any tool calls — respond with text only. Format: "1. Question? (Option A, Option B, Option C)"',
+                    });
+                }
+            }
         }
 
         // Hit max rounds
-        sendCompletionSummary(toolsUsed);
+        sendCompletionSummary(toolsUsed, _taskStartSnapshot);
         mainWindow?.webContents.send('ai-stream-done', null);
         return { success: true };
 
     } catch (err) {
         currentAIRequest = null;
         if (err.name === 'AbortError') {
-            sendCompletionSummary(toolsUsed);
+            sendCompletionSummary(toolsUsed, _taskStartSnapshot);
             mainWindow?.webContents.send('ai-stream-done', null);
             return { success: true };
         }
@@ -1229,9 +1331,15 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
     let round = 0;
     let autoContinueCount = 0;
     const toolsUsed = new Set(); // Track which tool types have been called
+    let _forceNoToolsNextRound = false; // After init_project, force text-only to get discovery questions
+    let _browserNavFailures = 0; // Track consecutive browser_navigate failures
 
-    // Wire provider config for sub-agent use
+    // Snapshot task state at request start so completion summary only shows changes
+    const _taskStartSnapshot = { ...taskManager.getSummary() };
+
+    // Wire provider config for sub-agent + orchestrator use
     setLastProviderConfig(providerConfig);
+    _lastProviderConfig = providerConfig;
 
     // Start or continue agentic session (preserves tasks for same project)
     startSession(null, projectPath);
@@ -1361,8 +1469,11 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         }
 
         // Use forceToolChoice on auto-continuation rounds to guarantee tool calls
-        const forceTools = autoContinueCount > 0;
-        const result = await streamOpenAISingle(conversationMessages, providerConfig, true, forceTools);
+        // BUT if we just did init_project, force text-only so AI asks discovery questions
+        const forceTools = _forceNoToolsNextRound ? false : (autoContinueCount > 0);
+        const includeTools = !_forceNoToolsNextRound;
+        _forceNoToolsNextRound = false; // Reset for next iteration
+        const result = await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
 
         if (result.error) {
             mainWindow?.webContents.send('ai-stream-done', result.error);
@@ -1391,7 +1502,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             if (justInitProject && looksLikeDiscoveryQuestions(result.textContent || '')) {
                 logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
                 currentAIRequest = null;
-                sendCompletionSummary(toolsUsed);
+                sendCompletionSummary(toolsUsed, _taskStartSnapshot);
                 mainWindow?.webContents.send('ai-stream-done', null);
                 try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
                 return { success: true };
@@ -1436,7 +1547,7 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
                 mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
             }
             currentAIRequest = null;
-            sendCompletionSummary(toolsUsed);
+            sendCompletionSummary(toolsUsed, _taskStartSnapshot);
             mainWindow?.webContents.send('ai-stream-done', null);
             // Post-response hooks and memory extraction (background, non-blocking)
             try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
@@ -1481,6 +1592,19 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             const toolResult = await executeAnyTool(tc.name, args);
             logger.toolResult(tc.name, toolResult, round);
 
+            // Track browser_navigate failures — block retries after 2 failures
+            if (tc.name === 'browser_navigate') {
+                if (toolResult?.error && /ECONNREFUSED|CONNECTION_REFUSED|ERR_CONNECTION_REFUSED/i.test(toolResult.error)) {
+                    _browserNavFailures++;
+                    if (_browserNavFailures >= 2) {
+                        toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED. The dev server is not running or not ready. Do NOT retry browser_navigate — skip browser testing and move on to the next task.';
+                        logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times — injecting stop-retry directive`);
+                    }
+                } else if (!toolResult?.error) {
+                    _browserNavFailures = 0; // Reset on success
+                }
+            }
+
             // Notify renderer: tool result
             mainWindow?.webContents.send('ai-tool-result', {
                 id: tc.id,
@@ -1497,11 +1621,35 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             });
         }
 
+        // ── Per-round status update so user sees progress ──
+        const roundToolNames = (result.toolCalls || []).map(tc => tc.name);
+        const postRoundSummary = taskManager.getSummary();
+        sendRoundStatus(round, roundToolNames, _taskStartSnapshot.done, postRoundSummary.done, postRoundSummary.total);
+
+        // ── Post-round: check if init_project was called for a NEW project ──
+        const initCallThisRound = result.toolCalls?.find(tc => tc.name === 'init_project');
+        if (initCallThisRound) {
+            const initResultMsg = conversationMessages.findLast(m => m.role === 'tool' && m.tool_call_id === initCallThisRound.id);
+            let isNewProject = true;
+            try {
+                const parsed = JSON.parse(initResultMsg?.content || '{}');
+                isNewProject = !parsed.already_registered;
+            } catch {}
+            if (isNewProject) {
+                logger.info('agent-loop', 'init_project created NEW project — forcing text-only next round for discovery questions');
+                _forceNoToolsNextRound = true;
+                conversationMessages.push({
+                    role: 'user',
+                    content: 'CRITICAL: You just created a NEW project. Before calling task_add or create_file, you MUST respond with 3-5 numbered discovery questions asking the user about their preferences. Do NOT make any tool calls — respond with text only. Format: "1. Question? (Option A, Option B, Option C)"',
+                });
+            }
+        }
+
         // Loop back for next round — AI will see tool results and decide next action
     }
 
     // Safety: max rounds reached
-    sendCompletionSummary(toolsUsed);
+    sendCompletionSummary(toolsUsed, _taskStartSnapshot);
     mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum tool-calling rounds. Stopping.]*');
     mainWindow?.webContents.send('ai-stream-done', null);
     try { executeHook('Stop', { projectDir: projectPath || '' }); } catch {}
@@ -1941,6 +2089,7 @@ registerCommandsIPC(ipcMain);
 registerCompactorIPC(ipcMain);
 registerLSPIPC(ipcMain);
 registerCodeIndexIPC(ipcMain);
+registerOrchestratorIPC(ipcMain);
 
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {

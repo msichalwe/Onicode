@@ -1817,9 +1817,23 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     };
 
     // ── Render message content (full markdown via marked) ──
+    const handleMarkdownClick = useCallback((e: React.MouseEvent) => {
+        const target = e.target as HTMLElement;
+        const anchor = target.closest('a');
+        if (anchor && anchor.href) {
+            e.preventDefault();
+            // Open external links in system browser via Electron shell
+            if (window.onicode?.openExternal) {
+                window.onicode.openExternal(anchor.href);
+            } else {
+                window.open(anchor.href, '_blank', 'noopener');
+            }
+        }
+    }, []);
+
     const renderMessageContent = (content: string) => {
         const html = marked.parse(content, { breaks: true, gfm: true }) as string;
-        return <div className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />;
+        return <div className="markdown-body" onClick={handleMarkdownClick} dangerouslySetInnerHTML={{ __html: html }} />;
     };
 
     // ══════════════════════════════════════════

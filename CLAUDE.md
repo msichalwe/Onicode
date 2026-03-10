@@ -35,7 +35,8 @@ src/
     terminal.js             # Shell session management (spawn, stdin/stdout, exec)
     projects.js             # Project CRUD, onidocs templates, filesystem ops
     git.js                  # Git operations via IPC (15 handlers, fully wired)
-    aiTools.js              # AI tool definitions (45 tools), executor, task manager, file context tracker
+    aiTools.js              # AI tool definitions (45+ tools), executor, task manager, file context tracker
+    orchestrator.js         # Multi-agent orchestration: roles, work graph, file locks, parallel execution
     lsp.js                  # Code intelligence via TypeScript compiler API
     codeIndex.js            # TF-IDF semantic search indexer
     storage.js              # SQLite persistence layer (tasks, conversations, sessions)
@@ -208,6 +209,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] SQLite persistence (tasks, conversations, sessions)
 - [x] Permission enforcement (tool-level allow/ask/deny)
 - [x] Sub-agent execution (real AI calls, read-only tools)
+- [x] Multi-agent orchestration (specialist roles, parallel execution, work graph, file locks)
 - [x] Hooks system (19 types, global + project config, wired into tool pipeline)
 - [x] Custom commands (.onicode/commands/*.md)
 - [x] Context compaction (auto-summarize at token limit)
@@ -230,7 +232,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] System prompt caching
 - [x] Semantic compaction (AI-powered conversation summarization)
 - [x] Browser widget (Puppeteer preview with URL navigation + screenshots)
-- [x] 45 AI tools total
+- [x] 48+ AI tools total (45 base + 3 orchestrator)
 
 ## What's Missing
 

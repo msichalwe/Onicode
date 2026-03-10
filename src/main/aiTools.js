@@ -928,6 +928,7 @@ function listAgents() {
         task: a.task,
         status: a.status,
         createdAt: a.createdAt,
+        role: a.role || null,
     }));
 }
 
@@ -2628,7 +2629,9 @@ async function executeTool(name, args) {
                     message: result.alreadyRegistered
                         ? `Project "${projName}" is already registered. Task list cleared for fresh start.`
                         : `Project "${projName}" registered in Onicode. Template onidocs/ created.`,
-                    IMPORTANT_NEXT_STEPS: `This tool ONLY registered the project and created template docs. NO source code exists yet. You MUST now: 1) Call task_add to create your build plan. 2) Call task_update + create_file + run_command to ACTUALLY build the project files. 3) Do NOT respond with only text — you must make tool calls NOW to create package.json, source files, etc. The project directory is: ${expandedPath}`,
+                    IMPORTANT_NEXT_STEPS: result.alreadyRegistered
+                        ? `Project already exists at ${expandedPath}. Continue building — call task_add to plan, then create_file to build.`
+                        : `STOP — DO NOT call task_add yet. This is a NEW project. You MUST first ask the user 3-5 discovery questions about their preferences (tech stack choices, features, design style, auth needs, etc.). Format as numbered questions with options in parentheses so the UI renders them as buttons. Example: "1. What framework? (React, Vue, Svelte)". Only after the user answers should you call task_add and start building. The project directory is: ${expandedPath}`,
                 };
             }
 
