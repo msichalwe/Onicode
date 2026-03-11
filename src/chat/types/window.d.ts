@@ -228,6 +228,7 @@ interface OnicodeAPI {
             dailyToday: string | null;
             dailyYesterday: string | null;
             projectMemory: string | null;
+            recentFacts: string[];
             hasUserProfile: boolean;
             hasSoul: boolean;
         };
@@ -238,8 +239,10 @@ interface OnicodeAPI {
     memoryRead: (filename: string) => Promise<{ success: boolean; content?: string | null; error?: string }>;
     memoryWrite: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>;
     memoryAppend: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>;
-    memoryList: () => Promise<{ success: boolean; files?: Array<{ name: string; size: number; modified: string; scope: string }>; error?: string }>;
+    memoryList: () => Promise<{ success: boolean; files?: Array<{ name: string; size: number; modified: string; scope: string; category: string; id?: number }>; error?: string }>;
     memoryDelete: (filename: string) => Promise<{ success: boolean; error?: string }>;
+    memorySearch: (query: string, scope?: string) => Promise<{ success: boolean; results?: Array<{ id: number; category: string; key: string; file: string; content: string; snippet: string; updated_at: string }>; error?: string }>;
+    memoryStats: () => Promise<{ success: boolean; total?: number; byCategory?: Record<string, number>; error?: string }>;
     memoryCompact: (messages: unknown[], keepRecent?: number) => Promise<{ success: boolean; result?: { summary: string; recentMessages: unknown[]; compactedCount: number } | null; error?: string }>;
 
     // Project-scoped memory

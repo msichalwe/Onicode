@@ -1417,6 +1417,21 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_search',
+            description: 'Search across all memory files for relevant context. Returns matching snippets from soul, user profile, long-term memory, daily logs, and project memories. Use this to recall past decisions, user preferences, or project patterns.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search query — keywords or phrases to find in memories' },
+                    scope: { type: 'string', enum: ['all', 'global', 'project'], description: 'Search scope: all (default), global (soul/user/MEMORY/daily), or project memories only' },
+                },
+                required: ['query'],
+            },
+        },
+    },
     // ── Browser / Puppeteer Tools ──
     {
         type: 'function',
@@ -3534,6 +3549,25 @@ async function executeTool(name, args) {
                 memAppend(args.filename, args.content);
                 sendToRenderer('memory-changed', { filename: args.filename, action: 'append' });
                 return { success: true, filename: args.filename, appended: args.content.length, message: `Appended to memory "${args.filename}".` };
+            }
+
+            case 'memory_search': {
+                const { searchMemory } = require('./memory');
+                const query = (args.query || '').trim();
+                const scope = args.scope || 'all';
+                if (!query) return { error: 'query is required' };
+
+                const results = searchMemory(query, scope);
+                return {
+                    query: args.query,
+                    results: results.map(r => ({
+                        file: r.file,
+                        category: r.category,
+                        snippet: r.snippet,
+                        updated_at: r.updated_at,
+                    })),
+                    totalResults: results.length,
+                };
             }
 
             // ── Browser / Puppeteer Executors ──

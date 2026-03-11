@@ -52,7 +52,7 @@ const TOOL_SETS = {
         'trajectory_search', 'index_project', 'verify_project']),
     notebook: new Set(['read_notebook', 'edit_notebook']),
     deploy: new Set(['read_deployment_config', 'deploy_web_app', 'check_deploy_status']),
-    memory: new Set(['memory_read', 'memory_write', 'memory_search']),
+    memory: new Set(['memory_read', 'memory_write', 'memory_append', 'memory_search']),
 };
 
 function getActiveToolSets() {

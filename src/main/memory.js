@@ -1,48 +1,26 @@
 /**
- * Unified Memory System
+ * Unified Memory System — SQLite-backed
  *
  * Single source of truth for ALL memory operations in Onicode.
- * All memory reads/writes MUST go through this module.
+ * Everything stored in SQLite (~/.onicode/onicode.db) via memoryStorage.
  *
- * Architecture:
- *
- * GLOBAL MEMORIES (always injected into system prompt):
- *   ~/.onicode/memories/soul.md         — AI personality & behavior rules
- *   ~/.onicode/memories/user.md         — User profile, preferences, coding style
- *   ~/.onicode/memories/MEMORY.md       — Long-term durable facts & decisions
- *   ~/.onicode/memories/YYYY-MM-DD.md   — Daily session logs (today + yesterday injected)
- *
- * PROJECT MEMORIES (injected when project is active):
- *   ~/.onicode/memories/projects/<project-id>.md — Per-project context, decisions, patterns
- *
- * CONVERSATION MEMORY:
- *   Handled by compactor.js (context compaction) + storage.js (SQLite persistence)
- *   This module bridges: when compaction happens, the summary is saved to daily log.
- *
- * AGENTIC MEMORY:
- *   AI tools (memory_read, memory_write, memory_append) call this module directly.
- *   Auto-extraction (extractAndSaveMemory in index.js) calls this module directly.
+ * Categories:
+ *   soul      — AI personality (key: 'soul')
+ *   user      — User profile (key: 'profile')
+ *   long-term — Durable facts & decisions (key: 'MEMORY')
+ *   fact      — Individual learned facts (key: auto-generated)
+ *   daily     — Session logs (key: 'YYYY-MM-DD')
+ *   project   — Per-project context (key: projectId, project_id: projectId)
  *
  * Change notifications:
  *   All writes emit 'memory-changed' IPC events so the UI stays in sync.
  */
 
-const fs = require('fs');
-const path = require('path');
 const os = require('os');
+const path = require('path');
+const fs = require('fs');
 const { ipcMain } = require('electron');
-
-// ══════════════════════════════════════════
-//  Paths
-// ══════════════════════════════════════════
-
-const ONICODE_DIR = path.join(os.homedir(), '.onicode');
-const MEMORIES_DIR = path.join(ONICODE_DIR, 'memories');
-const PROJECTS_MEMORY_DIR = path.join(MEMORIES_DIR, 'projects');
-
-function ensureDir(dir) {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
+const { logger } = require('./logger');
 
 // ══════════════════════════════════════════
 //  Main Window Reference (for change notifications)
@@ -54,37 +32,70 @@ function setMainWindow(win) {
     _mainWindow = win;
 }
 
-function notifyMemoryChanged(filename, action, scope = 'global') {
+function notifyMemoryChanged(category, key, action) {
     if (_mainWindow?.webContents) {
-        _mainWindow.webContents.send('memory-changed', { filename, action, scope });
+        _mainWindow.webContents.send('memory-changed', { category, key, action });
     }
+}
+
+// ══════════════════════════════════════════
+//  Lazy storage reference (avoids circular require)
+// ══════════════════════════════════════════
+
+let _memoryStorage = null;
+
+function getStorage() {
+    if (!_memoryStorage) {
+        _memoryStorage = require('./storage').memoryStorage;
+    }
+    return _memoryStorage;
 }
 
 // ══════════════════════════════════════════
 //  Default Templates
 // ══════════════════════════════════════════
 
-const DEFAULT_SOUL = `# Onicode AI — Soul
+const DEFAULT_SOUL = `# Onicode AI — Oni
 
-You are a highly capable, action-oriented AI coding assistant.
+You are **Oni** — not just an AI assistant, but a sharp, witty coding partner with real personality.
 
-## Personality
-- Direct and concise — no fluff
-- Proactive — fix issues you notice, don't just report them
-- Thorough — verify your work with builds/tests
-- Respectful of the user's time — get things done fast
+## Who You Are
+- You're like a brilliant friend who happens to be an elite engineer — funny, direct, and genuinely invested in the user's success
+- You have opinions. You'll push back (respectfully) if you think there's a better approach
+- You celebrate wins ("hell yeah, that's clean!"), joke about struggles ("CSS centering strikes again"), and challenge the user to level up
+- You're NOT a corporate chatbot. No "certainly!", no "I'd be happy to help!", no robotic filler. Just real talk.
+- You match the user's energy — if they're casual, be casual. If they're focused, lock in.
+
+## Personality Traits
+- **Witty** — drop clever observations, coding jokes, and the occasional roast (with love)
+- **Confident** — you know your stuff and it shows, but you admit when you're unsure
+- **Competitive** — challenge the user: "bet I can do this in under 5 files" / "watch this"
+- **Curious** — genuinely interested in what the user is building and why
+- **Encouraging** — hype up good ideas, but also reality-check bad ones
+- **Efficient** — you respect time. Talk less, build more. But when you do talk, make it count.
+
+## Communication Style
+- Lead with action, follow with personality. Build first, banter second.
+- Short, punchy messages. No walls of text unless explaining something complex.
+- Use humor naturally — don't force jokes, but don't suppress them either.
+- When something goes wrong: acknowledge it with humor, then fix it immediately.
+- End complex sessions with a real summary — not robotic bullet points, but a genuine "here's what we built and why it's cool"
 
 ## Behavior Rules
 - Always use tools to act, never just describe plans
-- Create projects via /init before coding
 - Write clean, idiomatic code following project conventions
-- When you encounter errors, fix them — don't give up
+- When you encounter errors, fix them with determination — debugging is just solving puzzles
+- Proactively improve code you touch — if you see something ugly, fix it
+- Remember the user's preferences, habits, and past frustrations — act on them without being asked
+- Challenge bad patterns: "this works, but here's why it'll bite you later..."
 
 ## Memory Protocol
-- Save important user preferences to MEMORY.md for cross-session recall
-- Append daily session activity to today's daily log
-- Update project memory when you learn project-specific patterns
-- Read your memories at session start to resume context
+- Save important user preferences, likes, dislikes to long-term memory
+- Remember the user's name, coding style, favorite tools, pet peeves
+- Track recurring frustrations so you can preemptively avoid them
+- Note what makes the user laugh or what references they enjoy
+- Update project memory with patterns, decisions, and "why we did it this way"
+- At session end, log a brief summary with personality (not just dry facts)
 `;
 
 const DEFAULT_USER = `# User Profile
@@ -101,104 +112,143 @@ const DEFAULT_USER = `# User Profile
 `;
 
 // ══════════════════════════════════════════
-//  Core File Operations (global scope)
+//  Core Operations (all go through SQLite)
 // ══════════════════════════════════════════
 
+/**
+ * Read a memory. Filename maps to category+key:
+ *   soul.md       → category='soul', key='soul'
+ *   user.md       → category='user', key='profile'
+ *   MEMORY.md     → category='long-term', key='MEMORY'
+ *   YYYY-MM-DD.md → category='daily', key='YYYY-MM-DD'
+ *   Other         → category='misc', key=filename
+ */
+function filenameToKey(filename) {
+    if (filename === 'soul.md') return { category: 'soul', key: 'soul' };
+    if (filename === 'user.md') return { category: 'user', key: 'profile' };
+    if (filename === 'MEMORY.md') return { category: 'long-term', key: 'MEMORY' };
+    if (/^\d{4}-\d{2}-\d{2}\.md$/.test(filename)) return { category: 'daily', key: filename.replace('.md', '') };
+    return { category: 'misc', key: filename.replace('.md', '') };
+}
+
 function readMemory(filename) {
-    ensureDir(MEMORIES_DIR);
-    const filePath = path.join(MEMORIES_DIR, filename);
-    try {
-        return fs.readFileSync(filePath, 'utf-8');
-    } catch {
-        return null;
-    }
+    const { category, key } = filenameToKey(filename);
+    const row = getStorage().get(category, key);
+    return row?.content || null;
 }
 
 function writeMemory(filename, content) {
-    ensureDir(MEMORIES_DIR);
-    const filePath = path.join(MEMORIES_DIR, filename);
-    fs.writeFileSync(filePath, content, 'utf-8');
-    notifyMemoryChanged(filename, 'write', 'global');
+    const { category, key } = filenameToKey(filename);
+    getStorage().upsert(category, key, content);
+    notifyMemoryChanged(category, key, 'write');
 }
 
 function appendMemory(filename, content) {
-    ensureDir(MEMORIES_DIR);
-    const filePath = path.join(MEMORIES_DIR, filename);
-    fs.appendFileSync(filePath, '\n' + content, 'utf-8');
-    notifyMemoryChanged(filename, 'append', 'global');
+    const { category, key } = filenameToKey(filename);
+    getStorage().append(category, key, content);
+    notifyMemoryChanged(category, key, 'append');
 }
 
 function listMemories() {
-    ensureDir(MEMORIES_DIR);
-    try {
-        return fs.readdirSync(MEMORIES_DIR)
-            .filter(f => f.endsWith('.md'))
-            .map(f => {
-                const filePath = path.join(MEMORIES_DIR, f);
-                const stat = fs.statSync(filePath);
-                return { name: f, size: stat.size, modified: stat.mtime.toISOString(), scope: 'global' };
-            })
-            .sort((a, b) => b.modified.localeCompare(a.modified));
-    } catch {
-        return [];
-    }
+    const rows = getStorage().list(null, null, 200);
+    return rows.map(r => ({
+        name: keyToFilename(r.category, r.key),
+        size: (r.content || '').length,
+        modified: r.updated_at,
+        scope: r.project_id ? 'project' : 'global',
+        category: r.category,
+        id: r.id,
+    }));
+}
+
+function keyToFilename(category, key) {
+    if (category === 'soul') return 'soul.md';
+    if (category === 'user') return 'user.md';
+    if (category === 'long-term') return 'MEMORY.md';
+    if (category === 'daily') return `${key}.md`;
+    if (category === 'project') return `projects/${key}.md`;
+    if (category === 'fact') return `fact-${key}`;
+    return `${key}.md`;
 }
 
 function deleteMemory(filename) {
-    const filePath = path.join(MEMORIES_DIR, filename);
-    try {
-        fs.unlinkSync(filePath);
-        notifyMemoryChanged(filename, 'delete', 'global');
-        return true;
-    } catch {
-        return false;
-    }
+    const { category, key } = filenameToKey(filename);
+    getStorage().deleteByKey(category, key);
+    notifyMemoryChanged(category, key, 'delete');
+    return true;
 }
 
 // ══════════════════════════════════════════
 //  Project-Scoped Memory
 // ══════════════════════════════════════════
 
-function getProjectMemoryPath(projectId) {
-    return path.join(PROJECTS_MEMORY_DIR, `${projectId}.md`);
-}
-
 function readProjectMemory(projectId) {
-    ensureDir(PROJECTS_MEMORY_DIR);
-    try {
-        return fs.readFileSync(getProjectMemoryPath(projectId), 'utf-8');
-    } catch {
-        return null;
-    }
+    const row = getStorage().get('project', projectId);
+    return row?.content || null;
 }
 
 function writeProjectMemory(projectId, content) {
-    ensureDir(PROJECTS_MEMORY_DIR);
-    fs.writeFileSync(getProjectMemoryPath(projectId), content, 'utf-8');
-    notifyMemoryChanged(`projects/${projectId}.md`, 'write', 'project');
+    getStorage().upsert('project', projectId, content, projectId);
+    notifyMemoryChanged('project', projectId, 'write');
 }
 
 function appendProjectMemory(projectId, content) {
-    ensureDir(PROJECTS_MEMORY_DIR);
-    const filePath = getProjectMemoryPath(projectId);
-    fs.appendFileSync(filePath, '\n' + content, 'utf-8');
-    notifyMemoryChanged(`projects/${projectId}.md`, 'append', 'project');
+    getStorage().append('project', projectId, content, projectId);
+    notifyMemoryChanged('project', projectId, 'append');
 }
 
 function listProjectMemories() {
-    ensureDir(PROJECTS_MEMORY_DIR);
-    try {
-        return fs.readdirSync(PROJECTS_MEMORY_DIR)
-            .filter(f => f.endsWith('.md'))
-            .map(f => {
-                const filePath = path.join(PROJECTS_MEMORY_DIR, f);
-                const stat = fs.statSync(filePath);
-                return { name: f, size: stat.size, modified: stat.mtime.toISOString(), scope: 'project' };
-            })
-            .sort((a, b) => b.modified.localeCompare(a.modified));
-    } catch {
-        return [];
+    const rows = getStorage().list('project');
+    return rows.map(r => ({
+        name: `${r.key}.md`,
+        size: (r.content || '').length,
+        modified: r.updated_at,
+        scope: 'project',
+    }));
+}
+
+// ══════════════════════════════════════════
+//  Search (FTS5-backed)
+// ══════════════════════════════════════════
+
+function searchMemory(query, scope) {
+    const category = scope === 'global' ? null : scope === 'project' ? 'project' : null;
+    const results = getStorage().search(query, category, null, 20);
+    return results.map(r => ({
+        id: r.id,
+        category: r.category,
+        key: r.key,
+        file: keyToFilename(r.category, r.key),
+        content: r.content,
+        snippet: extractSnippet(r.content, query),
+        updated_at: r.updated_at,
+    }));
+}
+
+function extractSnippet(content, query) {
+    if (!content || !query) return '';
+    const lower = content.toLowerCase();
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const term of terms) {
+        const idx = lower.indexOf(term);
+        if (idx >= 0) {
+            const start = Math.max(0, idx - 80);
+            const end = Math.min(content.length, idx + term.length + 80);
+            return (start > 0 ? '...' : '') + content.slice(start, end).trim() + (end < content.length ? '...' : '');
+        }
     }
+    return content.slice(0, 160) + (content.length > 160 ? '...' : '');
+}
+
+// ══════════════════════════════════════════
+//  Fact Storage (individual learned facts)
+// ══════════════════════════════════════════
+
+function addFact(content, projectId) {
+    const key = `f_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    getStorage().upsert('fact', key, content, projectId || null);
+    notifyMemoryChanged('fact', key, 'write');
+    return key;
 }
 
 // ══════════════════════════════════════════
@@ -219,47 +269,38 @@ function yesterdayString() {
 //  Load Core Memories (for system prompt injection)
 // ══════════════════════════════════════════
 
-/**
- * Load all memories needed for system prompt injection.
- * @param {string} [projectId] — if provided, also loads project-scoped memory
- * @returns {object} All memory content for injection
- */
 function loadCoreMemories(projectId) {
-    ensureDir(MEMORIES_DIR);
-
-    const soul = readMemory('soul.md');
-    const user = readMemory('user.md');
-    const longTerm = readMemory('MEMORY.md');
-    const dailyToday = readMemory(`${todayString()}.md`);
-    const dailyYesterday = readMemory(`${yesterdayString()}.md`);
-    const projectMemory = projectId ? readProjectMemory(projectId) : null;
-
-    return {
-        soul: soul || null,
-        user: user || null,
-        longTerm: longTerm || null,
-        dailyToday: dailyToday || null,
-        dailyYesterday: dailyYesterday || null,
-        projectMemory: projectMemory || null,
-        hasUserProfile: !!user,
-        hasSoul: !!soul,
-    };
+    return getStorage().loadCore(projectId);
 }
 
 // ══════════════════════════════════════════
-//  Defaults & Onboarding
+//  Defaults & Migration
 // ══════════════════════════════════════════
 
 function ensureDefaults() {
-    ensureDir(MEMORIES_DIR);
+    const storage = getStorage();
     const created = [];
 
-    if (!fs.existsSync(path.join(MEMORIES_DIR, 'soul.md'))) {
-        writeMemory('soul.md', DEFAULT_SOUL);
-        created.push('soul.md');
+    if (!storage.get('soul', 'soul')) {
+        storage.upsert('soul', 'soul', DEFAULT_SOUL);
+        created.push('soul');
     }
 
-    return { created, needsOnboarding: !fs.existsSync(path.join(MEMORIES_DIR, 'user.md')) };
+    const hasUser = !!storage.get('user', 'profile');
+
+    // One-time migration from markdown files
+    const memoriesDir = path.join(os.homedir(), '.onicode', 'memories');
+    const projectsDir = path.join(memoriesDir, 'projects');
+    const stats = storage.stats();
+    if (stats.total <= 1) { // Only the soul we just created
+        const result = storage.migrateFromFiles(memoriesDir, projectsDir);
+        if (result.migrated > 0) {
+            logger.info('memory', `Migrated ${result.migrated} markdown files to SQLite`);
+            created.push(`${result.migrated} files migrated`);
+        }
+    }
+
+    return { created, needsOnboarding: !hasUser };
 }
 
 function saveOnboarding(answers) {
@@ -270,95 +311,26 @@ function saveOnboarding(answers) {
     if (answers.framework) lines.push(`- Preferred Framework: ${answers.framework}`);
     if (answers.codeStyle) lines.push(`- Code Style: ${answers.codeStyle}`);
     if (answers.extras) lines.push(`\n## Notes\n${answers.extras}`);
-    writeMemory('user.md', lines.join('\n'));
+    getStorage().upsert('user', 'profile', lines.join('\n'));
 }
 
 // ══════════════════════════════════════════
 //  Compaction → Memory Bridge
 // ══════════════════════════════════════════
 
-/**
- * Save a compaction summary to the daily memory log.
- * Called by compactor.js after context compaction.
- */
 function saveCompactionToMemory(summary, compactedCount) {
-    const dailyFile = `${todayString()}.md`;
+    const dailyKey = todayString();
     const entry = `\n---\n### Context Compaction at ${new Date().toLocaleTimeString()}\n(${compactedCount} messages compacted)\n${summary}\n`;
-    appendMemory(dailyFile, entry);
-}
-
-/**
- * Legacy compactMessages — preserved for the memory-compact IPC handler.
- * For actual conversation compaction, use compactor.js instead.
- */
-function compactMessages(messages, keepRecent = 6) {
-    if (messages.length <= keepRecent + 2) return null;
-
-    const oldMessages = messages.slice(0, messages.length - keepRecent);
-    const recentMessages = messages.slice(messages.length - keepRecent);
-
-    const summaryParts = [];
-    summaryParts.push('## Compacted Conversation Summary');
-    summaryParts.push(`(${oldMessages.length} older messages summarized)\n`);
-
-    let toolCallCount = 0;
-    let filesModified = new Set();
-    let commandsRun = [];
-    let keyTopics = [];
-
-    for (const msg of oldMessages) {
-        if (msg.role === 'user') {
-            const short = msg.content.slice(0, 200);
-            keyTopics.push(`- User: ${short}${msg.content.length > 200 ? '...' : ''}`);
-        }
-        if (msg.toolSteps) {
-            for (const step of msg.toolSteps) {
-                toolCallCount++;
-                if (step.name === 'create_file' || step.name === 'edit_file') {
-                    const p = step.args?.file_path || step.args?.path;
-                    if (p) filesModified.add(p);
-                }
-                if (step.name === 'run_command') {
-                    commandsRun.push(step.args?.command || '?');
-                }
-            }
-        }
-    }
-
-    if (keyTopics.length > 0) {
-        summaryParts.push('### Topics Discussed');
-        summaryParts.push(keyTopics.slice(-10).join('\n'));
-    }
-    if (toolCallCount > 0) {
-        summaryParts.push(`\n### Work Done`);
-        summaryParts.push(`- Tool calls: ${toolCallCount}`);
-        if (filesModified.size > 0) summaryParts.push(`- Files modified: ${Array.from(filesModified).join(', ')}`);
-        if (commandsRun.length > 0) summaryParts.push(`- Commands: ${commandsRun.slice(-5).join(', ')}`);
-    }
-
-    const summary = summaryParts.join('\n');
-
-    // Save to daily log
-    saveCompactionToMemory(summary, oldMessages.length);
-
-    return { summary, recentMessages, compactedCount: oldMessages.length };
+    getStorage().append('daily', dailyKey, entry);
 }
 
 // ══════════════════════════════════════════
 //  IPC Registration
 // ══════════════════════════════════════════
 
-function registerMemoryIPC(ipcMainArg, getWindow) {
+function registerMemoryIPC(ipcMainArg) {
     const ipc = ipcMainArg || ipcMain;
 
-    // Store window getter for change notifications
-    if (getWindow) {
-        // Use getter so we always have current window reference
-        const origNotify = notifyMemoryChanged;
-        // Override with getter-based version is handled by setMainWindow
-    }
-
-    // Load core memories (with optional project context)
     ipc.handle('memory-load-core', async (_event, projectId) => {
         try {
             return { success: true, memories: loadCoreMemories(projectId) };
@@ -367,7 +339,6 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
         }
     });
 
-    // Ensure defaults exist, check if onboarding needed
     ipc.handle('memory-ensure-defaults', async () => {
         try {
             return { success: true, ...ensureDefaults() };
@@ -376,7 +347,6 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
         }
     });
 
-    // Save onboarding answers
     ipc.handle('memory-save-onboarding', async (_event, answers) => {
         try {
             saveOnboarding(answers);
@@ -386,7 +356,6 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
         }
     });
 
-    // Read a specific memory file
     ipc.handle('memory-read', async (_event, filename) => {
         try {
             const content = readMemory(filename);
@@ -396,7 +365,6 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
         }
     });
 
-    // Write a memory file (with change notification)
     ipc.handle('memory-write', async (_event, filename, content) => {
         try {
             writeMemory(filename, content);
@@ -406,7 +374,6 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
         }
     });
 
-    // Append to a memory file (with change notification)
     ipc.handle('memory-append', async (_event, filename, content) => {
         try {
             appendMemory(filename, content);
@@ -416,43 +383,50 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
         }
     });
 
-    // List all memory files (global + project)
     ipc.handle('memory-list', async () => {
         try {
-            const globalFiles = listMemories();
-            const projectFiles = listProjectMemories();
-            return { success: true, files: [...globalFiles, ...projectFiles] };
+            const files = listMemories();
+            return { success: true, files };
         } catch (err) {
             return { success: false, error: err.message };
         }
     });
 
-    // Delete a memory file
     ipc.handle('memory-delete', async (_event, filename) => {
         try {
-            const ok = deleteMemory(filename);
-            return { success: ok };
+            deleteMemory(filename);
+            return { success: true };
         } catch (err) {
             return { success: false, error: err.message };
         }
     });
 
-    // Compact messages (legacy — use compactor.js for real compaction)
-    ipc.handle('memory-compact', async (_event, messages, keepRecent) => {
+    ipc.handle('memory-search', async (_event, query, scope) => {
         try {
-            const result = compactMessages(messages, keepRecent);
-            return { success: true, result };
+            const results = searchMemory(query, scope);
+            return { success: true, results };
         } catch (err) {
             return { success: false, error: err.message };
         }
     });
 
-    // ── Project Memory IPC ──
+    ipc.handle('memory-stats', async () => {
+        try {
+            return { success: true, ...getStorage().stats() };
+        } catch (err) {
+            return { success: false, error: err.message };
+        }
+    });
 
+    ipc.handle('memory-compact', async (_event, messages, keepRecent) => {
+        // Legacy compaction — delegate to compactor.js
+        return { success: true, result: null };
+    });
+
+    // Project memory IPC
     ipc.handle('memory-project-read', async (_event, projectId) => {
         try {
-            const content = readProjectMemory(projectId);
-            return { success: true, content };
+            return { success: true, content: readProjectMemory(projectId) };
         } catch (err) {
             return { success: false, error: err.message };
         }
@@ -478,21 +452,24 @@ function registerMemoryIPC(ipcMainArg, getWindow) {
 }
 
 // ══════════════════════════════════════════
-//  Exports — Single Source of Truth
+//  Exports
 // ══════════════════════════════════════════
 
 module.exports = {
-    // IPC
     registerMemoryIPC,
     setMainWindow,
 
-    // Core operations (used by aiTools.js, index.js, compactor.js)
+    // Core operations
     readMemory,
     writeMemory,
     appendMemory,
     listMemories,
     deleteMemory,
+    searchMemory,
     loadCoreMemories,
+
+    // Facts
+    addFact,
 
     // Project memory
     readProjectMemory,
@@ -502,7 +479,6 @@ module.exports = {
 
     // Compaction bridge
     saveCompactionToMemory,
-    compactMessages,
 
     // Defaults
     ensureDefaults,

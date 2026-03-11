@@ -2603,6 +2603,294 @@ body {
   transform: translateX(20px);
 }
 
+/* ── Memory Settings ── */
+
+.memory-preview {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+    position: relative;
+}
+
+.memory-preview:hover {
+    border-color: var(--accent-primary);
+}
+
+.memory-preview-content {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    max-height: 200px;
+    overflow-y: auto;
+    opacity: 0.85;
+}
+
+.memory-preview-hint {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.memory-preview:hover .memory-preview-hint {
+    opacity: 1;
+}
+
+.memory-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.memory-editor-textarea {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent-primary);
+    border-radius: 8px;
+    padding: 12px 14px;
+    color: var(--text-primary);
+    resize: vertical;
+    min-height: 120px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.memory-editor-textarea:focus {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px var(--accent-primary-alpha, rgba(99, 102, 241, 0.15));
+}
+
+.memory-editor-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.memory-files-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.memory-file-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.memory-file-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.memory-file-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+}
+
+.memory-file-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.memory-file-size {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+}
+
+.memory-file-scope {
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.memory-files-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-tertiary);
+    font-size: 0.8rem;
+    font-style: italic;
+}
+
+/* Memory stats banner */
+.memory-stats-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.memory-stats-total {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.memory-stats-storage {
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--accent-primary);
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+
+.memory-stats-categories {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.memory-stats-cat {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    padding: 2px 8px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+}
+
+/* Memory search */
+.memory-search-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.memory-search-input {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    outline: none;
+    font-family: inherit;
+}
+
+.memory-search-input:focus {
+    border-color: var(--accent-primary);
+}
+
+.memory-search-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+.memory-search-results {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.memory-search-result {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    padding: 8px 12px;
+}
+
+.memory-search-result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.memory-search-snippet {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    max-height: 80px;
+    overflow-y: auto;
+}
+
+/* Memory file item enhancements */
+.memory-file-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.memory-file-item-active {
+    border-left: 2px solid var(--accent-primary);
+    background: var(--bg-tertiary);
+}
+
+.memory-file-delete {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    flex-shrink: 0;
+    margin-left: 6px;
+}
+
+.memory-file-item:hover .memory-file-delete {
+    opacity: 1;
+}
+
+.memory-file-delete:hover {
+    background: var(--error, #ef4444);
+    color: #fff;
+}
+
+.memory-file-date {
+    font-size: 0.65rem;
+    color: var(--text-tertiary);
+}
+
 /* ── Typing Indicator ── */
 .typing-indicator {
   display: flex;

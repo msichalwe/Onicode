@@ -27,7 +27,7 @@ const THEMES: { id: ThemeName; name: string; previewClass: string; type: 'light'
 //  Tab Definitions
 // ══════════════════════════════════════════
 
-type SettingsTab = 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'connectors' | 'data';
+type SettingsTab = 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'connectors' | 'memory' | 'data';
 
 const TABS: { id: SettingsTab; label: string }[] = [
     { id: 'general', label: 'General' },
@@ -37,6 +37,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
     { id: 'hooks', label: 'Hooks' },
     { id: 'mcp', label: 'MCP' },
     { id: 'connectors', label: 'Connectors' },
+    { id: 'memory', label: 'Memory' },
     { id: 'data', label: 'Data' },
 ];
 
@@ -88,6 +89,19 @@ export default function SettingsPanel() {
     const [mcpEnv, setMcpEnv] = useState('');
     const [mcpLoading, setMcpLoading] = useState<Set<string>>(new Set());
 
+    // ── Memory tab state ──
+    const [soulContent, setSoulContent] = useState('');
+    const [userContent, setUserContent] = useState('');
+    const [longTermContent, setLongTermContent] = useState('');
+    const [memoryFiles, setMemoryFiles] = useState<Array<{ name: string; size: number; modified: string; scope: string; category: string; id?: number }>>([]);
+    const [editingMemory, setEditingMemory] = useState<string | null>(null);
+    const [editingContent, setEditingContent] = useState('');
+    const [memorySaving, setMemorySaving] = useState(false);
+    const [memoryStats, setMemoryStats] = useState<{ total: number; byCategory?: Record<string, number> } | null>(null);
+    const [memorySearchQuery, setMemorySearchQuery] = useState('');
+    const [memorySearchResults, setMemorySearchResults] = useState<Array<{ file: string; category: string; snippet: string; updated_at: string }>>([]);
+    const [memorySearching, setMemorySearching] = useState(false);
+
     // ── Key Store State ──
     interface VaultKey { id: string; name: string; provider: string; notes?: string; maskedValue: string; createdAt: number; updatedAt: number }
     const [vaultKeys, setVaultKeys] = useState<VaultKey[]>([]);
@@ -109,6 +123,90 @@ export default function SettingsPanel() {
     }, []);
 
     useEffect(() => { loadVault(); }, [loadVault]);
+
+    // ── Memory tab data loader ──
+    const loadMemoryData = useCallback(async () => {
+        if (!isElectron) return;
+        // Load core memory files (these always exist)
+        try {
+            const [soulRes, userRes, ltRes, listRes] = await Promise.all([
+                window.onicode!.memoryRead('soul.md'),
+                window.onicode!.memoryRead('user.md'),
+                window.onicode!.memoryRead('MEMORY.md'),
+                window.onicode!.memoryList(),
+            ]);
+            if (soulRes?.content) setSoulContent(soulRes.content); else setSoulContent('');
+            if (userRes?.content) setUserContent(userRes.content); else setUserContent('');
+            if (ltRes?.content) setLongTermContent(ltRes.content); else setLongTermContent('');
+            if (listRes?.files) setMemoryFiles(listRes.files);
+        } catch {}
+        // Load stats separately (may not exist on older preload)
+        try {
+            if (window.onicode?.memoryStats) {
+                const statsRes = await window.onicode.memoryStats();
+                if (statsRes?.success) {
+                    // byCategory comes as Array<{ category, count }> from SQLite — convert to Record
+                    const catMap: Record<string, number> = {};
+                    if (Array.isArray(statsRes.byCategory)) {
+                        for (const item of statsRes.byCategory as Array<{ category: string; count: number }>) {
+                            catMap[item.category] = item.count;
+                        }
+                    } else if (statsRes.byCategory && typeof statsRes.byCategory === 'object') {
+                        Object.assign(catMap, statsRes.byCategory);
+                    }
+                    setMemoryStats({ total: statsRes.total || 0, byCategory: catMap });
+                }
+            }
+        } catch {}
+    }, []);
+
+    useEffect(() => {
+        if (activeTab === 'memory') loadMemoryData();
+    }, [activeTab, loadMemoryData]);
+
+    const saveMemoryFile = useCallback(async (filename: string, content: string) => {
+        if (!isElectron) return;
+        setMemorySaving(true);
+        try {
+            await window.onicode!.memoryWrite(filename, content);
+            if (filename === 'soul.md') setSoulContent(content);
+            if (filename === 'user.md') setUserContent(content);
+            if (filename === 'MEMORY.md') setLongTermContent(content);
+            setEditingMemory(null);
+            // Refresh stats
+            window.onicode!.memoryStats().then(s => {
+                if (s?.success) setMemoryStats({ total: s.total || 0, byCategory: s.byCategory });
+            }).catch(() => {});
+        } catch {}
+        setMemorySaving(false);
+    }, []);
+
+    const deleteMemoryFile = useCallback(async (filename: string) => {
+        if (!isElectron) return;
+        try {
+            await window.onicode!.memoryDelete(filename);
+            setMemoryFiles(prev => prev.filter(f => f.name !== filename));
+            if (editingMemory === filename) setEditingMemory(null);
+            // Refresh stats
+            window.onicode!.memoryStats().then(s => {
+                if (s?.success) setMemoryStats({ total: s.total || 0, byCategory: s.byCategory });
+            }).catch(() => {});
+        } catch {}
+    }, [editingMemory]);
+
+    const searchMemories = useCallback(async (query: string) => {
+        if (!isElectron || !query.trim()) {
+            setMemorySearchResults([]);
+            return;
+        }
+        if (!window.onicode?.memorySearch) return;
+        setMemorySearching(true);
+        try {
+            const res = await window.onicode.memorySearch(query.trim());
+            if (res?.results) setMemorySearchResults(res.results as Array<{ file: string; category: string; snippet: string; updated_at: string }>);
+        } catch {}
+        setMemorySearching(false);
+    }, []);
 
     const addVaultKey = useCallback(async () => {
         if (!isElectron || !newKeyName.trim() || !newKeyValue.trim()) return;
@@ -1050,6 +1148,198 @@ export default function SettingsPanel() {
                 </div>
             )}
 
+            {/* ── Memory Tab ── */}
+            {activeTab === 'memory' && (
+                <div className="settings-tab-content">
+                    {/* Stats Banner */}
+                    {memoryStats && (
+                        <div className="memory-stats-banner">
+                            <div className="memory-stats-total">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>
+                                <span>{memoryStats.total} memories</span>
+                                <span className="memory-stats-storage">SQLite</span>
+                            </div>
+                            {memoryStats.byCategory && (
+                                <div className="memory-stats-categories">
+                                    {Object.entries(memoryStats.byCategory).map(([cat, count]) => (
+                                        <span key={cat} className="memory-stats-cat">
+                                            {cat}: {count as number}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Search */}
+                    <div className="settings-section">
+                        <h3>Search Memories</h3>
+                        <p className="settings-section-desc">Full-text search across all memories (FTS5-powered).</p>
+                        <div className="memory-search-bar">
+                            <input
+                                type="text"
+                                className="memory-search-input"
+                                placeholder="Search memories..."
+                                value={memorySearchQuery}
+                                onChange={(e) => setMemorySearchQuery(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') searchMemories(memorySearchQuery); }}
+                            />
+                            <button className="settings-btn settings-btn-primary" onClick={() => searchMemories(memorySearchQuery)} disabled={memorySearching}>
+                                {memorySearching ? 'Searching...' : 'Search'}
+                            </button>
+                        </div>
+                        {memorySearchResults.length > 0 && (
+                            <div className="memory-search-results">
+                                {memorySearchResults.map((r, i) => (
+                                    <div key={i} className="memory-search-result">
+                                        <div className="memory-search-result-header">
+                                            <span className="memory-file-name">{r.file}</span>
+                                            <span className="memory-file-scope">{r.category}</span>
+                                        </div>
+                                        <pre className="memory-search-snippet">{r.snippet}</pre>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* AI Personality (soul) */}
+                    <div className="settings-section">
+                        <h3>AI Personality</h3>
+                        <p className="settings-section-desc">Define how Oni behaves — personality, humor, tone, rules. Injected into every conversation.</p>
+                        {editingMemory === 'soul.md' ? (
+                            <div className="memory-editor">
+                                <textarea
+                                    className="memory-editor-textarea"
+                                    value={editingContent}
+                                    onChange={(e) => setEditingContent(e.target.value)}
+                                    rows={14}
+                                    spellCheck={false}
+                                />
+                                <div className="memory-editor-actions">
+                                    <button className="settings-btn settings-btn-primary" onClick={() => saveMemoryFile('soul.md', editingContent)} disabled={memorySaving}>
+                                        {memorySaving ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button className="settings-btn" onClick={() => setEditingMemory(null)}>Cancel</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="memory-preview" onClick={() => { setEditingMemory('soul.md'); setEditingContent(soulContent); }}>
+                                <pre className="memory-preview-content">{soulContent || '(empty — click to edit)'}</pre>
+                                <span className="memory-preview-hint">Click to edit</span>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* User Profile */}
+                    <div className="settings-section">
+                        <h3>User Profile</h3>
+                        <p className="settings-section-desc">Your preferences, coding style, and info the AI remembers about you.</p>
+                        {editingMemory === 'user.md' ? (
+                            <div className="memory-editor">
+                                <textarea
+                                    className="memory-editor-textarea"
+                                    value={editingContent}
+                                    onChange={(e) => setEditingContent(e.target.value)}
+                                    rows={10}
+                                    spellCheck={false}
+                                />
+                                <div className="memory-editor-actions">
+                                    <button className="settings-btn settings-btn-primary" onClick={() => saveMemoryFile('user.md', editingContent)} disabled={memorySaving}>
+                                        {memorySaving ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button className="settings-btn" onClick={() => setEditingMemory(null)}>Cancel</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="memory-preview" onClick={() => { setEditingMemory('user.md'); setEditingContent(userContent); }}>
+                                <pre className="memory-preview-content">{userContent || '(empty — click to edit)'}</pre>
+                                <span className="memory-preview-hint">Click to edit</span>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Long-term Memory */}
+                    <div className="settings-section">
+                        <h3>Long-term Memory</h3>
+                        <p className="settings-section-desc">Durable facts and decisions the AI has learned across sessions.</p>
+                        {editingMemory === 'MEMORY.md' ? (
+                            <div className="memory-editor">
+                                <textarea
+                                    className="memory-editor-textarea"
+                                    value={editingContent}
+                                    onChange={(e) => setEditingContent(e.target.value)}
+                                    rows={12}
+                                    spellCheck={false}
+                                />
+                                <div className="memory-editor-actions">
+                                    <button className="settings-btn settings-btn-primary" onClick={() => saveMemoryFile('MEMORY.md', editingContent)} disabled={memorySaving}>
+                                        {memorySaving ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button className="settings-btn" onClick={() => setEditingMemory(null)}>Cancel</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="memory-preview" onClick={() => { setEditingMemory('MEMORY.md'); setEditingContent(longTermContent); }}>
+                                <pre className="memory-preview-content">{longTermContent || '(empty — click to edit)'}</pre>
+                                <span className="memory-preview-hint">Click to edit</span>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* All Memory Entries */}
+                    <div className="settings-section">
+                        <h3>All Memory Entries</h3>
+                        <p className="settings-section-desc">All entries stored in SQLite — daily logs, project memories, learned facts.</p>
+                        <div className="memory-files-list">
+                            {memoryFiles.filter(f => f.name !== 'soul.md' && f.name !== 'user.md' && f.name !== 'MEMORY.md').map(f => (
+                                <div key={f.name} className={`memory-file-item ${editingMemory === f.name ? 'memory-file-item-active' : ''}`}>
+                                    <div className="memory-file-info" onClick={() => {
+                                        if (editingMemory === f.name) { setEditingMemory(null); return; }
+                                        window.onicode?.memoryRead(f.name).then(r => {
+                                            if (r?.content != null) { setEditingMemory(f.name); setEditingContent(r.content); }
+                                        });
+                                    }}>
+                                        <span className="memory-file-name">{f.name}</span>
+                                        <span className="memory-file-meta">
+                                            <span className="memory-file-size">{f.size < 1024 ? `${f.size}B` : `${(f.size / 1024).toFixed(1)}KB`}</span>
+                                            <span className="memory-file-scope">{f.category}</span>
+                                            {f.modified && <span className="memory-file-date">{new Date(f.modified).toLocaleDateString()}</span>}
+                                        </span>
+                                    </div>
+                                    <button className="memory-file-delete" title="Delete" onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (confirm(`Delete memory "${f.name}"?`)) deleteMemoryFile(f.name);
+                                    }}>
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                                    </button>
+                                </div>
+                            ))}
+                            {editingMemory && !['soul.md', 'user.md', 'MEMORY.md'].includes(editingMemory) && (
+                                <div className="memory-editor" style={{ marginTop: 8 }}>
+                                    <textarea
+                                        className="memory-editor-textarea"
+                                        value={editingContent}
+                                        onChange={(e) => setEditingContent(e.target.value)}
+                                        rows={10}
+                                        spellCheck={false}
+                                    />
+                                    <div className="memory-editor-actions">
+                                        <button className="settings-btn settings-btn-primary" onClick={() => saveMemoryFile(editingMemory!, editingContent)} disabled={memorySaving}>
+                                            {memorySaving ? 'Saving...' : 'Save'}
+                                        </button>
+                                        <button className="settings-btn" onClick={() => setEditingMemory(null)}>Cancel</button>
+                                    </div>
+                                </div>
+                            )}
+                            {memoryFiles.filter(f => f.name !== 'soul.md' && f.name !== 'user.md' && f.name !== 'MEMORY.md').length === 0 && (
+                                <div className="memory-files-empty">No additional memories yet. The AI creates these as it learns.</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* ── Data Tab (clear/archive conversations) ── */}
             {activeTab === 'data' && (
                 <div className="settings-tab-content">
@@ -1092,21 +1382,27 @@ export default function SettingsPanel() {
 
                     <div className="settings-section">
                         <h3>Memory</h3>
-                        <p className="settings-section-desc">AI memory files stored in <code>~/.onicode/memories/</code>.</p>
+                        <p className="settings-section-desc">AI memories stored in SQLite (<code>~/.onicode/onicode.db</code>).</p>
                         <div className="settings-data-actions">
                             <button className="settings-data-btn" onClick={() => {
-                                if (confirm('Clear all memory files? The AI will lose all learned preferences.')) {
+                                if (confirm('Clear all memories? The AI will lose all learned preferences, facts, and session logs.')) {
                                     if (isElectron) {
-                                        ['soul.md', 'user.md', 'MEMORY.md'].forEach(f => {
-                                            window.onicode?.memoryDelete(f).catch(() => {});
-                                        });
-                                        window.onicode?.memoryEnsureDefaults().catch(() => {});
+                                        // Delete all memory files listed
+                                        window.onicode?.memoryList().then(res => {
+                                            if (res?.files) {
+                                                for (const f of res.files) {
+                                                    window.onicode?.memoryDelete(f.name).catch(() => {});
+                                                }
+                                            }
+                                            // Re-create defaults (soul, etc.)
+                                            window.onicode?.memoryEnsureDefaults().catch(() => {});
+                                        }).catch(() => {});
                                     }
                                     alert('Memory reset to defaults.');
                                 }
                             }}>
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 102.13-9.36L1 10" /></svg>
-                                Reset Memory
+                                Reset All Memories
                             </button>
                         </div>
                     </div>

@@ -28,6 +28,7 @@ export interface AIContext {
         dailyToday?: string | null;
         dailyYesterday?: string | null;
         projectMemory?: string | null;
+        recentFacts?: string[];
     };
     autoCommitEnabled?: boolean;
     mcpTools?: MCPToolInfo[];
@@ -319,20 +320,22 @@ After every \`edit_file\` and \`create_file\`, the tool automatically runs a qui
 - \`memory_read(filename?)\` — Read a memory file
 - \`memory_write(filename, content)\` — Save facts/decisions
 - \`memory_append(filename, content)\` — Append to logs
+- \`memory_search(query, scope?)\` — **Search across ALL memory files** for relevant context. Use this to recall user preferences, past decisions, project patterns. Scopes: "all" (default), "global", "project".
 
 **Memory Architecture:**
-- \`MEMORY.md\` — Long-term facts, persists across ALL sessions
-- \`user.md\` — User profile
-- \`soul.md\` — AI personality rules
-- \`YYYY-MM-DD.md\` — Daily session logs (today + yesterday auto-injected)
+- \`soul.md\` — YOUR personality (user can edit this in Settings > Memory)
+- \`user.md\` — User's profile, preferences, coding style (editable in Settings)
+- \`MEMORY.md\` — Long-term facts (append-only, grows over time)
+- \`YYYY-MM-DD.md\` — Daily session logs
 - \`projects/<id>.md\` — Per-project memory
 
 **Memory Protocol (MANDATORY):**
-1. At session start: memories already injected — read them
-2. Durable learning → \`memory_append("MEMORY.md", "- <fact>")\`
-3. Project learning → \`memory_append("projects/<id>.md", "- <fact>")\`
-4. End of session → \`memory_append("<today>.md", "### <summary>")\`
-5. NEVER overwrite MEMORY.md — always append
+1. At session start: memories already injected — read them, adapt to the user
+2. When user tells you something about themselves → \`memory_append("user.md", "\\n- <fact>")\`
+3. Durable learning → \`memory_append("MEMORY.md", "- <fact>")\`
+4. When you need to recall something specific → \`memory_search("their preference")\`
+5. End of session → \`memory_append("<today>.md", "### <brief summary>")\`
+6. **IMPORTANT:** Actively remember user's name, preferences, pet peeves, humor style, and coding habits. Use them naturally in conversation.
 
 ### Project
 - \`init_project(name, projectPath, description?, techStack?)\` — Register and create project (MANDATORY first step)
@@ -1029,30 +1032,35 @@ Path: \`${context.activeProjectPath}\`
         }
     }
 
-    // ── Unified Memory System ──
+    // ── Unified Memory System (SQLite-backed) ──
     if (context.memories) {
         const mem = context.memories;
-        const hasAnyMemory = mem.user || mem.soul || mem.longTerm || mem.dailyToday || mem.dailyYesterday || mem.projectMemory;
+        const hasAnyMemory = mem.user || mem.soul || mem.longTerm || mem.dailyToday || mem.dailyYesterday || mem.projectMemory || (mem.recentFacts && mem.recentFacts.length > 0);
         if (hasAnyMemory) {
-            parts.push(`\n# Your Persistent Memory\nThe following memories are loaded from your persistent storage (~/.onicode/memories/). Use memory_read/memory_write/memory_append tools to update them.`);
+            parts.push(`\n# Your Identity & Memory\nAll memories stored in SQLite (~/.onicode/onicode.db). **FOLLOW your personality in EVERY response.** Use memory tools to save/recall facts. Use \`memory_search(query)\` for fast full-text search across all memories.`);
         }
         if (mem.soul) {
-            parts.push(`\n## AI Soul (soul.md)\n${mem.soul.slice(0, 2000)}`);
+            // Soul gets priority — it defines WHO you are. Inject fully (up to 4K).
+            parts.push(`\n## YOUR PERSONALITY — FOLLOW THIS\n${mem.soul.slice(0, 4000)}`);
         }
         if (mem.user) {
-            parts.push(`\n## User Profile (user.md)\n${mem.user.slice(0, 2000)}`);
+            parts.push(`\n## Who You're Talking To\n${mem.user.slice(0, 2000)}`);
         }
         if (mem.longTerm) {
-            parts.push(`\n## Long-Term Memory (MEMORY.md)\n${mem.longTerm.slice(0, 3000)}`);
+            parts.push(`\n## Long-Term Memory\n${mem.longTerm.slice(0, 3000)}`);
+        }
+        if (mem.recentFacts && mem.recentFacts.length > 0) {
+            const factsText = mem.recentFacts.slice(0, 15).map(f => `- ${f.slice(0, 200)}`).join('\n');
+            parts.push(`\n## Remembered Facts\n${factsText}`);
         }
         if (mem.projectMemory) {
-            parts.push(`\n## Project Memory (projects/<id>.md)\n${mem.projectMemory.slice(0, 2000)}`);
+            parts.push(`\n## Project Memory\n${mem.projectMemory.slice(0, 2000)}`);
         }
         if (mem.dailyToday) {
-            parts.push(`\n## Today's Session Log\n${mem.dailyToday.slice(0, 2000)}`);
+            parts.push(`\n## Today's Session\n${mem.dailyToday.slice(0, 2000)}`);
         }
         if (mem.dailyYesterday) {
-            parts.push(`\n## Yesterday's Session Log\n${mem.dailyYesterday.slice(0, 1000)}`);
+            parts.push(`\n## Yesterday's Session\n${mem.dailyYesterday.slice(0, 1000)}`);
         }
     }
 

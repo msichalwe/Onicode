@@ -102,12 +102,53 @@ function initSchema() {
             created_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            key TEXT,
+            content TEXT NOT NULL,
+            project_id TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(category, key)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
         CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments(project_id);
+        CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+        CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id);
     `);
+
+    // FTS5 virtual table for memory search (created separately — can't be in IF NOT EXISTS block with other tables)
+    try {
+        db.exec(`
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                content, category, key,
+                content='memories', content_rowid='id'
+            );
+        `);
+        // Triggers to keep FTS in sync
+        db.exec(`
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content, category, key) VALUES (new.id, new.content, new.category, new.key);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, category, key) VALUES ('delete', old.id, old.content, old.category, old.key);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, category, key) VALUES ('delete', old.id, old.content, old.category, old.key);
+                INSERT INTO memories_fts(rowid, content, category, key) VALUES (new.id, new.content, new.category, new.key);
+            END;
+        `);
+    } catch (ftsErr) {
+        // FTS5 triggers may already exist — that's fine
+        if (!ftsErr.message.includes('already exists')) {
+            logger.warn('storage', `FTS5 setup warning: ${ftsErr.message}`);
+        }
+    }
 }
 
 /**
@@ -451,6 +492,199 @@ const attachmentStorage = {
 };
 
 // ══════════════════════════════════════════
+//  Memory Storage (unified — replaces markdown files)
+// ══════════════════════════════════════════
+
+const memoryStorage = {
+    /** Upsert a memory by category+key. If key exists, update content. */
+    upsert(category, key, content, projectId) {
+        const d = getDB();
+        d.prepare(`
+            INSERT INTO memories (category, key, content, project_id, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(category, key) DO UPDATE SET content = excluded.content, updated_at = datetime('now')
+        `).run(category, key || null, content, projectId || null);
+    },
+
+    /** Append content to an existing memory (or create it). */
+    append(category, key, content, projectId) {
+        const d = getDB();
+        const existing = d.prepare('SELECT id, content FROM memories WHERE category = ? AND key = ?').get(category, key);
+        if (existing) {
+            d.prepare("UPDATE memories SET content = content || ?, updated_at = datetime('now') WHERE id = ?")
+                .run('\n' + content, existing.id);
+        } else {
+            this.upsert(category, key, content, projectId);
+        }
+    },
+
+    /** Get a single memory by category+key. */
+    get(category, key) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM memories WHERE category = ? AND key = ?').get(category, key);
+    },
+
+    /** Get a memory by ID. */
+    getById(id) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+    },
+
+    /** List memories by category (optional project filter). */
+    list(category, projectId, limit = 100) {
+        const d = getDB();
+        if (category && projectId) {
+            return d.prepare('SELECT * FROM memories WHERE category = ? AND project_id = ? ORDER BY updated_at DESC LIMIT ?').all(category, projectId, limit);
+        }
+        if (category) {
+            return d.prepare('SELECT * FROM memories WHERE category = ? ORDER BY updated_at DESC LIMIT ?').all(category, limit);
+        }
+        if (projectId) {
+            return d.prepare('SELECT * FROM memories WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?').all(projectId, limit);
+        }
+        return d.prepare('SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?').all(limit);
+    },
+
+    /** Full-text search across all memories using FTS5. */
+    search(query, category, projectId, limit = 20) {
+        const d = getDB();
+        try {
+            // FTS5 query — escape special chars, use prefix matching
+            const ftsQuery = query.replace(/['"]/g, '').split(/\s+/).filter(Boolean).map(t => `"${t}"*`).join(' OR ');
+            if (!ftsQuery) return [];
+
+            let sql = `
+                SELECT m.*, rank
+                FROM memories_fts fts
+                JOIN memories m ON m.id = fts.rowid
+                WHERE memories_fts MATCH ?
+            `;
+            const params = [ftsQuery];
+
+            if (category) { sql += ' AND m.category = ?'; params.push(category); }
+            if (projectId) { sql += ' AND m.project_id = ?'; params.push(projectId); }
+
+            sql += ' ORDER BY rank LIMIT ?';
+            params.push(limit);
+
+            return d.prepare(sql).all(...params);
+        } catch (err) {
+            // Fallback to LIKE search if FTS fails
+            logger.warn('storage', `FTS search failed, using LIKE fallback: ${err.message}`);
+            let sql = 'SELECT * FROM memories WHERE content LIKE ?';
+            const params = [`%${query}%`];
+            if (category) { sql += ' AND category = ?'; params.push(category); }
+            if (projectId) { sql += ' AND project_id = ?'; params.push(projectId); }
+            sql += ' ORDER BY updated_at DESC LIMIT ?';
+            params.push(limit);
+            return d.prepare(sql).all(...params);
+        }
+    },
+
+    /** Delete a memory by ID. */
+    delete(id) {
+        const d = getDB();
+        d.prepare('DELETE FROM memories WHERE id = ?').run(id);
+    },
+
+    /** Delete by category+key. */
+    deleteByKey(category, key) {
+        const d = getDB();
+        d.prepare('DELETE FROM memories WHERE category = ? AND key = ?').run(category, key);
+    },
+
+    /** Load core memories for system prompt injection. */
+    loadCore(projectId) {
+        const d = getDB();
+        const soul = d.prepare("SELECT content FROM memories WHERE category = 'soul' AND key = 'soul'").get();
+        const user = d.prepare("SELECT content FROM memories WHERE category = 'user' AND key = 'profile'").get();
+        const longTerm = d.prepare("SELECT content FROM memories WHERE category = 'long-term' AND key = 'MEMORY'").get();
+        const projectMem = projectId
+            ? d.prepare("SELECT content FROM memories WHERE category = 'project' AND project_id = ? ORDER BY updated_at DESC LIMIT 1").get(projectId)
+            : null;
+
+        // Daily logs: today + yesterday
+        const today = new Date().toISOString().slice(0, 10);
+        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        const dailyToday = d.prepare("SELECT content FROM memories WHERE category = 'daily' AND key = ?").get(today);
+        const dailyYesterday = d.prepare("SELECT content FROM memories WHERE category = 'daily' AND key = ?").get(yesterday);
+
+        // Recent facts (last 20 individual facts/preferences)
+        const recentFacts = d.prepare("SELECT content FROM memories WHERE category = 'fact' ORDER BY updated_at DESC LIMIT 20").all();
+
+        return {
+            soul: soul?.content || null,
+            user: user?.content || null,
+            longTerm: longTerm?.content || null,
+            projectMemory: projectMem?.content || null,
+            dailyToday: dailyToday?.content || null,
+            dailyYesterday: dailyYesterday?.content || null,
+            recentFacts: recentFacts.map(f => f.content),
+            hasSoul: !!soul,
+            hasUserProfile: !!user,
+        };
+    },
+
+    /** Get summary stats. */
+    stats() {
+        const d = getDB();
+        const total = d.prepare('SELECT COUNT(*) as count FROM memories').get();
+        const byCategory = d.prepare('SELECT category, COUNT(*) as count FROM memories GROUP BY category').all();
+        return { total: total?.count || 0, byCategory };
+    },
+
+    /** Migrate from markdown files (one-time). */
+    migrateFromFiles(memoriesDir, projectsDir) {
+        const d = getDB();
+        const existing = d.prepare('SELECT COUNT(*) as count FROM memories').get();
+        if (existing?.count > 0) return { migrated: 0, message: 'Memories already exist in SQLite' };
+
+        let migrated = 0;
+        const _fs = require('fs');
+        const _path = require('path');
+
+        // Migrate global files
+        if (_fs.existsSync(memoriesDir)) {
+            const files = _fs.readdirSync(memoriesDir).filter(f => f.endsWith('.md'));
+            for (const file of files) {
+                try {
+                    const content = _fs.readFileSync(_path.join(memoriesDir, file), 'utf-8');
+                    if (!content.trim()) continue;
+
+                    if (file === 'soul.md') {
+                        this.upsert('soul', 'soul', content);
+                    } else if (file === 'user.md') {
+                        this.upsert('user', 'profile', content);
+                    } else if (file === 'MEMORY.md') {
+                        this.upsert('long-term', 'MEMORY', content);
+                    } else if (/^\d{4}-\d{2}-\d{2}\.md$/.test(file)) {
+                        this.upsert('daily', file.replace('.md', ''), content);
+                    }
+                    migrated++;
+                } catch { /* skip unreadable */ }
+            }
+        }
+
+        // Migrate project files
+        if (_fs.existsSync(projectsDir)) {
+            const projFiles = _fs.readdirSync(projectsDir).filter(f => f.endsWith('.md'));
+            for (const file of projFiles) {
+                try {
+                    const content = _fs.readFileSync(_path.join(projectsDir, file), 'utf-8');
+                    if (!content.trim()) continue;
+                    const projId = file.replace('.md', '');
+                    this.upsert('project', projId, content, projId);
+                    migrated++;
+                } catch { /* skip */ }
+            }
+        }
+
+        logger.info('storage', `Migrated ${migrated} memory files to SQLite`);
+        return { migrated };
+    },
+};
+
+// ══════════════════════════════════════════
 //  Close / Cleanup
 // ══════════════════════════════════════════
 
@@ -469,4 +703,5 @@ module.exports = {
     conversationStorage,
     sessionStorage,
     attachmentStorage,
+    memoryStorage,
 };

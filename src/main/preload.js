@@ -198,6 +198,8 @@ contextBridge.exposeInMainWorld('onicode', {
     memoryAppend: (filename, content) => ipcRenderer.invoke('memory-append', filename, content),
     memoryList: () => ipcRenderer.invoke('memory-list'),
     memoryDelete: (filename) => ipcRenderer.invoke('memory-delete', filename),
+    memorySearch: (query, scope) => ipcRenderer.invoke('memory-search', query, scope),
+    memoryStats: () => ipcRenderer.invoke('memory-stats'),
     memoryCompact: (messages, keepRecent) => ipcRenderer.invoke('memory-compact', messages, keepRecent),
 
     // Project-scoped memory

@@ -975,7 +975,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
 
         // Load core memories for injection into system prompt (including project memory)
-        let memories: { soul?: string | null; user?: string | null; longTerm?: string | null; dailyToday?: string | null; dailyYesterday?: string | null; projectMemory?: string | null } | undefined;
+        let memories: { soul?: string | null; user?: string | null; longTerm?: string | null; dailyToday?: string | null; dailyYesterday?: string | null; projectMemory?: string | null; recentFacts?: string[] } | undefined;
         if (isElectron) {
             try {
                 const projectId = (scope === 'project' && currentProject?.id) ? currentProject.id : undefined;
@@ -988,6 +988,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         dailyToday: memResult.memories.dailyToday,
                         dailyYesterday: memResult.memories.dailyYesterday,
                         projectMemory: memResult.memories.projectMemory,
+                        recentFacts: memResult.memories.recentFacts,
                     };
                 }
             } catch { /* memory load failed, proceed without */ }
@@ -1088,7 +1089,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     return { role: m.role, content };
                 });
                 const tokenEst = await window.onicode!.estimateTokens(msgsForEstimate);
-                if (tokenEst.tokens > 150000) {
+                if (tokenEst.tokens > 80000) {
                     const compactResult = await window.onicode!.compactMessages(
                         allMessages.map(m => ({ role: m.role, content: m.content, toolSteps: m.toolSteps }))
                     );
@@ -1543,7 +1544,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
                 get_orchestration_status: 'Orchestration',
                 glob_files: 'Found', explore_codebase: 'Explored', memory_write: 'Memory',
-                memory_append: 'Memory', webfetch: 'Fetched', websearch: 'Searched',
+                memory_append: 'Memory', memory_search: 'Memory Search', webfetch: 'Fetched', websearch: 'Searched',
                 get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
                 git_commit: 'Committed', git_push: 'Pushed', git_status: 'Git Status',
                 find_symbol: 'Def', find_references: 'Refs', list_symbols: 'Symbols',
@@ -1822,6 +1823,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const ok = r?.success;
                     return ok ? `gws ${cmd}` : `gws ${cmd} (failed)`;
                 }
+                case 'memory_search': {
+                    const q = String(a.query || '').slice(0, 40);
+                    const total = r?.totalMatches ?? '?';
+                    const files = r?.totalFiles ?? '?';
+                    return `"${q}" (${total} matches in ${files} files)`;
+                }
                 default:
                     return '';
             }
@@ -1859,6 +1866,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'deploy_web_app': return !!(r.output || r.url);
                 case 'gh_cli': return !!(r.output || r.data || r.error);
                 case 'gws_cli': return !!(r.output || r.data || r.error);
+                case 'memory_search': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
                 default: return false;
             }
         };
@@ -2441,6 +2449,28 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                     {output.slice(0, 5000)}
                                     {output.length > 5000 && '\n... (truncated)'}
                                 </pre>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'memory_search': {
+                    const results = r.results as Array<{ file: string; scope: string; matches: Array<{ line: number; snippet: string }>; totalMatches: number }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-search-results">
+                                {results.slice(0, 5).map((res, i) => (
+                                    <div key={i} style={{ marginBottom: 8 }}>
+                                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 2 }}>
+                                            {res.file} ({res.totalMatches} matches)
+                                        </div>
+                                        {res.matches.slice(0, 3).map((m, j) => (
+                                            <div key={j} className="search-result-line">
+                                                <span className="search-result-lineno">:{m.line}</span>
+                                                <span className="search-result-content">{m.snippet.slice(0, 120)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ))}
                             </div>
                         </div>
                     );
@@ -3162,7 +3192,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             </svg>
                             <span className={`thinking-level-label thinking-level-${thinkingLevel}`}>{thinkingLevel}</span>
                         </button>
-                        {contextInfo.tokens > 150000 && <span className="context-warning">compacting soon</span>}
+                        {contextInfo.tokens > 60000 && <span className="context-warning">compacting soon</span>}
                     </div>
                 )}
             </div>
