@@ -33,7 +33,7 @@ interface TerminalSessionInfo {
 
 type RuntimeTab = 'agents' | 'terminals' | 'memory';
 
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron } from '../utils';
 
 const CORE_FILES = ['soul.md', 'user.md', 'MEMORY.md'];
 

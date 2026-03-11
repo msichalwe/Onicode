@@ -71,8 +71,7 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
     },
 ];
 
-// Check if we're running inside Electron (preload script available)
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron } from '../utils';
 
 // ══════════════════════════════════════════
 //  Fallback: renderer-side PKCE for non-Electron (Vite dev in browser)

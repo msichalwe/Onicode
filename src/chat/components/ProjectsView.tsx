@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron, generateId } from '../utils';
 
 interface Project {
     id: string;
@@ -33,8 +32,6 @@ const EDITORS = [
     { id: 'windsurf', name: 'Windsurf', icon: 'Ws' },
     { id: 'finder', name: 'Finder', icon: 'Fi' },
 ];
-
-function generateId() { return Math.random().toString(36).substring(2, 10); }
 
 // ══════════════════════════════════════════
 //  Git Tab

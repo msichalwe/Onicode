@@ -2,7 +2,7 @@
 
 > AI-powered development environment: a premium chat that expands into a full VS Code IDE on demand.
 >
-> **Last updated:** 2026-03-09
+> **Last updated:** 2026-03-11
 
 ## Project Overview
 
@@ -64,6 +64,11 @@ src/
       MemoriesView.tsx       # Memory file viewer/editor
       OnboardingDialog.tsx   # First-run onboarding
       DocsView.tsx           # Aggregated docs from all projects' onidocs/
+      AttachmentGallery.tsx   # File/attachment gallery across conversations
+      QuestionDialog.tsx      # ask_user_question UI (clickable options)
+      TodoApp.tsx             # Unified tasks view (SQLite-backed)
+    utils/
+      index.ts                # Shared utilities (isElectron, generateId, stripAnsi)
     commands/
       registry.ts            # 21 slash command definitions across 6 categories
       executor.ts            # Slash command execution logic
@@ -244,20 +249,16 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 
 ## What's Missing
 
-- [ ] **Connectors** — GitHub OAuth, Gmail OAuth, Slack OAuth (placeholder UI exists)
-- [ ] **API Key Store** — AES-256 encrypted vault (placeholder)
-- [ ] **Anthropic provider** — Claude API
+- [ ] **Anthropic provider** — Claude API support
 - [ ] **Ollama provider** — local models
-- [ ] **Editor Shell** — VS Code workbench (lazy-loaded)
-- [x] **MCP client** — stdio server management, JSON-RPC 2.0, dynamic tool injection
-- [x] **Lint error feedback** — After edits, run syntax check and inject errors as feedback
-- [ ] **IDE state injection** — Active file, cursor position, user manual edits as diffs (requires Editor Shell)
-- [x] **Deployment tools** — Netlify/Vercel deploy via CLI (read_deployment_config, deploy_web_app, check_deploy_status)
-- [x] **Jupyter notebook** — Read/edit .ipynb files (read_notebook, edit_notebook)
-- [x] **URL content reading** — read_url_content + view_content_chunk (paginated web reading)
-- [ ] **Knowledge graph memory** — Entity/relation memory via MCP (Cascade uses this)
+- [ ] **Connectors** — GitHub OAuth, Gmail OAuth, Slack OAuth (stub implementations exist)
+- [ ] **API Key Store** — AES-256 encrypted vault + OS keychain
+- [ ] **IDE state injection** — Active file, cursor position, user edits as diffs (needs Editor Shell)
+- [ ] **Editor Shell** — VS Code workbench (lazy-loaded, Phase 8)
+- [ ] **Knowledge graph memory** — Entity/relation memory via MCP
 - [ ] **Auto-update** — electron-updater for seamless updates
 - [ ] **SQLite conversation migration** — full migration from localStorage
+- [ ] **Component refactoring** — ChatView (3K lines) and RightPanel (2K lines) need splitting
 - [ ] **Mobile companion** — React Native app
 
 ## Coding Conventions

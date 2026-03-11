@@ -4,6 +4,7 @@
  */
 
 import React, { useCallback, useState, useEffect, useRef } from 'react';
+import { isElectron } from '../utils';
 
 export interface ActiveProject {
     id: string;
@@ -23,7 +24,6 @@ interface ProjectModeBarProps {
 }
 
 export default function ProjectModeBar({ project, onClose, onOpen, onCommit, onSwitchProject }: ProjectModeBarProps) {
-    const isElectron = typeof window !== 'undefined' && window.onicode;
     const [showDropdown, setShowDropdown] = useState(false);
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const dropdownRef = useRef<HTMLDivElement>(null);

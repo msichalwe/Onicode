@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron } from '../utils';
 
 interface TaskEntry {
     id: number;

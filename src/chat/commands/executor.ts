@@ -6,7 +6,7 @@ import { SLASH_COMMANDS, getCommandsByCategory } from './registry';
 import type { Message } from '../components/ChatView';
 import { requestPanel } from '../components/ChatView';
 
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron, generateId } from '../utils';
 
 export interface CommandContext {
     messages: Message[];
@@ -19,10 +19,6 @@ export interface CommandContext {
 
 export interface CommandResult {
     handled: boolean;
-}
-
-function generateId() {
-    return Math.random().toString(36).substring(2, 12);
 }
 
 function addAIMessage(ctx: CommandContext, content: string) {

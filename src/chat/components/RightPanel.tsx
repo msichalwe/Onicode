@@ -1,12 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
-
-/** Strip ANSI escape codes for plain-text display */
-function stripAnsi(str: string): string {
-    // eslint-disable-next-line no-control-regex
-    return str.replace(/\x1b\[[0-9;]*m/g, '');
-}
+import { isElectron, stripAnsi } from '../utils';
 
 // ══════════════════════════════════════════
 //  Widget Types (kernel layer)

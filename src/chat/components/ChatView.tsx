@@ -97,7 +97,7 @@ const WELCOME_SUGGESTIONS = [
     'Brainstorm ideas',
 ];
 
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron, generateId } from '../utils';
 
 const CONVERSATIONS_KEY = 'onicode-conversations';
 const ACTIVE_CONV_KEY = 'onicode-active-conversation';
@@ -105,10 +105,6 @@ const ACTIVE_CONV_KEY = 'onicode-active-conversation';
 // ══════════════════════════════════════════
 //  Helpers
 // ══════════════════════════════════════════
-
-function generateId() {
-    return Math.random().toString(36).substring(2, 12);
-}
 
 function getActiveProvider(): ProviderConfig | null {
     try {

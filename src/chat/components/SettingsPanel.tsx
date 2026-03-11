@@ -2,8 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useTheme, type ThemeName } from '../hooks/useTheme';
 import ProviderSettings from './ProviderSettings';
 import { loadSkills, saveSkills, getSkillCategories, type Skill } from '../commands/skills';
-
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron } from '../utils';
 
 // ══════════════════════════════════════════
 //  Theme Definitions

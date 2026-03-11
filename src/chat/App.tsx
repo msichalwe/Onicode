@@ -49,7 +49,8 @@ import { ThemeProvider, useTheme } from './hooks/useTheme';
 export type ChatScope = 'general' | 'project' | 'documents';
 export type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo';
 
-const isElectron = typeof window !== 'undefined' && !!window.onicode;
+import { isElectron } from './utils';
+
 
 interface FloatingFile {
     path: string;
