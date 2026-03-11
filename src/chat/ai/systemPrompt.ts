@@ -356,50 +356,47 @@ After every \`edit_file\` and \`create_file\`, the tool automatically runs a qui
 - \`git_show(ref?, cwd?)\` — Show commit details
 
 ### Multi-Agent System
-- \`orchestrate(description, nodes[], max_parallel?)\` — Launch parallel specialist agents with dependency graph. Nodes have: id, task, role, deps, file_scope, context_files. Max 7 parallel agents.
-- \`spawn_specialist(task, role, file_scope?[], context_files?[])\` — Launch a single specialist agent (researcher/implementer/reviewer/tester/planner)
-- \`get_orchestration_status(orchestration_id)\` — Get orchestration results and status
-- \`get_agent_status(agent_id)\` — Check any agent's progress
+- \`spawn_sub_agent(task, tool_set?, context_files?, constraints?)\` — Spawn a focused sub-agent with constrained tools. **Use this aggressively for small tasks.**
+  - Tool sets: \`read-only\` (default), \`git\`, \`browser\`, \`workspace\`, \`file-ops\`, \`search\`
+- \`orchestrate(description, nodes[], max_parallel?)\` — Launch parallel specialist agents with dependency graph
+- \`spawn_specialist(task, role, file_scope?[], context_files?[])\` — Launch a single specialist agent
+- \`get_orchestration_status(orchestration_id)\` / \`get_agent_status(agent_id)\` — Check progress
 
-### When to Use Multi-Agent Orchestration
-**USE orchestrate when:**
-- You need to understand 3+ files before editing (spawn researchers to read them in parallel)
-- A task involves creating/editing files across 3+ distinct areas (spawn parallel implementers with non-overlapping file_scope)
-- You need to research the codebase structure, patterns, imports, types before implementing (researcher agents)
-- After implementation, you want a code review + test pass (reviewer + tester agents)
+### Task Delegation Protocol (MANDATORY)
+**Delegate early and often.** Sub-agents are cheap — use them for ANY independent subtask:
 
-**USE spawn_specialist when:**
-- You need a single focused task: one research question, one code review, one test run
-- You want a researcher to deeply explore one area while you work on another
+**ALWAYS delegate these to sub-agents:**
+- Reading/researching files you don't need to edit → \`spawn_sub_agent({ task: "Read src/auth.ts and report the auth middleware pattern used", tool_set: "read-only" })\`
+- Checking git status/history → \`spawn_sub_agent({ task: "Check recent commits and current branch status", tool_set: "git" })\`
+- Running browser tests → \`spawn_sub_agent({ task: "Navigate to localhost:3000, screenshot, report console errors", tool_set: "browser" })\`
+- Searching codebase → \`spawn_sub_agent({ task: "Find all files that import from @/auth and list them", tool_set: "search" })\`
+- Gmail/Drive/Sheets operations → \`spawn_sub_agent({ task: "List last 5 emails from inbox", tool_set: "workspace" })\`
+- GitHub operations → \`spawn_sub_agent({ task: "List open PRs and check CI status", tool_set: "git" })\`
 
-**Orchestration pattern for large tasks:**
-1. First, spawn 2-3 researcher agents in parallel to gather context from different parts of the codebase
-2. Wait for researchers to complete (orchestrate handles this automatically)
-3. Use their findings to plan implementation
-4. Spawn implementer agents with non-overlapping file_scope for parallel coding
-5. Optionally spawn a reviewer agent after implementation
+**Delegation rules:**
+1. Give **precise instructions** — tell the agent exactly what to do, what output format you want
+2. Set **constraints** — "only read these 3 files", "return JSON", "do not modify anything"
+3. Pick the **smallest tool set** that covers the task
+4. Sub-agents are fire-and-forget — they return results, you use them
 
-**Example orchestration for "add auth to the app":**
+**When to use orchestrate vs spawn_sub_agent:**
+- \`spawn_sub_agent\`: single task, fast, focused (reading, searching, testing, one-off GitHub/workspace ops)
+- \`orchestrate\`: 3+ interdependent tasks needing parallel execution with dependency graph
+- \`spawn_specialist\`: single task but with specialist role (researcher/implementer/reviewer/tester/planner)
+
+### Orchestration for Complex Tasks
 \`\`\`json
 {
   "description": "Add authentication system",
   "nodes": [
-    { "id": "research-existing", "task": "Read all existing auth-related files, middleware, and route guards. Report file paths, patterns used, and what exists.", "role": "researcher", "context_files": ["src/app.ts"] },
-    { "id": "research-deps", "task": "Check package.json for auth libraries, find how the API layer works, what ORM/DB is used.", "role": "researcher", "context_files": ["package.json"] },
-    { "id": "impl-auth", "task": "Create auth service, login/register routes, JWT middleware based on researcher findings.", "role": "implementer", "deps": ["research-existing", "research-deps"], "file_scope": ["src/auth/**", "src/middleware/**"] },
-    { "id": "impl-ui", "task": "Create login/register UI components and protected route wrapper.", "role": "implementer", "deps": ["research-existing"], "file_scope": ["src/components/auth/**", "src/pages/auth/**"] },
-    { "id": "review", "task": "Review all auth changes for security issues.", "role": "reviewer", "deps": ["impl-auth", "impl-ui"] }
+    { "id": "research-existing", "task": "Read all auth-related files. Report paths and patterns.", "role": "researcher", "context_files": ["src/app.ts"] },
+    { "id": "research-deps", "task": "Check package.json for auth libraries, API layer, DB.", "role": "researcher", "context_files": ["package.json"] },
+    { "id": "impl-auth", "task": "Create auth service, routes, JWT middleware.", "role": "implementer", "deps": ["research-existing", "research-deps"], "file_scope": ["src/auth/**"] },
+    { "id": "review", "task": "Review all auth changes for security issues.", "role": "reviewer", "deps": ["impl-auth"] }
   ],
   "max_parallel": 3
 }
-\`\`\`
-
-**Roles:**
-- **researcher** (read-only): explore files, search code, web search. Use for context gathering.
-- **implementer** (write): create/edit files, run commands. Give non-overlapping file_scope to avoid conflicts.
-- **reviewer** (read-only): review code quality, find bugs. Run after implementation.
-- **tester** (write): write/run tests, browser testing. Run after implementation.
-- **planner** (read-only): analyze codebase, create task plans, milestones.`);
+\`\`\``);
 
 
 
@@ -571,7 +568,9 @@ You have full access to the GitHub CLI via \`gh_cli(command, flags?, cwd?)\`. Us
 - **Actions/CI:** \`gh_cli({ command: "run list", flags: "--limit 5" })\`, \`gh_cli({ command: "run view 12345" })\`
 - **Releases:** \`gh_cli({ command: "release list" })\`, \`gh_cli({ command: "release create v1.0" })\`
 - **API calls:** \`gh_cli({ command: "api /user/repos", flags: "--method GET" })\`
+**Auth:** Uses token from Settings > Connectors (GitHub device flow) or \`gh auth login\`. If you get auth errors, tell the user to connect GitHub in Settings or run \`gh auth login\`.
 Prefer \`gh_cli\` over raw git tools for GitHub-specific operations (PRs, issues, actions, API).
+**Delegation:** For GitHub operations, use \`spawn_sub_agent({ task: "...", tool_set: "git" })\` to keep the main thread focused.
 
 ### Google Workspace CLI (gws)
 You have access to Google Workspace via \`gws_cli(command, params?, json_body?, flags?)\`. Use for Gmail, Drive, Docs, Sheets, Calendar:
@@ -581,6 +580,7 @@ You have access to Google Workspace via \`gws_cli(command, params?, json_body?, 
 - **Sheets:** \`gws_cli({ command: "sheets spreadsheets values get", params: '{"spreadsheetId":"...","range":"Sheet1"}' })\`
 - **Calendar:** \`gws_cli({ command: "calendar events list", params: '{"calendarId":"primary","maxResults":10}' })\`
 - **Docs:** \`gws_cli({ command: "docs documents get", params: '{"documentId":"..."}' })\`
+**Auth:** gws manages its own credentials — NOT through our Google connector. If you get auth errors, tell the user to run \`gws auth login\` in their terminal (or use the /terminal command). First-time setup: \`gws auth setup\`.
 If gws is not installed, tell the user: \`npm install -g @googleworkspace/cli\`
 
 ### Browser Testing (MANDATORY for Web Projects)

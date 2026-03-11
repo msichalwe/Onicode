@@ -50,7 +50,7 @@ interface OnicodeAPI {
     // AI Agentic Events
     onToolCall: (callback: (data: { id: string; name: string; args: Record<string, unknown>; round: number }) => void) => () => void;
     onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;
-    onAgentStep: (callback: (data: { round: number; status: string; agentId?: string; task?: string }) => void) => () => void;
+    onAgentStep: (callback: (data: { round: number; status: string; agentId?: string; task?: string; toolSet?: string; role?: string; orchestrationId?: string }) => void) => () => void;
     onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
 
     // Ask User Question (Cascade-level)
@@ -206,6 +206,9 @@ interface OnicodeAPI {
     connectorGoogleStart: () => Promise<{ success?: boolean; error?: string; authUrl?: string }>;
     connectorGoogleCancel: () => Promise<{ success: boolean }>;
     connectorGoogleRefresh: () => Promise<{ success?: boolean; error?: string; accessToken?: string }>;
+    connectorGwsStatus: () => Promise<{ installed: boolean; authenticated: boolean; email?: string; error?: string }>;
+    connectorGwsLogin: () => Promise<{ success?: boolean; error?: string; message?: string }>;
+    connectorGhEnsure: () => Promise<{ installed: boolean; error?: string }>;
     onConnectorGoogleResult: (callback: (result: { success?: boolean; error?: string; email?: string; name?: string; picture?: string }) => void) => () => void;
 
     // Key Store

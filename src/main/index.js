@@ -25,16 +25,95 @@ const { registerKeystoreIPC } = require('./keystore');
 
 let mainWindow = null;
 
-// Combine all tool definitions from all modules (including MCP)
-function getAllToolDefinitions() {
-    return [
+// ── Tool definition caching + smart filtering ──
+let _allToolsCache = null;
+let _toolsCacheKey = '';
+
+// Core tools always included (~20 tools, essential for every task)
+const CORE_TOOL_NAMES = new Set([
+    'read_file', 'edit_file', 'multi_edit', 'create_file', 'delete_file',
+    'list_directory', 'search_files', 'glob_files', 'run_command', 'check_terminal',
+    'task_add', 'task_update', 'task_list', 'init_project', 'detect_project',
+    'ask_user_question', 'read_url_content', 'view_content_chunk',
+]);
+
+// Extended tool sets activated by context
+const TOOL_SETS = {
+    git: new Set(['git_status', 'git_diff', 'git_commit', 'git_log', 'git_push', 'git_pull',
+        'git_checkout', 'git_branches', 'git_stage', 'git_unstage', 'git_merge',
+        'git_reset', 'git_tag', 'git_remotes', 'git_show', 'git_create_pr', 'git_list_prs',
+        'git_publish', 'gh_cli']),
+    browser: new Set(['browser_navigate', 'browser_screenshot', 'browser_click',
+        'browser_type', 'browser_evaluate', 'browser_console_logs', 'browser_wait',
+        'browser_scroll']),
+    workspace: new Set(['gws_cli']),
+    advanced: new Set(['spawn_sub_agent', 'orchestrate', 'spawn_specialist',
+        'get_orchestration_status', 'sequential_thinking', 'find_by_name',
+        'trajectory_search', 'index_project', 'verify_project']),
+    notebook: new Set(['read_notebook', 'edit_notebook']),
+    deploy: new Set(['read_deployment_config', 'deploy_web_app', 'check_deploy_status']),
+    memory: new Set(['memory_read', 'memory_write', 'memory_search']),
+};
+
+function getActiveToolSets() {
+    // Always include git if in a git repo
+    const sets = ['git'];
+    // Include browser if project has web files or user mentioned browser/test
+    if (_currentProjectPath) {
+        const hasWebFiles = fs.existsSync(path.join(_currentProjectPath, 'package.json'));
+        if (hasWebFiles) sets.push('browser', 'deploy');
+    }
+    // Always include workspace, memory, notebook
+    sets.push('workspace', 'memory', 'notebook');
+    // Include advanced for complex tasks (projects with many files)
+    sets.push('advanced');
+    return sets;
+}
+
+function getAllToolDefinitions(options = {}) {
+    const { full = false } = options;
+    const mcpTools = getMCPToolDefinitions();
+    const cacheKey = `${full ? 'full' : 'smart'}_${_currentProjectPath || ''}_${mcpTools.length}`;
+
+    if (_allToolsCache && _toolsCacheKey === cacheKey) {
+        return _allToolsCache;
+    }
+
+    const allTools = [
         ...TOOL_DEFINITIONS,
         ...getLSPToolDefinitions(),
         ...getCodeIndexToolDefinitions(),
         ...ORCHESTRATOR_TOOL_DEFINITIONS,
         ...getContextEngineToolDefinitions(),
-        ...getMCPToolDefinitions(),
+        ...mcpTools,
     ];
+
+    if (full) {
+        _allToolsCache = allTools;
+        _toolsCacheKey = cacheKey;
+        return allTools;
+    }
+
+    // Smart filtering: core + active tool sets
+    const activeSets = getActiveToolSets();
+    const activeNames = new Set(CORE_TOOL_NAMES);
+    for (const setName of activeSets) {
+        const s = TOOL_SETS[setName];
+        if (s) s.forEach(n => activeNames.add(n));
+    }
+    // Always include MCP tools and LSP/context engine tools
+    const filtered = allTools.filter(t => {
+        const name = t.function?.name || t.name || '';
+        return activeNames.has(name) || name.startsWith('mcp_') ||
+            ['find_symbol', 'find_references', 'list_symbols', 'get_type_info',
+             'semantic_search', 'index_codebase',
+             'find_implementation', 'impact_analysis', 'prepare_edit_context',
+             'smart_read', 'batch_search'].includes(name);
+    });
+
+    _allToolsCache = filtered;
+    _toolsCacheKey = cacheKey;
+    return filtered;
 }
 
 // Route tool calls to the right executor
@@ -129,7 +208,7 @@ function createWindow() {
         mainWindow,
         makeAICall: (...args) => makeSubAgentAICall(...args),
         executeTool: (...args) => executeAnyTool(...args),
-        TOOL_DEFINITIONS: getAllToolDefinitions(),
+        TOOL_DEFINITIONS: getAllToolDefinitions({ full: true }),
         activeAgents: require('./aiTools').activeAgents,
     });
 
@@ -738,7 +817,14 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
  * Build rich project context for auto-continue prompts.
  * This prevents the AI from losing track of what it's already built.
  */
+let _continueContextCache = { result: '', timestamp: 0 };
+
 function buildContinueContext() {
+    // Memoize for 500ms — same request won't rebuild
+    const now = Date.now();
+    if (_continueContextCache.result && (now - _continueContextCache.timestamp) < 500) {
+        return _continueContextCache.result;
+    }
     const fs = require('fs');
     const parts = [];
 
@@ -815,7 +901,9 @@ function buildContinueContext() {
         parts.push(`Background processes running: ${bgProcs.map(p => `${p.command} (pid: ${p.pid}${p.port ? ', port: ' + p.port : ''})`).join(', ')}`);
     }
 
-    return parts.join('\n\n');
+    const result = parts.join('\n\n');
+    _continueContextCache = { result, timestamp: Date.now() };
+    return result;
 }
 
 /**

@@ -599,6 +599,8 @@ async function orchestrate(plan, providerConfig) {
         nodeCount: plan.nodes.length,
         graph: graph.getSummary(),
     });
+    // Also send agent-step so ChatView auto-opens the Agents panel
+    sendToRenderer('ai-agent-step', { round: 0, status: 'orchestration-start', orchestrationId });
 
     try {
         // Process work graph in dependency order with parallelism

@@ -15,3 +15,8 @@ export function generateId(): string {
 export function stripAnsi(str: string): string {
     return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
 }
+
+/** Dispatch a panel-open event to the App shell. */
+export function requestPanel(type: string, data?: Record<string, unknown>) {
+    window.dispatchEvent(new CustomEvent('onicode-panel', { detail: { type, data } }));
+}

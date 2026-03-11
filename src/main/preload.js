@@ -173,6 +173,9 @@ contextBridge.exposeInMainWorld('onicode', {
     connectorGoogleStart: () => ipcRenderer.invoke('connector-google-start'),
     connectorGoogleCancel: () => ipcRenderer.invoke('connector-google-cancel'),
     connectorGoogleRefresh: () => ipcRenderer.invoke('connector-google-refresh'),
+    connectorGwsStatus: () => ipcRenderer.invoke('connector-gws-status'),
+    connectorGwsLogin: () => ipcRenderer.invoke('connector-gws-login'),
+    connectorGhEnsure: () => ipcRenderer.invoke('connector-gh-ensure'),
     onConnectorGoogleResult: (callback) => {
         const handler = (_event, result) => callback(result);
         ipcRenderer.on('connector-google-result', handler);

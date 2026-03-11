@@ -4,9 +4,7 @@
 
 import { SLASH_COMMANDS, getCommandsByCategory } from './registry';
 import type { Message } from '../components/ChatView';
-import { requestPanel } from '../components/ChatView';
-
-import { isElectron, generateId } from '../utils';
+import { isElectron, generateId, requestPanel } from '../utils';
 
 export interface CommandContext {
     messages: Message[];

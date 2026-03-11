@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { isElectron } from '../../utils';
 
-interface AgentEntry { id: string; task: string; status: string; createdAt: number; result?: string; }
+interface AgentEntry { id: string; task: string; status: string; createdAt: number; result?: string; role?: string; toolSet?: string; }
 interface BgProcess { id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number; }
 
 const ROLE_BADGES: Record<string, { icon: string; color: string }> = {
@@ -87,12 +87,21 @@ function AgentsWidget() {
         return () => clearInterval(interval);
     }, [refresh]);
 
-    // Real-time agent step events
+    // Real-time agent step events — auto-expand active agents
     useEffect(() => {
         if (!window.onicode?.onAgentStep) return;
         const unsub = window.onicode.onAgentStep((data) => {
             setAgentStatus(data as { round: number; status: string; role?: string });
-            if (data.agentId) refresh();
+            if (data.agentId) {
+                refresh();
+                // Auto-expand agents when they start working
+                setExpandedAgents(prev => {
+                    if (prev.has(data.agentId!)) return prev;
+                    const next = new Set(prev);
+                    next.add(data.agentId!);
+                    return next;
+                });
+            }
         });
         return unsub;
     }, [refresh]);
@@ -266,7 +275,7 @@ function AgentsWidget() {
                         <div className="agents-section">
                             <div className="agents-section-label">Agents</div>
                             {agents.map(a => {
-                                const role = (a as AgentEntry & { role?: string }).role;
+                                const role = a.role;
                                 const badge = role ? ROLE_BADGES[role] : null;
                                 const agentTools = subAgentTools.filter(t => t.agentId === a.id);
                                 const isExpanded = expandedAgents.has(a.id);
@@ -280,6 +289,11 @@ function AgentsWidget() {
                                                 {badge && (
                                                     <span className="agent-role-badge" style={{ color: badge.color }}>
                                                         {badge.icon} {role}
+                                                    </span>
+                                                )}
+                                                {a.toolSet && !badge && (
+                                                    <span className="agent-tool-set-badge" style={{ fontSize: '0.7rem', padding: '1px 6px', borderRadius: 4, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
+                                                        {a.toolSet}
                                                     </span>
                                                 )}
                                                 <span className="agent-item-id">{a.id.slice(0, 12)}</span>

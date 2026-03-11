@@ -957,6 +957,8 @@ function createSubAgent(id, task, parentContext) {
         result: null,
         parentContext,
         toolsUsed: [],
+        toolSet: parentContext?.tool_set || 'read-only',
+        role: parentContext?.role || null,
     };
     activeAgents.set(id, agent);
     return agent;
@@ -967,7 +969,17 @@ function createSubAgent(id, task, parentContext) {
  * The sub-agent gets read-only tools + search + terminal.
  * It runs a mini agentic loop (up to 10 rounds) and returns results.
  */
-async function executeSubAgent(agentId, task, contextFiles, providerConfig) {
+// Tool sets for sub-agents — each set gives access to specific tools
+const SUB_AGENT_TOOL_SETS = {
+    'read-only': ['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase', 'get_context_summary'],
+    'git': ['read_file', 'search_files', 'list_directory', 'glob_files', 'git_status', 'git_diff', 'git_log', 'git_branches', 'git_show', 'git_remotes', 'gh_cli'],
+    'browser': ['browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close', 'read_file'],
+    'workspace': ['gws_cli', 'read_file', 'search_files', 'list_directory'],
+    'file-ops': ['read_file', 'edit_file', 'multi_edit', 'create_file', 'delete_file', 'search_files', 'list_directory', 'glob_files'],
+    'search': ['read_file', 'search_files', 'glob_files', 'list_directory', 'find_symbol', 'find_references', 'list_symbols', 'semantic_search', 'find_implementation', 'batch_search'],
+};
+
+async function executeSubAgent(agentId, task, contextFiles, providerConfig, toolSet, constraints) {
     const agent = activeAgents.get(agentId);
     if (!agent) return { error: 'Agent not found' };
 
@@ -985,16 +997,22 @@ async function executeSubAgent(agentId, task, contextFiles, providerConfig) {
         }
     }
 
-    const subAgentPrompt = `You are a focused sub-agent. Your task: ${task}
+    // Resolve allowed tools for this sub-agent
+    const allowedToolNames = SUB_AGENT_TOOL_SETS[toolSet] || SUB_AGENT_TOOL_SETS['read-only'];
+    const allowedSet = new Set(allowedToolNames);
+    const toolListStr = allowedToolNames.join(', ');
 
-You have access to read_file, search_files, list_directory, glob_files, and explore_codebase tools.
-Complete the task and return a clear, actionable summary.
+    const subAgentPrompt = `You are a focused sub-agent. Your ONLY task: ${task}
+
+**Available tools:** ${toolListStr}
+**Do NOT attempt to call any other tools.**
+${constraints ? `\n**Constraints:** ${constraints}` : ''}
+
+Complete the task efficiently and return a clear, actionable summary.
 ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
 
-    // Sub-agent only gets read-only tools
-    const readOnlyTools = TOOL_DEFINITIONS.filter(t =>
-        ['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase', 'get_context_summary'].includes(t.function.name)
-    );
+    // Filter tool definitions to only allowed tools
+    const allowedTools = TOOL_DEFINITIONS.filter(t => allowedSet.has(t.function.name));
 
     if (!_makeAICall) {
         agent.status = 'error';
@@ -1010,7 +1028,7 @@ ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
         ];
 
         for (let round = 0; round < MAX_SUB_ROUNDS; round++) {
-            const result = await _makeAICall(messages, providerConfig, readOnlyTools);
+            const result = await _makeAICall(messages, providerConfig, allowedTools);
 
             if (result.error) {
                 agent.status = 'error';
@@ -1047,12 +1065,12 @@ ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
 
                 agent.toolsUsed.push(tc.name);
 
-                // Only allow read-only tools for sub-agents
-                if (!['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase', 'get_context_summary'].includes(tc.name)) {
+                // Enforce tool set boundary
+                if (!allowedSet.has(tc.name)) {
                     messages.push({
                         role: 'tool',
                         tool_call_id: tc.id || tc.call_id,
-                        content: JSON.stringify({ error: `Tool "${tc.name}" not available to sub-agents. Use only read-only tools.` }),
+                        content: JSON.stringify({ error: `Tool "${tc.name}" not in your tool set (${toolSet || 'read-only'}). Available: ${toolListStr}` }),
                     });
                     continue;
                 }
@@ -1093,6 +1111,8 @@ function listAgents() {
         status: a.status,
         createdAt: a.createdAt,
         role: a.role || null,
+        toolSet: a.toolSet || null,
+        result: a.status === 'done' ? (typeof a.result === 'object' ? (a.result?.content || '') : a.result) : null,
     }));
 }
 
@@ -1256,15 +1276,24 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'spawn_sub_agent',
-            description: 'Spawn a sub-agent to handle a specific sub-task in parallel. The sub-agent gets its own conversation context.',
+            description: 'Spawn a focused sub-agent for a specific task. Give it precise instructions, a constrained tool set, and clear boundaries. Prefer this for small, independent tasks.',
             parameters: {
                 type: 'object',
                 properties: {
-                    task: { type: 'string', description: 'Description of the sub-task to perform' },
+                    task: { type: 'string', description: 'Precise task description. Be specific: what to do, what NOT to do, expected output format.' },
+                    tool_set: {
+                        type: 'string',
+                        enum: ['read-only', 'git', 'browser', 'workspace', 'file-ops', 'search'],
+                        description: 'Tool set for the sub-agent. read-only (default): read/search/list. git: git tools + gh_cli. browser: puppeteer testing. workspace: gws_cli. file-ops: read/edit/create/delete. search: search + LSP + semantic.',
+                    },
                     context_files: {
                         type: 'array',
                         items: { type: 'string' },
                         description: 'File paths to include as context for the sub-agent',
+                    },
+                    constraints: {
+                        type: 'string',
+                        description: 'Explicit constraints: "only read these 3 files", "do not modify anything", "return JSON format", "max 5 files", etc.',
                     },
                 },
                 required: ['task'],
@@ -2013,7 +2042,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'gws_cli',
-            description: 'Execute Google Workspace CLI (gws) commands for Gmail, Drive, Docs, Sheets, Calendar, and 30+ Google services. The gws CLI uses the connected Google account. Common operations: "gmail users messages list --params {\"userId\":\"me\",\"maxResults\":10}", "drive files list", "sheets spreadsheets create --json {}", "calendar events list", "docs documents get --params {\"documentId\":\"...\"}". Use --json for structured input and --params for query parameters.',
+            description: 'Execute Google Workspace CLI (gws) commands for Gmail, Drive, Docs, Sheets, Calendar, and 30+ Google services. Auth is handled by gws itself (run "gws auth login" first). If auth fails, tell the user to run "gws auth login" in terminal. Common operations: "gmail users messages list --params {\"userId\":\"me\",\"maxResults\":10}", "drive files list", "sheets spreadsheets create --json {}", "calendar events list", "docs documents get --params {\"documentId\":\"...\"}". Use --json for structured input and --params for query parameters.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -3032,20 +3061,20 @@ async function executeTool(name, args) {
             }
 
             case 'spawn_sub_agent': {
-                const { task, context_files } = args;
+                const { task, context_files, tool_set, constraints } = args;
                 const agentId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                createSubAgent(agentId, task, { context_files });
+                createSubAgent(agentId, task, { context_files, tool_set });
 
                 // Notify renderer that a sub-agent is running
-                sendToRenderer('ai-agent-step', { round: 0, status: 'sub-agent', agentId, task });
+                sendToRenderer('ai-agent-step', { round: 0, status: 'sub-agent', agentId, task, toolSet: tool_set || 'read-only' });
 
-                // Execute the sub-agent synchronously (it has its own mini agentic loop)
-                // We need a provider config — get it from the parent context
-                const result = await executeSubAgent(agentId, task, context_files, _lastProviderConfig);
+                // Execute the sub-agent with constrained tool set
+                const result = await executeSubAgent(agentId, task, context_files, _lastProviderConfig, tool_set, constraints);
 
                 return {
                     agent_id: agentId,
                     task,
+                    tool_set: tool_set || 'read-only',
                     status: result.error ? 'error' : 'done',
                     result: result.content || result.error,
                     tools_used: result.toolsUsed || [],
@@ -5277,11 +5306,31 @@ async function executeTool(name, args) {
                 const command = args.command;
                 if (!command || typeof command !== 'string') return { error: 'command is required' };
 
-                // Get GitHub token for authentication
+                // Get GitHub token — try our connector first, then fall back to gh's own auth
                 const { getGithubToken: getGhToken } = require('./git');
                 const ghToken = getGhToken();
                 const ghEnv = { ...process.env };
                 if (ghToken) ghEnv.GH_TOKEN = ghToken;
+
+                // Check if gh is installed
+                try {
+                    execSync('which gh', { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+                } catch {
+                    return { error: 'GitHub CLI (gh) is not installed. Connect GitHub in Settings > Connectors (auto-installs), or manually: brew install gh' };
+                }
+
+                // Check auth status if no connector token
+                if (!ghToken) {
+                    try {
+                        execSync('gh auth status', { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+                    } catch (authErr) {
+                        const authStderr = (authErr.stderr || '').trim();
+                        if (authStderr.includes('not logged') || authStderr.includes('no token')) {
+                            return { error: 'GitHub CLI is not authenticated. Tell the user to either: 1) Connect GitHub in Settings > Connectors, or 2) Run `gh auth login` in terminal.' };
+                        }
+                        // gh auth status may write to stderr even when auth is OK — continue
+                    }
+                }
 
                 try {
                     const flags = args.flags ? ` ${args.flags}` : '';
@@ -5305,6 +5354,10 @@ async function executeTool(name, args) {
                 } catch (err) {
                     const stderr = (err.stderr || '').trim();
                     const stdout = (err.stdout || '').trim();
+                    // Auth errors
+                    if (stderr.includes('401') || stderr.includes('authentication') || stderr.includes('not logged') || stderr.includes('gh auth login')) {
+                        return { error: `GitHub auth error: ${stderr.slice(0, 500)}. Tell the user to connect GitHub in Settings > Connectors or run \`gh auth login\` in terminal.` };
+                    }
                     return { error: `gh command failed: ${stderr || stdout || err.message}`.slice(0, 2000) };
                 }
             }
@@ -5317,25 +5370,8 @@ async function executeTool(name, args) {
                 const command = args.command;
                 if (!command || typeof command !== 'string') return { error: 'command is required' };
 
-                // Get Google token with auto-refresh
-                let googleToken = null;
-                try {
-                    const { getValidGoogleToken } = require('./connectors');
-                    googleToken = await getValidGoogleToken();
-                } catch {
-                    // Fallback: read directly from connectors.json
-                    const connPath = path.join(os.homedir(), '.onicode', 'connectors.json');
-                    try {
-                        if (fs.existsSync(connPath)) {
-                            const connData = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
-                            googleToken = connData.gmail?.accessToken || connData.google?.accessToken || null;
-                        }
-                    } catch {}
-                }
-
-                const gwsEnv = { ...process.env };
-                if (googleToken) gwsEnv.GOOGLE_WORKSPACE_CLI_TOKEN = googleToken;
-
+                // gws handles its own auth via `gws auth login` — credentials stored in ~/.config/gws/
+                // No need to inject tokens; just pass through the environment
                 try {
                     let fullCmd = `gws ${command}`;
                     if (args.params) fullCmd += ` --params '${args.params}'`;
@@ -5347,7 +5383,6 @@ async function executeTool(name, args) {
                         timeout: 30000,
                         maxBuffer: 5 * 1024 * 1024,
                         stdio: ['pipe', 'pipe', 'pipe'],
-                        env: gwsEnv,
                     });
                     // Parse JSON output (gws always outputs JSON)
                     try {
@@ -5360,7 +5395,10 @@ async function executeTool(name, args) {
                     const stderr = (err.stderr || '').trim();
                     const stdout = (err.stdout || '').trim();
                     if (stderr.includes('not found') || stderr.includes('command not found') || err.message.includes('ENOENT')) {
-                        return { error: 'Google Workspace CLI (gws) is not installed. Install with: npm install -g @googleworkspace/cli' };
+                        return { error: 'Google Workspace CLI (gws) is not installed. Install with: npm install -g @googleworkspace/cli && gws auth setup' };
+                    }
+                    if (stderr.includes('No credentials') || stderr.includes('401') || stderr.includes('auth') || stderr.includes('token') || stderr.includes('login')) {
+                        return { error: `gws auth error: ${(stderr || stdout).slice(0, 500)}. Tell the user to run "gws auth login" in terminal to authenticate.` };
                     }
                     return { error: `gws command failed: ${stderr || stdout || err.message}`.slice(0, 2000) };
                 }

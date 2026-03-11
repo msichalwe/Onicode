@@ -130,7 +130,18 @@ export default function SettingsPanel() {
         const res = await window.onicode!.connectorList();
         const c = res.connectors || {};
         if (c.github) setGithub({ connected: true, username: c.github.username, avatarUrl: c.github.avatarUrl });
-        if (c.gmail) setGmail({ connected: true, username: c.gmail.username, avatarUrl: c.gmail.avatarUrl });
+        // Check gws auth status for Gmail/Google Workspace
+        if (c.gmail) {
+            setGmail({ connected: true, username: c.gmail.username || c.gmail.avatarUrl });
+        } else {
+            // No stored connector — check if gws is already authenticated
+            try {
+                const gws = await window.onicode!.connectorGwsStatus();
+                if (gws.authenticated && gws.email) {
+                    setGmail({ connected: true, username: gws.email });
+                }
+            } catch {}
+        }
     }, []);
 
     useEffect(() => { loadConnectors(); }, [loadConnectors]);
@@ -258,6 +269,12 @@ export default function SettingsPanel() {
     const connectGithub = useCallback(async () => {
         if (!isElectron) return;
         setGithub(prev => ({ ...prev, loading: true, error: undefined }));
+        // Auto-install gh CLI if missing
+        const ghCheck = await window.onicode!.connectorGhEnsure();
+        if (!ghCheck.installed) {
+            setGithub(prev => ({ ...prev, loading: false, error: ghCheck.error || 'GitHub CLI (gh) not installed' }));
+            return;
+        }
         const startRes = await window.onicode!.connectorGithubStart();
         if (startRes.error || !startRes.deviceCode) {
             setGithub(prev => ({ ...prev, loading: false, error: startRes.error || 'Failed to start' }));
@@ -280,26 +297,25 @@ export default function SettingsPanel() {
         setGithub({ connected: false });
     }, []);
 
-    // ── Gmail / Google OAuth ──
-    const connectGmail = useCallback(async () => {
+    // ── Google Workspace (via gws CLI — requires terminal setup) ──
+    const [gwsSetupOpen, setGwsSetupOpen] = useState(false);
+
+    const verifyGws = useCallback(async () => {
         if (!isElectron) return;
         setGmail(prev => ({ ...prev, loading: true, error: undefined }));
-        const cleanup = window.onicode!.onConnectorGoogleResult((result) => {
-            if (result.success) {
-                setGmail({ connected: true, username: result.email || result.name });
-            } else {
-                setGmail(prev => ({ ...prev, loading: false, error: result.error }));
-            }
-            cleanup();
-        });
-        const res = await window.onicode!.connectorGoogleStart();
-        if (res.error) { setGmail(prev => ({ ...prev, loading: false, error: res.error })); cleanup(); }
+        const status = await window.onicode!.connectorGwsStatus();
+        if (status.authenticated && status.email) {
+            setGmail({ connected: true, username: status.email });
+        } else if (!status.installed) {
+            setGmail(prev => ({ ...prev, loading: false, error: 'gws not installed. See setup instructions below.' }));
+        } else {
+            setGmail(prev => ({ ...prev, loading: false, error: 'Not authenticated. Complete the setup steps below, then verify again.' }));
+        }
     }, []);
 
     const disconnectGmail = useCallback(async () => {
         if (!isElectron) return;
         await window.onicode!.connectorDisconnect('gmail');
-        await window.onicode!.connectorGoogleCancel();
         setGmail({ connected: false });
     }, []);
 
@@ -569,22 +585,47 @@ export default function SettingsPanel() {
                             )}
                         </div>
 
-                        {/* Gmail */}
-                        <div className="connector-item">
+                        {/* Google Workspace (Gmail, Drive, Sheets, Calendar, Docs) */}
+                        <div className="connector-item" style={{ flexWrap: 'wrap' }}>
                             <div className="connector-icon gmail">Gm</div>
                             <div className="connector-info">
-                                <div className="connector-name">Gmail</div>
+                                <div className="connector-name">Google Workspace</div>
                                 <div className={`connector-status ${gmail.connected ? 'connected' : ''}`}>
-                                    {gmail.connected ? `Connected as ${gmail.username}` : gmail.loading ? 'Authenticating...' : 'Not connected'}
+                                    {gmail.connected ? `Connected as ${gmail.username}` : gmail.loading ? 'Verifying...' : 'Not connected'}
                                 </div>
+                                <div className="connector-status" style={{ fontSize: '0.7rem', opacity: 0.6 }}>Gmail, Drive, Docs, Sheets, Calendar</div>
                                 {gmail.error && <div className="connector-status connector-error">{gmail.error}</div>}
                             </div>
                             {gmail.connected ? (
                                 <button className="connector-btn disconnect" onClick={disconnectGmail}>Disconnect</button>
                             ) : (
-                                <button className="connector-btn connect" onClick={connectGmail} disabled={gmail.loading}>
-                                    {gmail.loading ? 'Opening browser...' : 'Connect'}
-                                </button>
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                    <button className="connector-btn connect" onClick={() => setGwsSetupOpen(!gwsSetupOpen)}>
+                                        {gwsSetupOpen ? 'Hide Setup' : 'Setup'}
+                                    </button>
+                                    <button className="connector-btn connect" onClick={verifyGws} disabled={gmail.loading}>
+                                        {gmail.loading ? 'Checking...' : 'Verify'}
+                                    </button>
+                                </div>
+                            )}
+                            {gwsSetupOpen && !gmail.connected && (
+                                <div className="connector-expand" style={{ width: '100%', marginTop: 8 }}>
+                                    <p style={{ fontWeight: 600, marginBottom: 6 }}>Terminal Setup (one-time)</p>
+                                    <p style={{ fontSize: '0.78rem', opacity: 0.8, marginBottom: 8 }}>
+                                        Google Workspace requires interactive browser auth. Run these commands in your terminal:
+                                    </p>
+                                    <div className="connector-device-code" style={{ fontSize: '0.75rem', textAlign: 'left', padding: '8px 10px', lineHeight: 2 }}>
+                                        <div><span style={{ opacity: 0.5 }}>1.</span> npm install -g @googleworkspace/cli</div>
+                                        <div><span style={{ opacity: 0.5 }}>2.</span> gws auth setup</div>
+                                        <div><span style={{ opacity: 0.5 }}>  </span> <span style={{ opacity: 0.5 }}>↳ Follow prompts, sign in with Google</span></div>
+                                        <div><span style={{ opacity: 0.5 }}>3.</span> Complete browser OAuth consent</div>
+                                    </div>
+                                    <p style={{ fontSize: '0.72rem', opacity: 0.6, marginTop: 6 }}>
+                                        <strong>gws auth setup</strong> creates a GCP project, enables APIs, and runs login automatically.
+                                        After setup completes, click <strong>Verify</strong> to confirm.
+                                        The AI can then use Gmail, Drive, Docs, Sheets, Calendar, and 30+ Google services.
+                                    </p>
+                                </div>
                             )}
                         </div>
 

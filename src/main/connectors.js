@@ -348,7 +348,11 @@ function registerConnectorIPC(ipcMain, getWindow) {
 
     // Google/Gmail — start OAuth (opens browser, starts local server)
     ipcMain.handle('connector-google-start', async () => {
-        const { authUrl, verifier, state } = googleOAuthStart();
+        const startResult = googleOAuthStart();
+        if (startResult.error) {
+            return { error: startResult.error };
+        }
+        const { authUrl, verifier, state } = startResult;
 
         // Start local HTTP server to capture redirect
         return new Promise((resolve) => {
@@ -436,6 +440,140 @@ function registerConnectorIPC(ipcMain, getWindow) {
     ipcMain.handle('connector-google-refresh', async () => {
         return googleRefreshToken();
     });
+
+    // ── Google Workspace CLI (gws) auth ──
+
+    function isGwsInstalled() {
+        const { execSync } = require('child_process');
+        try {
+            execSync('which gws || where gws', { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+            return true;
+        } catch { return false; }
+    }
+
+    async function installGws(win) {
+        const { execSync } = require('child_process');
+        if (win) win.webContents.send('connector-google-result', { installing: true });
+        try {
+            execSync('npm install -g @googleworkspace/cli', {
+                encoding: 'utf-8', timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            return { success: true };
+        } catch (err) {
+            const stderr = (err.stderr || '').trim();
+            // npm may need sudo on some systems — try without global
+            if (stderr.includes('EACCES') || stderr.includes('permission')) {
+                try {
+                    // Try npx as fallback — makes gws available without global install
+                    execSync('npx --yes @googleworkspace/cli --version', {
+                        encoding: 'utf-8', timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'],
+                    });
+                    return { success: true, npx: true };
+                } catch {
+                    return { error: `Install failed (permission denied). Try: sudo npm install -g @googleworkspace/cli` };
+                }
+            }
+            return { error: `Install failed: ${stderr || err.message}`.slice(0, 500) };
+        }
+    }
+
+    function checkGwsAuth() {
+        const { execSync } = require('child_process');
+        try {
+            const out = execSync('gws auth status', {
+                encoding: 'utf-8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            // gws auth status outputs JSON with token_valid and user fields
+            // Strip "Using keyring backend: keyring\n" prefix if present
+            const jsonStr = out.replace(/^Using keyring backend:.*\n/m, '').trim();
+            const data = JSON.parse(jsonStr);
+            if (data.token_valid && data.user) {
+                return data.user;
+            }
+            return null;
+        } catch { return null; }
+    }
+
+    // Check if gws is installed and authenticated
+    ipcMain.handle('connector-gws-status', async () => {
+        if (!isGwsInstalled()) {
+            return { installed: false, authenticated: false };
+        }
+        const email = checkGwsAuth();
+        if (email) {
+            setConnector('gmail', { email, username: email, connectedAt: Date.now(), authMethod: 'gws' });
+            return { installed: true, authenticated: true, email };
+        }
+        return { installed: true, authenticated: false };
+    });
+
+    // Full connect flow: install gws if needed → run gws auth login → verify
+    ipcMain.handle('connector-gws-login', async () => {
+        const { exec, execSync } = require('child_process');
+        const win = getWindow();
+
+        // Step 1: Auto-install if not present
+        if (!isGwsInstalled()) {
+            if (win) win.webContents.send('connector-google-result', { status: 'Installing Google Workspace CLI...' });
+            const installResult = await installGws(win);
+            if (!installResult.success) {
+                return { error: installResult.error };
+            }
+            // Verify install worked
+            if (!isGwsInstalled()) {
+                return { error: 'Installation completed but gws command not found. Restart the app and try again.' };
+            }
+        }
+
+        // Step 2: Check if already authenticated
+        const existingEmail = checkGwsAuth();
+        if (existingEmail) {
+            setConnector('gmail', { email: existingEmail, username: existingEmail, connectedAt: Date.now(), authMethod: 'gws' });
+            if (win) win.webContents.send('connector-google-result', { success: true, email: existingEmail });
+            return { success: true, message: 'Already authenticated' };
+        }
+
+        // Step 3: Run gws auth login (opens browser for OAuth)
+        if (win) win.webContents.send('connector-google-result', { status: 'Opening browser for Google sign-in...' });
+
+        exec('gws auth login', { timeout: 180000 }, (err, stdout, stderr) => {
+            if (err) {
+                if (win) win.webContents.send('connector-google-result', { error: `Auth failed: ${(stderr || err.message).slice(0, 300)}` });
+                return;
+            }
+            // Auth completed — verify
+            const email = checkGwsAuth();
+            if (email) {
+                setConnector('gmail', { email, username: email, connectedAt: Date.now(), authMethod: 'gws' });
+                if (win) win.webContents.send('connector-google-result', { success: true, email });
+            } else {
+                if (win) win.webContents.send('connector-google-result', { success: true, email: 'authenticated' });
+            }
+        });
+
+        return { success: true, message: 'Opening browser for Google authentication...' };
+    });
+
+    // ── GitHub CLI (gh) auto-install + auth ──
+
+    ipcMain.handle('connector-gh-ensure', async () => {
+        const { execSync } = require('child_process');
+        try {
+            execSync('which gh || where gh', { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+            return { installed: true };
+        } catch {
+            // Auto-install gh via Homebrew (macOS) or npm
+            const win = getWindow();
+            if (win) win.webContents.send('connector-google-result', { status: 'Installing GitHub CLI...' });
+            try {
+                // Try Homebrew first (macOS)
+                execSync('brew install gh', { encoding: 'utf-8', timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'] });
+                return { installed: true };
+            } catch {
+                return { installed: false, error: 'Could not auto-install gh. Install manually: https://cli.github.com' };
+            }
+        }
+    });
 }
 
-module.exports = { registerConnectorIPC, getValidGoogleToken, getConnector };
+module.exports = { registerConnectorIPC, getValidGoogleToken, getConnector, googleRefreshToken };

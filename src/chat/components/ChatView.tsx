@@ -6,6 +6,7 @@ import { buildSystemPromptCached } from '../ai/systemPrompt';
 import QuestionDialog, { parseQuestions, isQuestionMessage } from './QuestionDialog';
 import type { ChatScope } from '../App';
 import type { ActiveProject } from './ProjectModeBar';
+import { requestPanel } from '../utils';
 
 // ══════════════════════════════════════════
 //  Screenshot Image Component (loads via IPC)
@@ -233,10 +234,7 @@ function generateTitle(content: string): string {
 // ══════════════════════════════════════════
 //  Panel Events (dispatched to App)
 // ══════════════════════════════════════════
-
-export function requestPanel(type: string, data?: Record<string, unknown>) {
-    window.dispatchEvent(new CustomEvent('onicode-panel', { detail: { type, data } }));
-}
+// requestPanel moved to utils/index.ts to avoid breaking React Fast Refresh
 
 // ══════════════════════════════════════════
 //  Component
@@ -647,6 +645,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         if (!window.onicode?.onAgentStep) return;
         const unsub = window.onicode.onAgentStep((data) => {
             setAgentStatus(data as typeof agentStatus);
+            // Auto-open Agents panel when a sub-agent, specialist, or orchestration starts
+            if (data.status === 'sub-agent' || data.status === 'specialist' || data.status === 'orchestration-start') {
+                requestPanel('agents');
+            }
         });
         return unsub;
     }, []);
