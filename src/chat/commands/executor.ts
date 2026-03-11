@@ -86,6 +86,19 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
             }
             return { handled: true };
 
+        case '/thinklevel': {
+            const levels = ['low', 'medium', 'high'];
+            if (args && levels.includes(args.toLowerCase())) {
+                const level = args.toLowerCase();
+                localStorage.setItem('onicode-thinking-level', level);
+                addAIMessage(ctx, `Thinking level set to **${level}**${level === 'high' ? ' (extended thinking enabled for supported models)' : ''}`);
+            } else {
+                const current = localStorage.getItem('onicode-thinking-level') || 'medium';
+                addAIMessage(ctx, `Current thinking level: **${current}**\n\nUsage: \`/thinklevel <low|medium|high>\`\n- **low** — faster, less reasoning\n- **medium** — balanced (default)\n- **high** — deep reasoning, extended thinking`);
+            }
+            return { handled: true };
+        }
+
         case '/stop':
             ctx.stopGeneration();
             addAIMessage(ctx, 'Generation stopped.');

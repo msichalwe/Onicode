@@ -87,7 +87,82 @@ const DANGEROUS_PATTERNS = [
     /chmod\s+-R\s+777/,
     /npm\s+unpublish/,
     /curl\s+.*\|\s*(bash|sh|zsh)/,
+    /wget\s+.*\|\s*(bash|sh|zsh)/,
+    /kill\s+-9\s+(-1|1)\b/,
+    /pkill\s+-9/,
+    /npm\s+publish\b/,
+    /docker\s+(rm|rmi|system\s+prune|volume\s+prune)/,
+    /kubectl\s+delete/,
+    /heroku\s+destroy/,
+    /firebase\s+delete/,
+    /aws\s+s3\s+rm.*--recursive/,
+    /git\s+rebase\s+--abort/,
+    /env\s*>\s*\/dev/,
+    />\s*\/dev\/(sda|hda|nvme)/,
 ];
+
+// ══════════════════════════════════════════
+//  Hook Presets (starter templates)
+// ══════════════════════════════════════════
+
+const HOOK_PRESETS = {
+    'lint-on-commit': {
+        name: 'Lint Before Commit',
+        description: 'Run linter and typecheck before every git commit',
+        hooks: {
+            PreCommit: [{ command: 'npm run lint && npx tsc --noEmit' }],
+        },
+    },
+    'format-on-edit': {
+        name: 'Auto-Format After Edit',
+        description: 'Run Prettier on edited files',
+        hooks: {
+            PostEdit: [{ command: 'npx prettier --write "$ONICODE_FILE_PATH"', matcher: '\\.(tsx?|jsx?|css|json|md)$' }],
+        },
+    },
+    'test-on-edit': {
+        name: 'Run Tests After Edit',
+        description: 'Run related tests when source files change',
+        hooks: {
+            PostEdit: [{ command: 'npx jest --findRelatedTests "$ONICODE_FILE_PATH" --passWithNoTests 2>&1 | tail -5', matcher: '\\.(tsx?|jsx?)$' }],
+        },
+    },
+    'block-dangerous': {
+        name: 'Block All Dangerous Commands',
+        description: 'Prevent destructive shell commands from executing',
+        hooks: {
+            OnDangerousCommand: [{ command: 'echo "BLOCKED: $ONICODE_COMMAND" && exit 1' }],
+        },
+    },
+    'changelog-on-commit': {
+        name: 'Update Changelog on Commit',
+        description: 'Append commit message to onidocs/changelog.md after each commit',
+        hooks: {
+            PostCommit: [{ command: 'echo "- $(date +%Y-%m-%d): $ONICODE_COMMIT_MSG" >> onidocs/changelog.md' }],
+        },
+    },
+    'notify-on-complete': {
+        name: 'Notify on Task Complete',
+        description: 'Show macOS notification when AI finishes a task',
+        hooks: {
+            OnTaskComplete: [{ command: 'osascript -e \'display notification "$ONICODE_TASK_CONTENT" with title "Onicode — Task Done"\'' }],
+        },
+    },
+    'typecheck-ts': {
+        name: 'TypeScript Check on Edit',
+        description: 'Run tsc after editing TypeScript files',
+        hooks: {
+            PostEdit: [{ command: 'npx tsc --noEmit 2>&1 | head -20', matcher: '\\.tsx?$' }],
+        },
+    },
+    'prisma-validate': {
+        name: 'Prisma Validate on Schema Change',
+        description: 'Validate Prisma schema after editing migration/schema files',
+        hooks: {
+            PostEdit: [{ command: 'npx prisma validate', matcher: 'schema|migration|prisma' }],
+        },
+    },
+};
 
 const DEFAULT_TIMEOUT = 10000; // 10 seconds
 
@@ -292,6 +367,41 @@ function isDangerousCommand(command) {
 }
 
 /**
+ * Execute hooks asynchronously (non-blocking, parallel).
+ * Used for non-blocking hooks like PostEdit, PostCommand, etc.
+ * Returns immediately with a placeholder result, fires hooks in background.
+ */
+function executeHookAsync(hookType, context = {}) {
+    if (!HOOK_TYPES.includes(hookType)) return;
+
+    const entries = _cachedHooks[hookType] || [];
+    if (entries.length === 0) return;
+
+    // Non-blocking hooks that can run async
+    const asyncSafeHooks = ['PostToolUse', 'PostEdit', 'PostCommand', 'PostCommit', 'OnTestFailure',
+        'OnTaskComplete', 'AIResponse', 'Stop', 'SubagentStop', 'Notification'];
+
+    if (!asyncSafeHooks.includes(hookType)) {
+        // For blocking hooks, fall back to sync execution
+        return executeHook(hookType, context);
+    }
+
+    // Fire and forget
+    setImmediate(() => {
+        const result = executeHook(hookType, context);
+        // Log errors from async hooks
+        if (result.outputs) {
+            for (const out of result.outputs) {
+                if (out.startsWith('[hook error]')) {
+                    const { logger } = require('./logger');
+                    logger.warn('hooks', `Async hook ${hookType}: ${out}`);
+                }
+            }
+        }
+    });
+}
+
+/**
  * Return a human-readable summary of configured hooks for the AI system prompt.
  */
 function getHooksSummary() {
@@ -401,6 +511,49 @@ function registerHooksIPC(ipcMain) {
         }
     });
 
+    // List available presets
+    ipcMain.handle('hooks-presets', () => {
+        return Object.entries(HOOK_PRESETS).map(([id, preset]) => ({
+            id,
+            name: preset.name,
+            description: preset.description,
+            hookTypes: Object.keys(preset.hooks),
+        }));
+    });
+
+    // Apply a preset (merge into current hooks)
+    ipcMain.handle('hooks-apply-preset', async (_event, presetId, scope = 'global', projectPath) => {
+        const preset = HOOK_PRESETS[presetId];
+        if (!preset) return { success: false, error: `Unknown preset: ${presetId}` };
+
+        try {
+            let filePath;
+            if (scope === 'project' && projectPath) {
+                filePath = path.join(projectPath, '.onicode', 'hooks.json');
+            } else {
+                filePath = GLOBAL_HOOKS_FILE;
+            }
+
+            const existing = readHooksFile(filePath);
+            const merged = { ...existing };
+
+            for (const [type, entries] of Object.entries(preset.hooks)) {
+                if (!merged[type]) merged[type] = [];
+                // Avoid duplicates
+                for (const entry of entries) {
+                    const isDuplicate = merged[type].some(e => e.command === entry.command && e.matcher === entry.matcher);
+                    if (!isDuplicate) merged[type].push(entry);
+                }
+            }
+
+            writeHooksFile(filePath, merged);
+            loadHooks(projectPath || _lastProjectPath);
+            return { success: true, preset: preset.name };
+        } catch (err) {
+            return { success: false, error: err.message };
+        }
+    });
+
     ipcMain.handle('hooks-test', (_event, { hookType, context, command: cmdOverride }) => {
         const command = cmdOverride;
         const testContext = {
@@ -451,8 +604,10 @@ function registerHooksIPC(ipcMain) {
 module.exports = {
     HOOK_TYPES,
     HOOK_DESCRIPTIONS,
+    HOOK_PRESETS,
     loadHooks,
     executeHook,
+    executeHookAsync,
     isDangerousCommand,
     getHooksSummary,
     getHooksInfo,

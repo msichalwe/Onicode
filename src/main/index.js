@@ -21,6 +21,7 @@ const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool 
 const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITIONS, executeOrchestratorTool } = require('./orchestrator');
 const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
 const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
+const { registerKeystoreIPC } = require('./keystore');
 
 let mainWindow = null;
 
@@ -342,6 +343,11 @@ ipcMain.handle('test-provider', async (_event, providerConfig) => {
                 // Standard API key: test against api.openai.com
                 return await testOpenAI(providerConfig.apiKey);
             }
+        } else if (providerConfig.id === 'anthropic') {
+            if (!providerConfig.apiKey?.trim()) return { error: 'Anthropic API key is required' };
+            return await testAnthropic(providerConfig.apiKey);
+        } else if (providerConfig.id === 'ollama') {
+            return await testOllama(providerConfig.baseUrl);
         } else {
             if (!providerConfig.baseUrl?.trim()) return { error: 'Gateway URL is required' };
             return await testGateway(providerConfig.baseUrl, providerConfig.apiKey);
@@ -410,6 +416,83 @@ function testOpenAI(apiKey) {
     });
 }
 
+/** Test Anthropic API key by sending a minimal request */
+function testAnthropic(apiKey) {
+    return new Promise((resolve) => {
+        const bodyStr = JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 1,
+            messages: [{ role: 'user', content: 'Hi' }],
+        });
+        const req = https.request({
+            hostname: 'api.anthropic.com',
+            path: '/v1/messages',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+                'Content-Length': Buffer.byteLength(bodyStr),
+            },
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    resolve({ success: true, modelCount: 5 });
+                } else if (res.statusCode === 401) {
+                    resolve({ error: 'Authentication failed (401). Check your Anthropic API key.' });
+                } else {
+                    let msg = `HTTP ${res.statusCode}`;
+                    try { msg = JSON.parse(data).error?.message || msg; } catch { }
+                    resolve({ error: msg });
+                }
+            });
+        });
+        req.on('error', (err) => resolve({ error: err.message }));
+        req.write(bodyStr);
+        req.end();
+    });
+}
+
+/** Test Ollama connection by listing available models */
+function testOllama(baseUrl) {
+    const base = (baseUrl || 'http://localhost:11434').replace(/\/$/, '');
+    return new Promise((resolve) => {
+        const url = new URL(`${base}/api/tags`);
+        const mod = url.protocol === 'https:' ? https : http;
+
+        const req = mod.request({
+            hostname: url.hostname,
+            port: url.port || undefined,
+            path: url.pathname,
+            method: 'GET',
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try {
+                        const json = JSON.parse(data);
+                        const models = json.models?.map((m) => m.name) || [];
+                        if (models.length === 0) {
+                            resolve({ error: 'Ollama is running but no models installed. Run: ollama pull llama3.3' });
+                        } else {
+                            resolve({ success: true, models, modelCount: models.length });
+                        }
+                    } catch {
+                        resolve({ success: true, modelCount: 0 });
+                    }
+                } else {
+                    resolve({ error: `HTTP ${res.statusCode} — check Ollama is running` });
+                }
+            });
+        });
+        req.on('error', () => resolve({ error: 'Cannot reach Ollama — is it running? Start with: ollama serve' }));
+        req.end();
+    });
+}
+
 function testGateway(baseUrl, apiKey) {
     const base = baseUrl.replace(/\/$/, '');
     return new Promise((resolve) => {
@@ -454,7 +537,8 @@ function testGateway(baseUrl, apiKey) {
 let currentAIRequest = null;
 
 ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
-    if (!providerConfig?.apiKey) return { error: 'No API key configured' };
+    // Ollama doesn't need an API key; all others do
+    if (!providerConfig?.apiKey && providerConfig?.id !== 'ollama') return { error: 'No API key configured' };
 
     // Abort any in-flight request
     if (currentAIRequest) {
@@ -507,11 +591,14 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
         try { executeHook('SessionStart', { projectDir: projectPath || '' }); } catch { }
     }
 
-    // Route based on token type
+    // Route based on provider and token type
     const reasoningEffort = providerConfig.reasoningEffort || 'medium';
     if (providerConfig.id === 'codex' && isOAuthToken(apiKey)) {
         return streamChatGPTBackend(messages, apiKey, providerConfig.selectedModel, projectPath, reasoningEffort);
+    } else if (providerConfig.id === 'anthropic') {
+        return streamAnthropic(messages, providerConfig, projectPath);
     } else {
+        // OpenAI API keys, gateways, and Ollama (OpenAI-compatible)
         return streamOpenAI(messages, providerConfig, projectPath);
     }
 });
@@ -1317,16 +1404,20 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
         const mod = url.protocol === 'https:' ? https : http;
 
         return new Promise((resolve) => {
+            const reqHeaders = {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyStr),
+            };
+            // Only send Authorization header if there's an API key (Ollama doesn't need one)
+            if (providerConfig.apiKey?.trim()) {
+                reqHeaders['Authorization'] = `Bearer ${providerConfig.apiKey}`;
+            }
             const req = mod.request({
                 hostname: url.hostname,
                 port: url.port || undefined,
                 path: url.pathname + url.search,
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${providerConfig.apiKey}`,
-                    'Content-Length': Buffer.byteLength(bodyStr),
-                },
+                headers: reqHeaders,
             }, (res) => {
                 if (res.statusCode !== 200) {
                     let data = '';
@@ -1424,6 +1515,208 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
 }
 
 /**
+ * Single streaming call to Anthropic Messages API.
+ * Returns { textContent, toolCalls, hasToolCalls, finishReason } or { error }.
+ *
+ * Anthropic SSE format:
+ *   event: content_block_start    → tool_use block with id/name, or text block
+ *   event: content_block_delta    → text_delta or input_json_delta
+ *   event: content_block_stop     → block complete
+ *   event: message_delta          → stop_reason
+ *   event: message_stop           → done
+ */
+function streamAnthropicSingle(messages, providerConfig, includeTools = true) {
+    const model = providerConfig.selectedModel || 'claude-sonnet-4-6';
+    const apiKey = providerConfig.apiKey;
+
+    // Separate system message from conversation messages
+    const systemMsgs = messages.filter(m => m.role === 'system');
+    const systemText = systemMsgs.map(m => m.content).join('\n\n');
+    const convMessages = messages.filter(m => m.role !== 'system').map(m => {
+        // Anthropic format: role must be 'user' or 'assistant'
+        if (m.role === 'tool') {
+            // Convert tool results to user messages with tool_result content block
+            return {
+                role: 'user',
+                content: [{
+                    type: 'tool_result',
+                    tool_use_id: m.tool_call_id,
+                    content: m.content || '',
+                }],
+            };
+        }
+        if (m.role === 'assistant' && m.tool_calls?.length > 0) {
+            // Convert assistant tool_calls to Anthropic tool_use content blocks
+            const contentBlocks = [];
+            if (m.content) {
+                contentBlocks.push({ type: 'text', text: m.content });
+            }
+            for (const tc of m.tool_calls) {
+                let inputObj = {};
+                try { inputObj = JSON.parse(tc.function?.arguments || tc.arguments || '{}'); } catch { }
+                contentBlocks.push({
+                    type: 'tool_use',
+                    id: tc.id,
+                    name: tc.function?.name || tc.name,
+                    input: inputObj,
+                });
+            }
+            return { role: 'assistant', content: contentBlocks };
+        }
+        return { role: m.role, content: m.content };
+    });
+
+    // Build tools in Anthropic format
+    let tools;
+    if (includeTools) {
+        tools = getAllToolDefinitions().map(t => ({
+            name: t.function.name,
+            description: t.function.description,
+            input_schema: t.function.parameters,
+        }));
+    }
+
+    const bodyObj = {
+        model,
+        max_tokens: 16384,
+        stream: true,
+        messages: convMessages,
+    };
+    if (systemText) bodyObj.system = systemText;
+    if (tools?.length > 0) bodyObj.tools = tools;
+
+    // Apply thinking/extended thinking for Anthropic models that support it
+    const reasoningEffort = providerConfig.reasoningEffort || 'medium';
+    if (reasoningEffort === 'high') {
+        bodyObj.thinking = { type: 'enabled', budget_tokens: 10000 };
+        bodyObj.max_tokens = 32768; // Higher limit when thinking is enabled
+    }
+
+    const bodyStr = JSON.stringify(bodyObj);
+
+    try {
+        return new Promise((resolve) => {
+            const req = https.request({
+                hostname: 'api.anthropic.com',
+                path: '/v1/messages',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': apiKey,
+                    'anthropic-version': '2023-06-01',
+                    'Content-Length': Buffer.byteLength(bodyStr),
+                },
+            }, (res) => {
+                if (res.statusCode !== 200) {
+                    let data = '';
+                    res.on('data', (c) => { data += c; });
+                    res.on('end', () => {
+                        currentAIRequest = null;
+                        let errorMsg = `HTTP ${res.statusCode}`;
+                        try { errorMsg = JSON.parse(data).error?.message || errorMsg; } catch { }
+                        if (res.statusCode === 401) errorMsg = 'Authentication failed (401). Check your Anthropic API key.';
+                        if (res.statusCode === 429) errorMsg = 'Rate limited by Anthropic. Wait a moment and try again.';
+                        console.error('[AI] Anthropic API error:', res.statusCode, data.slice(0, 200));
+                        resolve({ error: errorMsg });
+                    });
+                    return;
+                }
+
+                // Accumulators
+                let textContent = '';
+                const toolUseBlocks = {}; // index -> { id, name, input_json }
+                let currentBlockIndex = -1;
+                let finishReason = null;
+                let buffer = '';
+
+                function processLine(line) {
+                    if (!line) return;
+                    // Anthropic SSE: "event: xxx\ndata: {...}"
+                    if (line.startsWith('event: ')) return; // We parse data lines
+                    if (!line.startsWith('data: ')) return;
+                    try {
+                        const json = JSON.parse(line.slice(6));
+                        const type = json.type;
+
+                        if (type === 'content_block_start') {
+                            currentBlockIndex = json.index;
+                            const block = json.content_block;
+                            if (block.type === 'tool_use') {
+                                toolUseBlocks[currentBlockIndex] = {
+                                    id: block.id,
+                                    name: block.name,
+                                    arguments: '',
+                                };
+                            }
+                        } else if (type === 'content_block_delta') {
+                            const delta = json.delta;
+                            if (delta.type === 'text_delta') {
+                                textContent += delta.text;
+                                mainWindow?.webContents.send('ai-stream-chunk', delta.text);
+                            } else if (delta.type === 'input_json_delta') {
+                                if (toolUseBlocks[json.index]) {
+                                    toolUseBlocks[json.index].arguments += delta.partial_json;
+                                }
+                            }
+                        } else if (type === 'message_delta') {
+                            if (json.delta?.stop_reason) {
+                                finishReason = json.delta.stop_reason;
+                            }
+                        }
+                    } catch { }
+                }
+
+                res.on('data', (chunk) => {
+                    buffer += chunk.toString();
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (const line of lines) processLine(line.trim());
+                });
+
+                res.on('end', () => {
+                    if (buffer.trim()) processLine(buffer.trim());
+
+                    // Convert tool_use blocks to the same format as OpenAI toolCalls
+                    const toolCallsArray = Object.values(toolUseBlocks).filter(tc => tc.name).map(tc => ({
+                        id: tc.id,
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    }));
+
+                    // Map Anthropic stop reasons to OpenAI-like finish reasons
+                    let mappedFinish = finishReason;
+                    if (finishReason === 'end_turn') mappedFinish = 'stop';
+                    if (finishReason === 'tool_use') mappedFinish = 'tool_calls';
+                    if (finishReason === 'max_tokens') mappedFinish = 'length';
+
+                    resolve({
+                        textContent,
+                        toolCalls: toolCallsArray,
+                        finishReason: mappedFinish,
+                        hasToolCalls: toolCallsArray.length > 0,
+                    });
+                });
+
+                res.on('error', (err) => {
+                    currentAIRequest = null;
+                    resolve({ error: err.message });
+                });
+            });
+
+            currentAIRequest = req;
+            req.on('error', (err) => {
+                currentAIRequest = null;
+                resolve({ error: err.message });
+            });
+            req.write(bodyStr);
+            req.end();
+        });
+    } catch (err) {
+        return Promise.resolve({ error: err.message || 'Unknown error' });
+    }
+}
+
+/**
  * Wrapper for sub-agent AI calls.
  * Accepts messages, providerConfig, and optional tool overrides.
  * Returns { textContent, toolCalls, hasToolCalls } or { error }.
@@ -1436,8 +1729,111 @@ function makeSubAgentAICall(messages, providerConfig, toolOverrides) {
     if (providerConfig.id === 'codex' && isOAuthToken(providerConfig.apiKey)) {
         return makeSubAgentOAuthCall(messages, providerConfig, toolOverrides);
     }
-    // Standard sk- keys and gateways → Chat Completions API
+    // Anthropic → non-streaming Messages API call
+    if (providerConfig.id === 'anthropic') {
+        return makeSubAgentAnthropicCall(messages, providerConfig, toolOverrides);
+    }
+    // Standard sk- keys, gateways, and Ollama → Chat Completions API
     return makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides);
+}
+
+/**
+ * Sub-agent call via Anthropic Messages API (non-streaming).
+ */
+async function makeSubAgentAnthropicCall(messages, providerConfig, toolOverrides) {
+    const model = providerConfig.selectedModel || 'claude-sonnet-4-6';
+    const apiKey = providerConfig.apiKey;
+
+    // Separate system message
+    const systemMsgs = messages.filter(m => m.role === 'system');
+    const systemText = systemMsgs.map(m => m.content).join('\n\n') || 'You are a specialist AI agent.';
+    const convMessages = messages.filter(m => m.role !== 'system').map(m => {
+        if (m.role === 'tool') {
+            return { role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content || '' }] };
+        }
+        if (m.role === 'assistant' && m.tool_calls?.length > 0) {
+            const blocks = [];
+            if (m.content) blocks.push({ type: 'text', text: m.content });
+            for (const tc of m.tool_calls) {
+                let inputObj = {};
+                try { inputObj = JSON.parse(tc.function?.arguments || tc.arguments || '{}'); } catch { }
+                blocks.push({ type: 'tool_use', id: tc.id, name: tc.function?.name || tc.name, input: inputObj });
+            }
+            return { role: 'assistant', content: blocks };
+        }
+        return { role: m.role, content: m.content };
+    });
+
+    // Build tools
+    let tools;
+    if (toolOverrides?.length > 0) {
+        tools = toolOverrides.map(t => ({
+            name: t.function.name,
+            description: t.function.description,
+            input_schema: t.function.parameters,
+        }));
+    }
+
+    const bodyObj = {
+        model,
+        max_tokens: 16384,
+        messages: convMessages,
+        system: systemText,
+    };
+    if (tools?.length > 0) bodyObj.tools = tools;
+
+    try {
+        const bodyStr = JSON.stringify(bodyObj);
+        return new Promise((resolve) => {
+            const req = https.request({
+                hostname: 'api.anthropic.com',
+                path: '/v1/messages',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': apiKey,
+                    'anthropic-version': '2023-06-01',
+                    'Content-Length': Buffer.byteLength(bodyStr),
+                },
+            }, (res) => {
+                let data = '';
+                res.on('data', (c) => { data += c; });
+                res.on('end', () => {
+                    if (res.statusCode !== 200) {
+                        let errorMsg = `HTTP ${res.statusCode}`;
+                        try { errorMsg = JSON.parse(data).error?.message || errorMsg; } catch { }
+                        resolve({ error: errorMsg });
+                        return;
+                    }
+                    try {
+                        const json = JSON.parse(data);
+                        let textContent = '';
+                        const toolCalls = [];
+                        for (const block of json.content || []) {
+                            if (block.type === 'text') textContent += block.text;
+                            if (block.type === 'tool_use') {
+                                toolCalls.push({
+                                    id: block.id,
+                                    name: block.name,
+                                    arguments: JSON.stringify(block.input || {}),
+                                });
+                            }
+                        }
+                        resolve({ textContent, toolCalls, hasToolCalls: toolCalls.length > 0 });
+                    } catch (parseErr) {
+                        resolve({ error: `Failed to parse Anthropic response: ${parseErr.message}` });
+                    }
+                });
+            });
+            req.on('error', (err) => resolve({ error: err.message }));
+            const timeout = setTimeout(() => { req.destroy(); resolve({ error: 'Anthropic sub-agent call timed out (90s)' }); }, 90000);
+            req.on('close', () => clearTimeout(timeout));
+            req.write(bodyStr);
+            req.end();
+        });
+    } catch (err) {
+        return { error: err.message || 'Unknown error' };
+    }
 }
 
 /**
@@ -1762,7 +2158,16 @@ function compactConversation(messages, maxTokenEstimate = 180000) {
  * inject a continuation prompt to push the model back into tool-calling mode.
  * This prevents the "init_project + task_add then stop" hallucination pattern.
  */
+/** Thin wrapper — Anthropic provider uses the same agentic loop with a different single-call function */
+async function streamAnthropic(messages, providerConfig, projectPath) {
+    return _streamAgenticLoop(messages, providerConfig, projectPath, 'anthropic');
+}
+
 async function streamOpenAI(messages, providerConfig, projectPath) {
+    return _streamAgenticLoop(messages, providerConfig, projectPath, 'openai');
+}
+
+async function _streamAgenticLoop(messages, providerConfig, projectPath, backend = 'openai') {
     const MAX_TOOL_ROUNDS = 75;  // Support long agentic sessions (50 was too low for complex projects)
     const MAX_AUTO_CONTINUES = 15; // Max times we'll push the model to continue (was 5, too low)
     let conversationMessages = [...messages];
@@ -1944,7 +2349,9 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         const TRANSIENT_ERRORS = ['ERR_QUIC_PROTOCOL_ERROR', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_CONNECTION_RESET', 'ERR_NETWORK_CHANGED', 'EPIPE', 'socket hang up', 'network error'];
         const MAX_RETRIES = 2;
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            result = await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
+            result = backend === 'anthropic'
+                ? await streamAnthropicSingle(conversationMessages, providerConfig, includeTools)
+                : await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
             if (!result.error) break;
             const isTransient = TRANSIENT_ERRORS.some(e => result.error.includes(e));
             if (!isTransient || attempt === MAX_RETRIES) break;
@@ -2402,8 +2809,46 @@ ipcMain.handle('archive-completed-tasks', async () => {
  * Uses a lightweight AI call (non-streaming, no tools).
  */
 async function generateSessionTitle(userMessage, providerConfig) {
-    if (!providerConfig?.apiKey && providerConfig?.id !== 'codex') return null;
+    if (!providerConfig?.apiKey && providerConfig?.id !== 'codex' && providerConfig?.id !== 'ollama') return null;
     try {
+        // Anthropic uses a different API format
+        if (providerConfig.id === 'anthropic') {
+            const bodyStr = JSON.stringify({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 20,
+                system: 'Generate a short title (3-6 words, no quotes) for this conversation. Reply with ONLY the title.',
+                messages: [{ role: 'user', content: userMessage.slice(0, 500) }],
+            });
+            return new Promise((resolve) => {
+                const req = https.request({
+                    hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-api-key': providerConfig.apiKey,
+                        'anthropic-version': '2023-06-01',
+                        'Content-Length': Buffer.byteLength(bodyStr),
+                    },
+                }, (res) => {
+                    let data = '';
+                    res.on('data', (c) => { data += c; });
+                    res.on('end', () => {
+                        try {
+                            const json = JSON.parse(data);
+                            const title = json.content?.[0]?.text?.trim();
+                            if (title) { mainWindow?.webContents.send('ai-session-title', title); resolve(title); }
+                            else resolve(null);
+                        } catch { resolve(null); }
+                    });
+                });
+                req.on('error', () => resolve(null));
+                req.on('timeout', () => { req.destroy(); resolve(null); });
+                req.setTimeout(5000);
+                req.write(bodyStr);
+                req.end();
+            });
+        }
+
+        // OpenAI-compatible (Codex, gateways, Ollama)
         const titleMessages = [
             { role: 'system', content: 'Generate a short title (3-6 words, no quotes) for this conversation based on the user message. Reply with ONLY the title, nothing else.' },
             { role: 'user', content: userMessage.slice(0, 500) },
@@ -2425,6 +2870,8 @@ async function generateSessionTitle(userMessage, providerConfig) {
 
         const url = new URL(endpoint);
         const mod = url.protocol === 'https:' ? https : http;
+        const reqHeaders = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) };
+        if (providerConfig.apiKey?.trim()) reqHeaders['Authorization'] = `Bearer ${providerConfig.apiKey}`;
 
         return new Promise((resolve) => {
             const req = mod.request({
@@ -2432,11 +2879,7 @@ async function generateSessionTitle(userMessage, providerConfig) {
                 port: url.port || undefined,
                 path: url.pathname,
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${providerConfig.apiKey}`,
-                    'Content-Length': Buffer.byteLength(bodyStr),
-                },
+                headers: reqHeaders,
             }, (res) => {
                 let data = '';
                 res.on('data', (c) => { data += c; });
@@ -2469,7 +2912,7 @@ async function generateSessionTitle(userMessage, providerConfig) {
  * Runs in background — non-blocking. OpenClaw-style memory building.
  */
 function extractAndSaveMemory(messages, providerConfig) {
-    if (!providerConfig?.apiKey || messages.length < 4) return; // Need enough context
+    if (!providerConfig || messages.length < 4) return; // Need enough context
     try {
         const { appendMemory, readMemory, appendProjectMemory, todayString } = require('./memory');
         const today = todayString();
@@ -2624,6 +3067,12 @@ const DEFAULT_PERMISSIONS = {
     // Code index tools
     semantic_search: 'allow',
     index_codebase: 'allow',
+    // GitHub & Google CLI tools
+    git_create_pr: 'allow',
+    git_list_prs: 'allow',
+    git_publish: 'ask',
+    gh_cli: 'allow',
+    gws_cli: 'allow',
 };
 
 let activePermissions = { ...DEFAULT_PERMISSIONS };
@@ -2729,6 +3178,7 @@ registerCodeIndexIPC(ipcMain);
 registerOrchestratorIPC(ipcMain);
 registerContextEngineIPC(ipcMain);
 registerMCPIPC(ipcMain, () => mainWindow);
+registerKeystoreIPC(ipcMain);
 
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {

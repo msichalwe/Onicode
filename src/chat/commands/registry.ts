@@ -18,6 +18,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
     // ── AI ──
     { name: '/model', description: 'Switch AI model', usage: '/model <name>', category: 'ai' },
+    { name: '/thinklevel', description: 'Set thinking level (low, medium, high)', usage: '/thinklevel <level>', category: 'ai' },
     { name: '/system', description: 'Set custom system prompt', usage: '/system <prompt>', category: 'ai' },
     { name: '/context', description: 'Show current AI context (model, project, history)', usage: '/context', category: 'ai' },
     { name: '/stop', description: 'Stop current AI generation', usage: '/stop', category: 'ai' },

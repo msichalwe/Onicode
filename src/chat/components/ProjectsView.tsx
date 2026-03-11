@@ -56,6 +56,8 @@ function GitTab({ projectPath }: { projectPath: string }) {
     const [mergeBranch, setMergeBranch] = useState('');
     const [showMerge, setShowMerge] = useState(false);
     const [error, setError] = useState('');
+    const [githubConnected, setGithubConnected] = useState(false);
+    const [githubUser, setGithubUser] = useState('');
 
     const refresh = useCallback(async () => {
         if (!isElectron) return;
@@ -64,20 +66,28 @@ function GitTab({ projectPath }: { projectPath: string }) {
             const repoCheck = await window.onicode!.gitIsRepo(projectPath);
             setIsRepo(repoCheck.isRepo);
             if (repoCheck.isRepo) {
-                const status = await window.onicode!.gitStatus(projectPath);
+                const [status, logRes, brRes, stashRes] = await Promise.all([
+                    window.onicode!.gitStatus(projectPath),
+                    window.onicode!.gitLog(projectPath, 30),
+                    window.onicode!.gitBranches(projectPath),
+                    window.onicode!.gitStash(projectPath, 'list'),
+                ]);
                 if (status.success) {
                     setBranch(status.branch || '');
                     setFiles(status.files || []);
                     setAhead(status.ahead || 0);
                     setBehind(status.behind || 0);
                 }
-                const logRes = await window.onicode!.gitLog(projectPath, 30);
                 if (logRes.commits) setCommits(logRes.commits);
-                const brRes = await window.onicode!.gitBranches(projectPath);
                 if (brRes.branches) setBranches(brRes.branches);
-                const stashRes = await window.onicode!.gitStash(projectPath, 'list');
                 if (stashRes.stashes) setStashes(stashRes.stashes);
             }
+            // Check GitHub connection status
+            try {
+                const ghStatus = await window.onicode!.gitGithubStatus();
+                setGithubConnected(ghStatus.connected);
+                setGithubUser(ghStatus.username || '');
+            } catch { /* GitHub methods not available */ }
         } catch (e) { console.error('GitTab refresh error:', e); }
         setLoading(false);
     }, [projectPath]);
@@ -134,13 +144,23 @@ function GitTab({ projectPath }: { projectPath: string }) {
 
     const doPull = async () => {
         setLoading(true);
-        const res = await window.onicode!.gitPull(projectPath);
+        let res;
+        if (githubConnected && window.onicode?.gitPullAuth) {
+            res = await window.onicode.gitPullAuth(projectPath);
+        } else {
+            res = await window.onicode!.gitPull(projectPath);
+        }
         if (res.error) setError(res.error);
         refresh();
     };
     const doPush = async () => {
         setLoading(true);
-        const res = await window.onicode!.gitPush(projectPath);
+        let res;
+        if (githubConnected && window.onicode?.gitPushAuth) {
+            res = await window.onicode.gitPushAuth(projectPath);
+        } else {
+            res = await window.onicode!.gitPush(projectPath);
+        }
         if (res.error) setError(res.error);
         refresh();
     };
@@ -211,6 +231,14 @@ function GitTab({ projectPath }: { projectPath: string }) {
                 <div className="pv-git-error">
                     <span>{error}</span>
                     <button onClick={() => setError('')}>✕</button>
+                </div>
+            )}
+
+            {githubConnected && (
+                <div className="pv-git-github-bar">
+                    <span className="pv-git-github-dot" />
+                    <span className="pv-git-github-user">{githubUser}</span>
+                    <span className="pv-git-github-label">GitHub</span>
                 </div>
             )}
 

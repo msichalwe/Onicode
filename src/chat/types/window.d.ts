@@ -205,7 +205,15 @@ interface OnicodeAPI {
     connectorGithubCancel: () => Promise<{ success: boolean }>;
     connectorGoogleStart: () => Promise<{ success?: boolean; error?: string; authUrl?: string }>;
     connectorGoogleCancel: () => Promise<{ success: boolean }>;
+    connectorGoogleRefresh: () => Promise<{ success?: boolean; error?: string; accessToken?: string }>;
     onConnectorGoogleResult: (callback: (result: { success?: boolean; error?: string; email?: string; name?: string; picture?: string }) => void) => () => void;
+
+    // Key Store
+    keystoreList: () => Promise<{ keys: Array<{ id: string; name: string; provider: string; notes?: string; maskedValue: string; createdAt: number; updatedAt: number }> }>;
+    keystoreStore: (id: string, entry: { name: string; value: string; provider: string; notes?: string }) => Promise<{ success: boolean; key?: { id: string; name: string; provider: string } }>;
+    keystoreGet: (id: string) => Promise<{ found: boolean; key?: { id: string; name: string; provider: string; notes?: string; maskedValue: string; createdAt: number; updatedAt: number } }>;
+    keystoreDelete: (id: string) => Promise<{ success: boolean }>;
+    keystoreStatus: () => Promise<{ encrypted: boolean; algorithm: string; keyDerivation: string; safeStorage: boolean; keyCount: number }>;
 
     // Memory
     memoryLoadCore: (projectId?: string) => Promise<{
@@ -344,10 +352,26 @@ interface OnicodeAPI {
     gitRemoteAdd: (repoPath: string, name: string, url: string) => Promise<{ success?: boolean; error?: string }>;
     gitRemoteRemove: (repoPath: string, name: string) => Promise<{ success?: boolean; error?: string }>;
 
+    // Git GitHub Integration
+    gitClone: (repoUrl: string, targetPath: string) => Promise<{ success?: boolean; error?: string }>;
+    gitPushAuth: (repoPath: string, remote?: string, branch?: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitPullAuth: (repoPath: string, remote?: string, branch?: string) => Promise<{ success?: boolean; output?: string; error?: string }>;
+    gitGithubRepos: (page?: number, perPage?: number, sort?: string) => Promise<{ success?: boolean; repos?: GithubRepo[]; error?: string }>;
+    gitGithubCreatePR: (repoPath: string, title: string, body?: string, head?: string, base?: string) => Promise<{ success?: boolean; pr?: { number: number; url: string; title: string; state: string }; error?: string }>;
+    gitGithubListPRs: (repoPath: string, state?: string) => Promise<{ success?: boolean; prs?: GithubPR[]; error?: string }>;
+    gitGithubPRDetail: (repoPath: string, prNumber: number) => Promise<{ success?: boolean; pr?: GithubPRDetail; comments?: GithubComment[]; reviews?: GithubReview[]; error?: string }>;
+    gitGithubMergePR: (repoPath: string, prNumber: number, mergeMethod?: string) => Promise<{ success?: boolean; sha?: string; message?: string; error?: string }>;
+    gitGithubCreateRepo: (name: string, description?: string, isPrivate?: boolean) => Promise<{ success?: boolean; repo?: { name: string; fullName: string; cloneUrl: string; htmlUrl: string }; error?: string }>;
+    gitGithubStatus: () => Promise<{ connected: boolean; username?: string; avatarUrl?: string; name?: string }>;
+
     // Hooks
-    hooksList: () => Promise<{ hooks: Record<string, HookDefinition[]> }>;
-    hooksSave: (hooks: Record<string, HookDefinition[]>) => Promise<{ success: boolean; error?: string }>;
-    hooksTest: (hookType: string, context: Record<string, unknown>) => Promise<{ allowed: boolean; reason?: string; outputs: string[] }>;
+    hooksList: (projectPath?: string) => Promise<{ hooks: Record<string, HookDefinition[]> }>;
+    hooksSave: (hooks: Record<string, HookDefinition[]>, scope?: string, projectPath?: string) => Promise<{ success: boolean; error?: string }>;
+    hooksTest: (hookType: string, context: Record<string, unknown>, command?: string) => Promise<{ success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string }>;
+    hooksPresets: () => Promise<Array<{ id: string; name: string; description: string; hookTypes: string[] }>>;
+    hooksApplyPreset: (presetId: string, scope?: string, projectPath?: string) => Promise<{ success: boolean; preset?: string; error?: string }>;
+    onHookExecuted: (callback: (data: { hookType: string; allowed: boolean; reason?: string; outputs: string[]; toolName?: string; timestamp: number }) => void) => () => void;
+    onAutoCommit: (callback: (data: { message: string; taskId?: string }) => void) => () => void;
 
     // Custom Commands
     customCommandsList: (projectPath?: string) => Promise<CustomCommand[]>;
@@ -356,15 +380,15 @@ interface OnicodeAPI {
 
     // Context Compaction
     compactMessages: (messages: Array<{ role: string; content: string; toolSteps?: unknown[] }>) => Promise<{ messages: Array<{ role: string; content: string }>; compacted: boolean; summary?: string }>;
-    estimateTokens: (messages: Array<{ role: string; content: string }>) => Promise<{ tokens: number; messageCount: number }>;
+    estimateTokens: (messages: Array<{ role: string; content: string }>) => Promise<{ tokens: number }>;
 
     // Code Intelligence (LSP)
     lspSymbols: (projectPath: string, filePath: string) => Promise<Array<{ name: string; kind: string; line: number; exported: boolean; signature?: string }>>;
     lspDefinition: (projectPath: string, filePath: string, line: number, column: number) => Promise<{ file: string; line: number; column: number; name: string; kind: string; preview: string } | null>;
     lspReferences: (projectPath: string, filePath: string, symbolName: string) => Promise<Array<{ file: string; line: number; column: number; preview: string }>>;
     lspHover: (projectPath: string, filePath: string, line: number, column: number) => Promise<{ type: string; documentation?: string; signature?: string } | null>;
-    lspProjectSymbols: (projectPath: string) => Promise<Record<string, Array<{ name: string; kind: string; line: number; exported: boolean }>>>;
-    lspInvalidate: () => Promise<void>;
+    lspProjectSymbols: (projectPath: string, options?: Record<string, unknown>) => Promise<Record<string, Array<{ name: string; kind: string; line: number; exported: boolean }>>>;
+    lspInvalidate: (projectPath?: string) => Promise<{ success: boolean }>;
 
     // Code Index (Semantic Search)
     codeIndexBuild: (projectPath: string) => Promise<{ files: number; uniqueTokens: number; projectPath: string }>;
@@ -495,6 +519,43 @@ declare global {
         name: string;
         fetchUrl: string;
         pushUrl: string;
+    }
+
+    interface GithubRepo {
+        id: number; name: string; fullName: string;
+        description: string | null; private: boolean;
+        htmlUrl: string; cloneUrl: string;
+        language: string | null; stars: number;
+        forks: number; updatedAt: string;
+        defaultBranch: string;
+    }
+
+    interface GithubPR {
+        number: number; title: string; state: string;
+        url: string; author: string;
+        head: string; base: string;
+        createdAt: string; updatedAt: string;
+        draft: boolean; mergeable: boolean | null;
+        additions: number; deletions: number;
+        labels: string[];
+    }
+
+    interface GithubPRDetail {
+        number: number; title: string; body: string;
+        state: string; url: string; author: string;
+        head: string; base: string;
+        mergeable: boolean | null; merged: boolean;
+        additions: number; deletions: number; changedFiles: number;
+        createdAt: string; updatedAt: string;
+    }
+
+    interface GithubComment {
+        id: number; body: string; author: string; createdAt: string;
+    }
+
+    interface GithubReview {
+        id: number; state: string; body: string;
+        author: string; submittedAt: string;
     }
 
     interface WorkGraphNode {

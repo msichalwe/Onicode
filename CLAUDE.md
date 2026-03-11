@@ -16,7 +16,7 @@ See `docs/PRODUCT_VISION.md` for the full vision, `docs/ROADMAP.md` for mileston
 - **Chat Shell**: React 19 + Vite 6 (TypeScript `.tsx`)
 - **Editor Shell**: VS Code workbench (lazy-loaded, not yet implemented)
 - **Styling**: Single CSS file, CSS custom properties (12 themes: Sand, Midnight, Obsidian, Ocean, Aurora, Monokai, Rosé Pine, Nord, Catppuccin, Default Light, Default Dark, Neutral)
-- **AI Providers**: OpenAI Codex (GPT-5.x, o-series via `sk-` keys or ChatGPT OAuth JWT), OniAI Gateway, OpenClaw Gateway
+- **AI Providers**: OpenAI Codex (GPT-5.x, o-series via `sk-` keys or ChatGPT OAuth JWT), Anthropic Claude (Opus/Sonnet/Haiku via API key), Ollama (local models), OniAI Gateway, OpenClaw Gateway
 - **State**: React useState + `localStorage` (no Redux/Zustand)
 - **IPC**: Electron contextBridge via `window.onicode` (`preload.js`)
 - **Local data**: JSON files (`~/.onicode/projects.json`), `localStorage`, SQLite (`~/.onicode/onicode.db`)
@@ -34,7 +34,7 @@ src/
     preload.js              # contextBridge → window.onicode API
     terminal.js             # Shell session management (spawn, stdin/stdout, exec)
     projects.js             # Project CRUD, onidocs templates, filesystem ops
-    git.js                  # Git operations via IPC (15 handlers, fully wired)
+    git.js                  # Git operations + GitHub API (23 handlers, PRs, auth push/pull, publish)
     aiTools.js              # AI tool definitions (45+ tools), executor, task manager, file context tracker
     orchestrator.js         # Multi-agent orchestration: roles, work graph, file locks, parallel execution
     contextEngine.js        # Fast context engine: dependency graph, file outlines, pre-retrieval, composite tools
@@ -48,6 +48,7 @@ src/
     browser.js              # Puppeteer headless browser integration
     connectors.js           # OAuth connectors (GitHub, Gmail)
     mcp.js                  # MCP client: stdio server management, JSON-RPC 2.0, tool discovery
+    keystore.js             # AES-256-GCM encrypted key vault + OS Keychain
     logger.js               # Structured logging system
 
   chat/                    # Chat Shell (React 19, TypeScript)
@@ -56,9 +57,9 @@ src/
     components/
       ChatView.tsx           # Chat UI, streaming, tool steps, inline diffs, session timer
       Sidebar.tsx            # Left nav (Chat, Projects, Docs, Settings, Memories)
-      SettingsPanel.tsx      # Theme picker, providers, skills, connectors, hooks
+      SettingsPanel.tsx      # Theme picker, providers, skills, connectors, hooks, key vault
       ProviderSettings.tsx   # AI provider config, Codex OAuth PKCE, test connection
-      RightPanel.tsx         # Widget panel: terminal, files, agents, tasks, git, browser
+      RightPanel.tsx         # Widget router (imports from widgets/)
       ProjectsView.tsx       # Project list, detail, file tree, docs, "Open in"
       ProjectModeBar.tsx     # Project mode header bar
       MemoriesView.tsx       # Memory file viewer/editor
@@ -67,6 +68,14 @@ src/
       AttachmentGallery.tsx   # File/attachment gallery across conversations
       QuestionDialog.tsx      # ask_user_question UI (clickable options)
       TodoApp.tsx             # Unified tasks view (SQLite-backed)
+      widgets/               # Extracted right panel widgets
+        TerminalWidget.tsx    # Real shell terminal via IPC
+        FileViewerWidget.tsx  # File tree browser
+        AgentsWidget.tsx      # Agent/orchestration display
+        ProjectWidget.tsx     # Active project info
+        TasksWidget.tsx       # Task list with milestones
+        GitWidget.tsx         # Full git UI
+        AttachmentsWidget.tsx # Project attachment gallery
     utils/
       index.ts                # Shared utilities (isElectron, generateId, stripAnsi)
     commands/
@@ -108,16 +117,18 @@ npm run package      # electron-builder
 - **Editor Shell** (VS Code) loads lazily only when user clicks "Open Editor" (not yet built)
 - Both will share the same AI Engine (not yet built as a separate module)
 
-### AI Provider Flow (Dual-Mode Routing)
+### AI Provider Flow (Multi-Provider Routing)
 
 1. User configures providers in `SettingsPanel > ProviderSettings`
 2. Providers stored in `localStorage` under key `onicode-providers`
 3. `ChatView.getActiveProvider()` reads localStorage to find the first enabled+connected provider
 4. Chat sends messages + provider config to main process via `ai-send-message` IPC
-5. Main process routes based on token type:
-   - **`sk-` API key** → standard OpenAI `/v1/chat/completions` (SSE: `choices[0].delta.content`)
-   - **OAuth JWT token** → ChatGPT backend `/backend-api/codex/responses` (SSE: `response.output_text.delta`)
-   - **Gateway** → `${baseUrl}/v1/chat/completions` with provided key
+5. Main process routes based on provider ID and token type:
+   - **`codex` + `sk-` API key** → OpenAI `/v1/chat/completions` (SSE: `choices[0].delta.content`)
+   - **`codex` + OAuth JWT** → ChatGPT backend `/backend-api/codex/responses` (SSE: `response.output_text.delta`)
+   - **`anthropic`** → Anthropic `/v1/messages` (SSE: `content_block_delta`, `text_delta`/`input_json_delta`)
+   - **`ollama`** → `localhost:11434/v1/chat/completions` (OpenAI-compatible, no auth required)
+   - **Gateways** → `${baseUrl}/v1/chat/completions` with provided key
 6. Streaming chunks sent to renderer via `ai-stream-chunk` events
 7. Completion/error via `ai-stream-done` event
 
@@ -198,7 +209,7 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Codex OAuth PKCE flow (main process HTTP server)
 - [x] 12 themes with animated transitions
 - [x] Sidebar navigation (Chat, Projects, Docs, Agents, Settings)
-- [x] AI provider settings (3 providers, test connection)
+- [x] AI provider settings (5 providers: OpenAI, Anthropic, Ollama, OniAI, OpenClaw)
 - [x] Slash command system (20+ commands, autocomplete, custom commands)
 - [x] AI system prompt builder (context-aware, AGENTS.md, hooks, MCP)
 - [x] Terminal backend (real shell sessions via IPC)
@@ -208,11 +219,11 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] Project init with onidocs templates
 - [x] Project list, detail, file tree, "Open in" editors
 - [x] Documents view (aggregated from all projects)
-- [x] Conversation history (localStorage + SQLite)
+- [x] Conversation history (SQLite primary, localStorage cache)
 - [x] File/URL attachments
 - [x] Right panel (Terminal, Project, Files, Agents, Tasks, Git, Browser)
-- [x] Git integration (15 IPC handlers + 9 AI tools)
-- [x] Git panel (branch, stage, commit, push, pull, branch switching)
+- [x] Git integration (23 IPC handlers + 19 AI tools + GitHub API)
+- [x] Git panel (branch, stage, commit, push/pull with auth, PRs, sync, publish)
 - [x] SQLite persistence (tasks, conversations, sessions)
 - [x] Permission enforcement (tool-level allow/ask/deny)
 - [x] Sub-agent execution (real AI calls, read-only tools)
@@ -239,26 +250,32 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] System prompt caching
 - [x] Semantic compaction (AI-powered conversation summarization)
 - [x] Browser widget (Puppeteer preview with URL navigation + screenshots)
-- [x] 62+ AI tools total (54 base + 3 orchestrator + 5 context engine + MCP dynamic tools)
+- [x] 65+ AI tools total (57 base + 3 orchestrator + 5 context engine + MCP dynamic tools)
 - [x] Cascade-level tools: ask_user_question, sequential_thinking, trajectory_search, find_by_name, read_url_content, view_content_chunk, read_notebook, edit_notebook, deploy tools
 - [x] Post-edit lint feedback (JS/TS/JSON/Python syntax checking in edit_file/create_file results)
 - [x] Real permission approval gates (user approve/deny UI for 'ask' permissions)
 - [x] Cascade-inspired system prompt (intent classification, decision model, tool preference order)
 - [x] Context Engine (dependency graph, file outlines, pre-retrieval pipeline, multi-signal ranking)
 - [x] MCP client (stdio JSON-RPC, tool discovery, dynamic tool injection, Settings UI)
+- [x] API Key Vault (AES-256-GCM, OS Keychain via Electron safeStorage, Settings UI)
+- [x] Connectors (GitHub OAuth device flow, Gmail OAuth PKCE + localhost redirect)
+- [x] **Component refactoring** — RightPanel → 7 widget files under `widgets/`
+- [x] **Deep GitHub integration** — PRs, publish, clone, auth push/pull, repo creation
+- [x] **Model picker** — Click model name in context bar to switch models inline
+- [x] **Thinking level** — /thinklevel command + Anthropic extended thinking support
 
 ## What's Missing
 
-- [ ] **Anthropic provider** — Claude API support
-- [ ] **Ollama provider** — local models
-- [ ] **Connectors** — GitHub OAuth, Gmail OAuth, Slack OAuth (stub implementations exist)
-- [ ] **API Key Store** — AES-256 encrypted vault + OS keychain
+- [x] **Anthropic provider** — Claude API (Opus/Sonnet/Haiku, streaming, tool use, sub-agents)
+- [x] **Ollama provider** — Local models via OpenAI-compatible API
+- [x] **Connectors** — GitHub OAuth (device flow), Gmail OAuth (PKCE + localhost redirect)
+- [x] **API Key Store** — AES-256-GCM encrypted vault + OS Keychain via safeStorage
 - [ ] **IDE state injection** — Active file, cursor position, user edits as diffs (needs Editor Shell)
 - [ ] **Editor Shell** — VS Code workbench (lazy-loaded, Phase 8)
 - [ ] **Knowledge graph memory** — Entity/relation memory via MCP
 - [ ] **Auto-update** — electron-updater for seamless updates
-- [ ] **SQLite conversation migration** — full migration from localStorage
-- [ ] **Component refactoring** — ChatView (3K lines) and RightPanel (2K lines) need splitting
+- [x] **SQLite conversation migration** — SQLite primary, auto-migrate from localStorage
+- [x] **Component refactoring** — RightPanel split into 7 widget files under `widgets/`
 - [ ] **Mobile companion** — React Native app
 
 ## Coding Conventions
@@ -275,9 +292,10 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 
 ## Next Steps
 
-1. **Connectors** — GitHub OAuth, Gmail OAuth (no manual API key generation)
-3. **API Key Store** — AES-256 encrypted vault with OS keychain
-4. **Anthropic provider** — Claude API support
+1. ~~**Connectors** — GitHub OAuth, Gmail OAuth~~ (DONE)
+2. ~~**API Key Store** — AES-256 encrypted vault with OS keychain~~ (DONE)
+3. ~~**Anthropic provider** — Claude API support~~ (DONE)
+4. ~~**Ollama provider** — Local model support~~ (DONE)
 5. ~~**MCP client** — Extensible tool system for external integrations~~ (DONE)
 6. **Editor Shell** — VS Code workbench (lazy-loaded)
 7. **Auto-update** — electron-updater for seamless updates

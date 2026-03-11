@@ -150,19 +150,86 @@ async function githubDeviceFlowPoll(deviceCode, interval = 5) {
 // Uses a localhost HTTP server to capture the redirect.
 // No client secret needed for "installed app" / public client.
 
-const GOOGLE_CLIENT_ID = '292085223830-onicode.apps.googleusercontent.com';
+// Google OAuth Client ID — set via env var or ~/.onicode/google-oauth.json
+// Users must create their own OAuth 2.0 client at https://console.cloud.google.com/apis/credentials
+// Type: "Desktop app", no client secret needed for PKCE flow
+let GOOGLE_CLIENT_ID = process.env.ONICODE_GOOGLE_CLIENT_ID || '';
+try {
+    const googleOAuthPath = path.join(process.env.HOME || process.env.USERPROFILE || '/tmp', '.onicode', 'google-oauth.json');
+    if (!GOOGLE_CLIENT_ID && fs.existsSync(googleOAuthPath)) {
+        const cfg = JSON.parse(fs.readFileSync(googleOAuthPath, 'utf-8'));
+        GOOGLE_CLIENT_ID = cfg.clientId || cfg.client_id || '';
+    }
+} catch {}
+
 const GOOGLE_REDIRECT_PORT = 1456;
 const GOOGLE_REDIRECT_URI = `http://localhost:${GOOGLE_REDIRECT_PORT}/auth/google/callback`;
 const GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/drive.file',
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/documents',
     'https://www.googleapis.com/auth/userinfo.email',
     'https://www.googleapis.com/auth/userinfo.profile',
 ].join(' ');
 
 let googleAuthServer = null;
 
+async function googleRefreshToken() {
+    const connector = getConnector('gmail') || getConnector('google');
+    if (!connector || !connector.refreshToken) return { error: 'No refresh token available' };
+    if (!GOOGLE_CLIENT_ID) return { error: 'Google Client ID not configured' };
+
+    try {
+        const res = await fetchJSON('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: GOOGLE_CLIENT_ID,
+                refresh_token: connector.refreshToken,
+                grant_type: 'refresh_token',
+            }).toString(),
+        });
+
+        if (res.access_token) {
+            const connectorId = getConnector('gmail') ? 'gmail' : 'google';
+            setConnector(connectorId, {
+                ...connector,
+                accessToken: res.access_token,
+                expiresAt: Date.now() + (res.expires_in || 3600) * 1000,
+            });
+            return { success: true, accessToken: res.access_token };
+        }
+        return { error: res.error_description || res.error || 'Refresh failed' };
+    } catch (err) {
+        return { error: `Token refresh failed: ${err.message}` };
+    }
+}
+
+// Get a valid Google access token, refreshing if expired
+async function getValidGoogleToken() {
+    const connector = getConnector('gmail') || getConnector('google');
+    if (!connector || !connector.accessToken) return null;
+
+    // Check if token is expired (with 5min buffer)
+    if (connector.expiresAt && Date.now() > connector.expiresAt - 300000) {
+        const refreshResult = await googleRefreshToken();
+        if (refreshResult.success) return refreshResult.accessToken;
+        return null; // expired and can't refresh
+    }
+    return connector.accessToken;
+}
+
 function googleOAuthStart() {
+    if (!GOOGLE_CLIENT_ID) {
+        return {
+            error: 'Google Client ID not configured. Create an OAuth 2.0 client at https://console.cloud.google.com/apis/credentials (Desktop app type) and either set ONICODE_GOOGLE_CLIENT_ID env var or create ~/.onicode/google-oauth.json with { "clientId": "your-id" }',
+        };
+    }
     // PKCE
     const verifier = crypto.randomBytes(32).toString('base64url');
     const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
@@ -364,6 +431,11 @@ function registerConnectorIPC(ipcMain, getWindow) {
             refreshToken: undefined,
         };
     });
+
+    // Refresh Google token
+    ipcMain.handle('connector-google-refresh', async () => {
+        return googleRefreshToken();
+    });
 }
 
-module.exports = { registerConnectorIPC };
+module.exports = { registerConnectorIPC, getValidGoogleToken, getConnector };

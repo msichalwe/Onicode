@@ -71,6 +71,9 @@ export default function SettingsPanel() {
     const [newHookType, setNewHookType] = useState('PreToolUse');
     const [newHookCmd, setNewHookCmd] = useState('');
     const [newHookMatcher, setNewHookMatcher] = useState('');
+    const [hookPresets, setHookPresets] = useState<Array<{ id: string; name: string; description: string; hookTypes: string[] }>>([]);
+    const [hookTestResult, setHookTestResult] = useState<{ success: boolean; stdout?: string; stderr?: string; exitCode?: number } | null>(null);
+    const [testingHook, setTestingHook] = useState<string | null>(null);
     const [panelMode, setPanelMode] = useState(() => localStorage.getItem('onicode-panel-mode') || 'always');
     const [permissionMode, setPermissionMode] = useState(() => localStorage.getItem('onicode-permission-mode') || 'auto-allow');
     const [autoCommit, setAutoCommit] = useState(() => localStorage.getItem('onicode-auto-commit') !== 'false');
@@ -84,6 +87,43 @@ export default function SettingsPanel() {
     const [mcpArgs, setMcpArgs] = useState('');
     const [mcpEnv, setMcpEnv] = useState('');
     const [mcpLoading, setMcpLoading] = useState<Set<string>>(new Set());
+
+    // ── Key Store State ──
+    interface VaultKey { id: string; name: string; provider: string; notes?: string; maskedValue: string; createdAt: number; updatedAt: number }
+    const [vaultKeys, setVaultKeys] = useState<VaultKey[]>([]);
+    const [vaultStatus, setVaultStatus] = useState<{ safeStorage: boolean; keyCount: number } | null>(null);
+    const [showAddKey, setShowAddKey] = useState(false);
+    const [newKeyName, setNewKeyName] = useState('');
+    const [newKeyValue, setNewKeyValue] = useState('');
+    const [newKeyProvider, setNewKeyProvider] = useState('openai');
+    const [newKeyNotes, setNewKeyNotes] = useState('');
+
+    const loadVault = useCallback(async () => {
+        if (!isElectron || !window.onicode?.keystoreList) return;
+        const [keysRes, statusRes] = await Promise.all([
+            window.onicode.keystoreList(),
+            window.onicode.keystoreStatus(),
+        ]);
+        setVaultKeys(keysRes.keys || []);
+        setVaultStatus(statusRes);
+    }, []);
+
+    useEffect(() => { loadVault(); }, [loadVault]);
+
+    const addVaultKey = useCallback(async () => {
+        if (!isElectron || !newKeyName.trim() || !newKeyValue.trim()) return;
+        const id = newKeyName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
+        await window.onicode!.keystoreStore(id, { name: newKeyName, value: newKeyValue, provider: newKeyProvider, notes: newKeyNotes || undefined });
+        setNewKeyName(''); setNewKeyValue(''); setNewKeyNotes('');
+        setShowAddKey(false);
+        loadVault();
+    }, [newKeyName, newKeyValue, newKeyProvider, newKeyNotes, loadVault]);
+
+    const deleteVaultKey = useCallback(async (id: string) => {
+        if (!isElectron) return;
+        await window.onicode!.keystoreDelete(id);
+        loadVault();
+    }, [loadVault]);
 
     const loadConnectors = useCallback(async () => {
         if (!isElectron) return;
@@ -107,6 +147,10 @@ export default function SettingsPanel() {
             const cmds = await window.onicode!.customCommandsList();
             setCustomCommands(cmds);
         } catch { /* commands module may not be ready */ }
+        try {
+            const presets = await window.onicode!.hooksPresets();
+            setHookPresets(presets || []);
+        } catch { /* presets not available */ }
     }, []);
 
     useEffect(() => { loadHooksAndCommands(); }, [loadHooksAndCommands]);
@@ -188,6 +232,27 @@ export default function SettingsPanel() {
         setHooks(updated);
         if (isElectron) await window.onicode!.hooksSave(updated);
     }, [hooks]);
+
+    const applyPreset = useCallback(async (presetId: string) => {
+        if (!isElectron) return;
+        const res = await window.onicode!.hooksApplyPreset(presetId);
+        if (res.success) {
+            loadHooksAndCommands();
+        }
+    }, [loadHooksAndCommands]);
+
+    const testHook = useCallback(async (command: string, hookType: string) => {
+        if (!isElectron) return;
+        setTestingHook(command);
+        setHookTestResult(null);
+        try {
+            const res = await window.onicode!.hooksTest(hookType, {}, command);
+            setHookTestResult(res as unknown as { success: boolean; stdout?: string; stderr?: string; exitCode?: number });
+        } catch (err: unknown) {
+            setHookTestResult({ success: false, stderr: (err as Error).message, exitCode: 1 });
+        }
+        setTestingHook(null);
+    }, []);
 
     // ── GitHub Device Flow ──
     const connectGithub = useCallback(async () => {
@@ -535,23 +600,79 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="settings-section">
-                        <h3>API Key Store</h3>
-                        <div className="provider-list">
-                            <div className="provider-item" style={{ cursor: 'pointer' }}>
-                                <div className="provider-icon">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
-                                    </svg>
-                                </div>
-                                <div className="provider-info">
-                                    <div className="provider-name">Global Key Vault</div>
-                                    <div className="provider-status">0 keys stored — click to manage</div>
-                                </div>
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-tertiary)' }}>
-                                    <polyline points="9 18 15 12 9 6" />
-                                </svg>
+                        <h3>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6, verticalAlign: -2 }}>
+                                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+                            </svg>
+                            API Key Vault
+                            {vaultStatus && (
+                                <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', fontWeight: 400, marginLeft: 8 }}>
+                                    AES-256-GCM {vaultStatus.safeStorage ? '+ OS Keychain' : '(machine key)'}
+                                </span>
+                            )}
+                        </h3>
+
+                        {vaultKeys.length === 0 && !showAddKey ? (
+                            <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+                                <div style={{ marginBottom: 8 }}>No keys stored yet</div>
+                                <button className="connector-btn connect" onClick={() => setShowAddKey(true)}>Add Key</button>
                             </div>
-                        </div>
+                        ) : (
+                            <>
+                                {vaultKeys.map(key => (
+                                    <div key={key.id} className="connector-item" style={{ padding: '8px 10px' }}>
+                                        <div className="connector-icon" style={{ fontSize: '9px', width: 28, height: 28, borderRadius: 6, background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', flexShrink: 0 }}>
+                                            {key.provider.slice(0, 2).toUpperCase()}
+                                        </div>
+                                        <div className="connector-info" style={{ flex: 1, minWidth: 0 }}>
+                                            <div className="connector-name" style={{ fontSize: '12px' }}>{key.name}</div>
+                                            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                <code style={{ fontSize: '10px', letterSpacing: 1 }}>{key.maskedValue}</code>
+                                                <span>{key.provider}</span>
+                                                {key.notes && <span style={{ opacity: 0.6 }}>{key.notes}</span>}
+                                            </div>
+                                        </div>
+                                        <button className="connector-btn disconnect" style={{ fontSize: '10px', padding: '3px 8px' }} onClick={() => deleteVaultKey(key.id)}>Remove</button>
+                                    </div>
+                                ))}
+                                {!showAddKey && (
+                                    <button className="connector-btn connect" style={{ marginTop: 8, fontSize: '11px' }} onClick={() => setShowAddKey(true)}>Add Key</button>
+                                )}
+                            </>
+                        )}
+
+                        {showAddKey && (
+                            <div style={{ marginTop: 8, padding: '10px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                    <input
+                                        type="text" placeholder="Key name (e.g. OpenAI Production)" value={newKeyName}
+                                        onChange={e => setNewKeyName(e.target.value)}
+                                        style={{ flex: 1, padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 11, outline: 'none' }}
+                                    />
+                                    <select value={newKeyProvider} onChange={e => setNewKeyProvider(e.target.value)} style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 11 }}>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="anthropic">Anthropic</option>
+                                        <option value="ollama">Ollama</option>
+                                        <option value="github">GitHub</option>
+                                        <option value="other">Other</option>
+                                    </select>
+                                </div>
+                                <input
+                                    type="password" placeholder="API key or secret" value={newKeyValue}
+                                    onChange={e => setNewKeyValue(e.target.value)}
+                                    style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono, monospace' }}
+                                />
+                                <input
+                                    type="text" placeholder="Notes (optional)" value={newKeyNotes}
+                                    onChange={e => setNewKeyNotes(e.target.value)}
+                                    style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 11, outline: 'none' }}
+                                />
+                                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                                    <button className="connector-btn" style={{ fontSize: '10px', padding: '4px 10px' }} onClick={() => { setShowAddKey(false); setNewKeyName(''); setNewKeyValue(''); setNewKeyNotes(''); }}>Cancel</button>
+                                    <button className="connector-btn connect" style={{ fontSize: '10px', padding: '4px 10px' }} onClick={addVaultKey} disabled={!newKeyName.trim() || !newKeyValue.trim()}>Save Key</button>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
@@ -621,6 +742,18 @@ export default function SettingsPanel() {
                                                     {hook.matcher && <span className="hook-matcher">/{hook.matcher}/</span>}
                                                 </div>
                                                 <code className="hook-command">{hook.command}</code>
+                                                <button
+                                                    className="hook-test-btn"
+                                                    onClick={() => testHook(hook.command, hookType.type)}
+                                                    disabled={testingHook === hook.command}
+                                                    title="Test this hook"
+                                                >
+                                                    {testingHook === hook.command ? '...' : (
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                            <polygon points="5 3 19 12 5 21 5 3" />
+                                                        </svg>
+                                                    )}
+                                                </button>
                                                 <button className="hook-remove" onClick={() => removeHook(hookType.type, idx)} title="Remove">
                                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                                         <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -636,7 +769,27 @@ export default function SettingsPanel() {
                         {totalHooks === 0 && (
                             <div className="hook-empty">
                                 <p>No hooks configured yet</p>
-                                <span>Add hooks below to automate linting, testing, formatting, and safety checks during AI tool execution.</span>
+                                <span>Add hooks below or apply a preset to get started quickly.</span>
+                            </div>
+                        )}
+
+                        {/* Quick Presets */}
+                        {hookPresets.length > 0 && (
+                            <div className="hook-presets">
+                                <div className="hook-presets-label">Quick Presets</div>
+                                <div className="hook-presets-grid">
+                                    {hookPresets.map(preset => (
+                                        <button
+                                            key={preset.id}
+                                            className="hook-preset-btn"
+                                            onClick={() => applyPreset(preset.id)}
+                                            title={preset.description}
+                                        >
+                                            <span className="hook-preset-name">{preset.name}</span>
+                                            <span className="hook-preset-types">{preset.hookTypes.join(', ')}</span>
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
                         )}
 
@@ -708,6 +861,17 @@ export default function SettingsPanel() {
                                 </div>
                             </div>
                         </details>
+
+                        {hookTestResult && (
+                            <div className={`hook-test-result ${hookTestResult.success ? 'hook-test-pass' : 'hook-test-fail'}`}>
+                                <div className="hook-test-header">
+                                    <span>{hookTestResult.success ? 'PASS' : 'FAIL'} (exit {hookTestResult.exitCode ?? 0})</span>
+                                    <button className="hook-test-dismiss" onClick={() => setHookTestResult(null)}>dismiss</button>
+                                </div>
+                                {hookTestResult.stdout && <pre className="hook-test-output">{hookTestResult.stdout}</pre>}
+                                {hookTestResult.stderr && <pre className="hook-test-output hook-test-stderr">{hookTestResult.stderr}</pre>}
+                            </div>
+                        )}
 
                         <div className="hook-env-info">
                             <span className="hook-env-label">Available env vars:</span>

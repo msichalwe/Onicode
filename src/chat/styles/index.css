@@ -1966,6 +1966,140 @@ body {
   font-size: 9px;
 }
 
+/* ── Hook Presets ── */
+.hook-presets {
+  margin: 8px 0 12px;
+  padding: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+}
+
+.hook-presets-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.hook-presets-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.hook-preset-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.hook-preset-btn:hover {
+  border-color: var(--accent);
+  background: var(--bg-tertiary);
+}
+
+.hook-preset-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.hook-preset-types {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  font-family: var(--font-code);
+}
+
+/* ── Hook Test Button ── */
+.hook-test-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.hook-test-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.hook-test-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Hook Test Result ── */
+.hook-test-result {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+
+.hook-test-pass {
+  background: rgba(40, 167, 69, 0.1);
+  border: 1px solid rgba(40, 167, 69, 0.3);
+}
+
+.hook-test-fail {
+  background: rgba(220, 53, 69, 0.1);
+  border: 1px solid rgba(220, 53, 69, 0.3);
+}
+
+.hook-test-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.hook-test-pass .hook-test-header { color: #28a745; }
+.hook-test-fail .hook-test-header { color: #dc3545; }
+
+.hook-test-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+.hook-test-dismiss:hover { color: var(--text-primary); }
+
+.hook-test-output {
+  font-family: var(--font-code);
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 100px;
+  overflow-y: auto;
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+}
+
+.hook-test-stderr { color: #dc3545; }
+
 /* ── Custom Commands UI ── */
 .commands-list {
   display: flex;
@@ -2076,6 +2210,11 @@ body {
 }
 
 /* ── MCP External Server Styles ── */
+
+.mcp-server-item.mcp-server-builtin {
+  opacity: 0.85;
+  border-style: dashed;
+}
 
 .mcp-server-item.mcp-server-external {
   flex-wrap: wrap;
@@ -4781,6 +4920,37 @@ body {
   opacity: 1;
 }
 
+.pv-git-github-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(40, 167, 69, 0.08);
+  border: 1px solid rgba(40, 167, 69, 0.2);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.pv-git-github-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #28a745;
+  flex-shrink: 0;
+}
+
+.pv-git-github-user {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.pv-git-github-label {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  margin-left: auto;
+}
+
 .pv-git-header {
   display: flex;
   align-items: center;
@@ -6020,10 +6190,38 @@ body {
   color: var(--error);
 }
 
+.tool-step-terminal-text {
+  padding: 6px 10px;
+  color: var(--text-primary);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 .tool-step-diff-block {
   padding: 4px 0;
   max-height: 300px;
   overflow-y: auto;
+}
+
+.tool-step-diff-block.added {
+  border-left: 3px solid var(--success);
+}
+
+.tool-step-diff-block.removed {
+  border-left: 3px solid var(--error);
+}
+
+.diff-hunk {
+  padding: 2px 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: italic;
+  border-top: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light);
 }
 
 .diff-line {
@@ -9257,6 +9455,39 @@ body {
   font-family: var(--font-mono);
   color: var(--success);
   font-weight: 600;
+}
+
+.agent-tool-count {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  padding: 1px 5px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-full);
+  font-weight: 500;
+}
+
+.agent-tools-list {
+  padding: 4px 8px 4px 24px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ── Git PRs Section (widget) ── */
+.git-prs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── Attachments Widget ── */
+.widget-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
 }
 
 /* ══════════════════════════════════════════

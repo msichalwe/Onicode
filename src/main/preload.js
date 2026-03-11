@@ -172,11 +172,19 @@ contextBridge.exposeInMainWorld('onicode', {
     connectorGithubCancel: () => ipcRenderer.invoke('connector-github-cancel'),
     connectorGoogleStart: () => ipcRenderer.invoke('connector-google-start'),
     connectorGoogleCancel: () => ipcRenderer.invoke('connector-google-cancel'),
+    connectorGoogleRefresh: () => ipcRenderer.invoke('connector-google-refresh'),
     onConnectorGoogleResult: (callback) => {
         const handler = (_event, result) => callback(result);
         ipcRenderer.on('connector-google-result', handler);
         return () => ipcRenderer.removeListener('connector-google-result', handler);
     },
+
+    // ── Key Store ──
+    keystoreList: () => ipcRenderer.invoke('keystore-list'),
+    keystoreStore: (id, entry) => ipcRenderer.invoke('keystore-store', id, entry),
+    keystoreGet: (id) => ipcRenderer.invoke('keystore-get', id),
+    keystoreDelete: (id) => ipcRenderer.invoke('keystore-delete', id),
+    keystoreStatus: () => ipcRenderer.invoke('keystore-status'),
 
     // ── Memory ──
     memoryLoadCore: (projectId) => ipcRenderer.invoke('memory-load-core', projectId),
@@ -301,32 +309,51 @@ contextBridge.exposeInMainWorld('onicode', {
     gitRemoteAdd: (repoPath, name, url) => ipcRenderer.invoke('git-remote-add', repoPath, name, url),
     gitRemoteRemove: (repoPath, name) => ipcRenderer.invoke('git-remote-remove', repoPath, name),
 
+    // ── Git GitHub Integration ──
+    gitClone: (repoUrl, targetPath) => ipcRenderer.invoke('git-clone', repoUrl, targetPath),
+    gitPushAuth: (repoPath, remote, branch) => ipcRenderer.invoke('git-push-auth', repoPath, remote, branch),
+    gitPullAuth: (repoPath, remote, branch) => ipcRenderer.invoke('git-pull-auth', repoPath, remote, branch),
+    gitGithubRepos: (page, perPage, sort) => ipcRenderer.invoke('git-github-repos', page, perPage, sort),
+    gitGithubCreatePR: (repoPath, title, body, head, base) => ipcRenderer.invoke('git-github-create-pr', repoPath, title, body, head, base),
+    gitGithubListPRs: (repoPath, state) => ipcRenderer.invoke('git-github-list-prs', repoPath, state),
+    gitGithubPRDetail: (repoPath, prNumber) => ipcRenderer.invoke('git-github-pr-detail', repoPath, prNumber),
+    gitGithubMergePR: (repoPath, prNumber, mergeMethod) => ipcRenderer.invoke('git-github-merge-pr', repoPath, prNumber, mergeMethod),
+    gitGithubCreateRepo: (name, description, isPrivate) => ipcRenderer.invoke('git-github-create-repo', name, description, isPrivate),
+    gitGithubStatus: () => ipcRenderer.invoke('git-github-status'),
+
     // ── Hooks ──
     hooksList: (projectPath) => ipcRenderer.invoke('hooks-list', projectPath),
     hooksSave: (hooks, scope, projectPath) => ipcRenderer.invoke('hooks-save', hooks, scope, projectPath),
-    hooksTest: (hookType, context) => ipcRenderer.invoke('hooks-test', { hookType, context }),
+    hooksTest: (hookType, context, command) => ipcRenderer.invoke('hooks-test', { hookType, context, command }),
+    hooksPresets: () => ipcRenderer.invoke('hooks-presets'),
+    hooksApplyPreset: (presetId, scope, projectPath) => ipcRenderer.invoke('hooks-apply-preset', presetId, scope, projectPath),
     onHookExecuted: (callback) => {
         const handler = (_event, data) => callback(data);
         ipcRenderer.on('hook-executed', handler);
         return () => ipcRenderer.removeListener('hook-executed', handler);
     },
+    onAutoCommit: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-auto-commit', handler);
+        return () => ipcRenderer.removeListener('ai-auto-commit', handler);
+    },
 
     // ── Custom Commands ──
     customCommandsList: (projectPath) => ipcRenderer.invoke('custom-commands-list', projectPath),
-    customCommandsCreate: (name, content, scope, projectPath) => ipcRenderer.invoke('custom-commands-create', name, content, scope, projectPath),
-    customCommandsDelete: (name, scope, projectPath) => ipcRenderer.invoke('custom-commands-delete', name, scope, projectPath),
+    customCommandsCreate: (name, content, scope, projectPath) => ipcRenderer.invoke('custom-commands-create', { name, content, scope, projectPath }),
+    customCommandsDelete: (name, scope, projectPath) => ipcRenderer.invoke('custom-commands-delete', { name, scope, projectPath }),
 
     // ── Context Compaction ──
     compactMessages: (messages) => ipcRenderer.invoke('compact-messages', messages),
     estimateTokens: (messages) => ipcRenderer.invoke('estimate-tokens', messages),
 
     // ── Code Intelligence (LSP) ──
-    lspSymbols: (projectPath, filePath) => ipcRenderer.invoke('lsp-symbols', projectPath, filePath),
-    lspDefinition: (projectPath, filePath, line, column) => ipcRenderer.invoke('lsp-definition', projectPath, filePath, line, column),
-    lspReferences: (projectPath, filePath, symbolName) => ipcRenderer.invoke('lsp-references', projectPath, filePath, symbolName),
-    lspHover: (projectPath, filePath, line, column) => ipcRenderer.invoke('lsp-hover', projectPath, filePath, line, column),
-    lspProjectSymbols: (projectPath) => ipcRenderer.invoke('lsp-project-symbols', projectPath),
-    lspInvalidate: () => ipcRenderer.invoke('lsp-invalidate'),
+    lspSymbols: (projectPath, filePath) => ipcRenderer.invoke('lsp-symbols', { projectPath, filePath }),
+    lspDefinition: (projectPath, filePath, line, column) => ipcRenderer.invoke('lsp-definition', { projectPath, filePath, line, column }),
+    lspReferences: (projectPath, filePath, symbolName) => ipcRenderer.invoke('lsp-references', { projectPath, filePath, symbolName }),
+    lspHover: (projectPath, filePath, line, column) => ipcRenderer.invoke('lsp-hover', { projectPath, filePath, line, column }),
+    lspProjectSymbols: (projectPath, options) => ipcRenderer.invoke('lsp-project-symbols', { projectPath, options }),
+    lspInvalidate: (projectPath) => ipcRenderer.invoke('lsp-invalidate', { projectPath }),
 
     // ── Code Index (Semantic Search) ──
     codeIndexBuild: (projectPath) => ipcRenderer.invoke('code-index-build', projectPath),

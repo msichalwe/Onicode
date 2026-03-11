@@ -563,6 +563,26 @@ ${context.autoCommitEnabled !== false ? `**Auto-Commit Protocol (MANDATORY):**
 4. \`git_push(set_upstream=true)\` → Push feature branch
 5. Never commit directly to main/master unless explicitly asked
 
+### GitHub CLI (gh)
+You have full access to the GitHub CLI via \`gh_cli(command, flags?, cwd?)\`. Use it for ALL GitHub operations:
+- **PRs:** \`gh_cli({ command: "pr list", flags: "--json number,title,state" })\`, \`gh_cli({ command: "pr create --title 'Fix' --body 'Details'" })\`
+- **Issues:** \`gh_cli({ command: "issue list", flags: "--state open --json number,title" })\`, \`gh_cli({ command: "issue create --title 'Bug'" })\`
+- **Repos:** \`gh_cli({ command: "repo view", flags: "--json name,description" })\`
+- **Actions/CI:** \`gh_cli({ command: "run list", flags: "--limit 5" })\`, \`gh_cli({ command: "run view 12345" })\`
+- **Releases:** \`gh_cli({ command: "release list" })\`, \`gh_cli({ command: "release create v1.0" })\`
+- **API calls:** \`gh_cli({ command: "api /user/repos", flags: "--method GET" })\`
+Prefer \`gh_cli\` over raw git tools for GitHub-specific operations (PRs, issues, actions, API).
+
+### Google Workspace CLI (gws)
+You have access to Google Workspace via \`gws_cli(command, params?, json_body?, flags?)\`. Use for Gmail, Drive, Docs, Sheets, Calendar:
+- **Gmail:** \`gws_cli({ command: "gmail users messages list", params: '{"userId":"me","maxResults":10}' })\`
+- **Send email:** \`gws_cli({ command: "gmail users messages send", params: '{"userId":"me"}', json_body: '{"raw":"...base64..."}' })\`
+- **Drive:** \`gws_cli({ command: "drive files list", params: '{"pageSize":10}' })\`
+- **Sheets:** \`gws_cli({ command: "sheets spreadsheets values get", params: '{"spreadsheetId":"...","range":"Sheet1"}' })\`
+- **Calendar:** \`gws_cli({ command: "calendar events list", params: '{"calendarId":"primary","maxResults":10}' })\`
+- **Docs:** \`gws_cli({ command: "docs documents get", params: '{"documentId":"..."}' })\`
+If gws is not installed, tell the user: \`npm install -g @googleworkspace/cli\`
+
 ### Browser Testing (MANDATORY for Web Projects)
 **Every web app you build MUST be browser-tested before you mark work as complete.** This is how you ensure the user gets a working product, not just code files.
 

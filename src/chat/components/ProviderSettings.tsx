@@ -30,6 +30,14 @@ const CODEX_MODELS = [
     'o3-pro',
 ];
 
+const ANTHROPIC_MODELS = [
+    'claude-opus-4-6',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-4-5-20250514',
+    'claude-3-5-haiku-20241022',
+];
+
 const DEFAULT_PROVIDERS: ProviderConfig[] = [
     {
         id: 'codex',
@@ -68,6 +76,31 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
         apiKey: '',
         selectedModel: 'default',
         models: ['default'],
+    },
+    {
+        id: 'anthropic',
+        name: 'Anthropic Claude',
+        initials: 'Cl',
+        description: 'Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 — Anthropic API key',
+        enabled: false,
+        connected: false,
+        authType: 'api-key',
+        apiKey: '',
+        selectedModel: 'claude-sonnet-4-6',
+        models: ANTHROPIC_MODELS,
+    },
+    {
+        id: 'ollama',
+        name: 'Ollama (Local)',
+        initials: 'OL',
+        description: 'Run models locally via Ollama — no API key needed',
+        enabled: false,
+        connected: false,
+        authType: 'url-key',
+        baseUrl: 'http://localhost:11434',
+        apiKey: '',
+        selectedModel: '',
+        models: [],
     },
 ];
 
@@ -411,6 +444,92 @@ export default function ProviderSettings() {
                             });
                         }
                     }
+                } else if (provider.id === 'anthropic') {
+                    // Anthropic API test
+                    if (!provider.apiKey?.trim()) {
+                        updateProvider(provider.id, { testStatus: 'error', testMessage: 'Anthropic API key is required' });
+                        return;
+                    }
+                    try {
+                        const testRes = await fetch('https://api.anthropic.com/v1/messages', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'x-api-key': provider.apiKey,
+                                'anthropic-version': '2023-06-01',
+                                'anthropic-dangerous-direct-browser-access': 'true',
+                            },
+                            body: JSON.stringify({
+                                model: provider.selectedModel || 'claude-sonnet-4-6',
+                                max_tokens: 1,
+                                messages: [{ role: 'user', content: 'Hi' }],
+                            }),
+                        });
+                        if (testRes.ok || testRes.status === 200) {
+                            updateProvider(provider.id, {
+                                testStatus: 'success',
+                                testMessage: 'Connected — Anthropic API key verified',
+                                connected: true, enabled: true,
+                            });
+                        } else if (testRes.status === 401) {
+                            updateProvider(provider.id, {
+                                testStatus: 'error',
+                                testMessage: 'Authentication failed (401). Check your API key.',
+                                connected: false,
+                            });
+                        } else {
+                            const errBody = await testRes.json().catch(() => ({}));
+                            updateProvider(provider.id, {
+                                testStatus: 'error',
+                                testMessage: errBody.error?.message || `HTTP ${testRes.status}`,
+                                connected: false,
+                            });
+                        }
+                    } catch (err) {
+                        // CORS may block browser requests to Anthropic — suggest using Electron
+                        updateProvider(provider.id, {
+                            testStatus: 'error',
+                            testMessage: err instanceof Error ? `${err.message} — CORS may block this in browser. Run with Electron.` : 'Connection failed',
+                            connected: false,
+                        });
+                    }
+                } else if (provider.id === 'ollama') {
+                    // Ollama uses OpenAI-compatible API — test by listing models
+                    const base = (provider.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
+                    try {
+                        const res = await fetch(`${base}/api/tags`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const models = data.models?.map((m: { name: string }) => m.name) || [];
+                            if (models.length === 0) {
+                                updateProvider(provider.id, {
+                                    testStatus: 'error',
+                                    testMessage: 'Ollama is running but no models installed. Run: ollama pull llama3.3',
+                                    connected: false,
+                                });
+                            } else {
+                                updateProvider(provider.id, {
+                                    testStatus: 'success',
+                                    testMessage: `Connected — ${models.length} model${models.length !== 1 ? 's' : ''} available`,
+                                    connected: true, enabled: true,
+                                    models,
+                                    selectedModel: provider.selectedModel && models.includes(provider.selectedModel) ? provider.selectedModel : models[0],
+                                });
+                            }
+                        } else {
+                            updateProvider(provider.id, {
+                                testStatus: 'error',
+                                testMessage: `HTTP ${res.status} — check Ollama is running`,
+                                connected: false,
+                            });
+                        }
+                    } catch {
+                        updateProvider(provider.id, {
+                            testStatus: 'error',
+                            testMessage: 'Cannot reach Ollama — is it running? Start with: ollama serve',
+                            connected: false,
+                        });
+                    }
                 } else {
                     // Gateway test
                     if (!provider.baseUrl?.trim()) {
@@ -492,32 +611,58 @@ export default function ProviderSettings() {
                             <div className="field-group">
                                 {provider.authType === 'url-key' && (
                                     <>
-                                        <label className="field-label">Gateway URL</label>
+                                        <label className="field-label">
+                                            {provider.id === 'ollama' ? 'Ollama URL' : 'Gateway URL'}
+                                        </label>
                                         <input
                                             className="field-input" type="url"
-                                            placeholder={provider.id === 'onigateway' ? 'https://your-oni-gateway.com' : 'https://gateway.openclaw.io'}
+                                            placeholder={
+                                                provider.id === 'ollama' ? 'http://localhost:11434' :
+                                                provider.id === 'onigateway' ? 'https://your-oni-gateway.com' : 'https://gateway.openclaw.io'
+                                            }
                                             value={provider.baseUrl || ''}
                                             onChange={(e) => updateProvider(provider.id, { baseUrl: e.target.value })}
                                             spellCheck={false}
                                         />
                                     </>
                                 )}
-                                <label className="field-label">
-                                    {provider.id === 'codex' ? 'OpenAI API Key' : 'API Key'}
-                                    {provider.id === 'codex' && (
-                                        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
-                                    )}
-                                </label>
-                                <input
-                                    className="field-input" type="password"
-                                    placeholder={provider.id === 'codex' ? 'sk-...' : 'Enter API key (optional)'}
-                                    value={provider.apiKey || ''}
-                                    onChange={(e) => updateProvider(provider.id, { apiKey: e.target.value })}
-                                    spellCheck={false}
-                                />
+                                {provider.id !== 'ollama' && (
+                                    <>
+                                        <label className="field-label">
+                                            {provider.id === 'codex' ? 'OpenAI API Key' : provider.id === 'anthropic' ? 'Anthropic API Key' : 'API Key'}
+                                            {provider.id === 'codex' && (
+                                                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
+                                            )}
+                                            {provider.id === 'anthropic' && (
+                                                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
+                                            )}
+                                        </label>
+                                        <input
+                                            className="field-input" type="password"
+                                            placeholder={
+                                                provider.id === 'codex' ? 'sk-...' :
+                                                provider.id === 'anthropic' ? 'sk-ant-...' :
+                                                'Enter API key (optional)'
+                                            }
+                                            value={provider.apiKey || ''}
+                                            onChange={(e) => updateProvider(provider.id, { apiKey: e.target.value })}
+                                            spellCheck={false}
+                                        />
+                                    </>
+                                )}
                                 {provider.id === 'codex' && (
                                     <div className="field-hint">
                                         Paste a standard API key from platform.openai.com, or use ChatGPT sign-in below.
+                                    </div>
+                                )}
+                                {provider.id === 'anthropic' && (
+                                    <div className="field-hint">
+                                        Get an API key from console.anthropic.com. Supports Claude Opus, Sonnet, and Haiku.
+                                    </div>
+                                )}
+                                {provider.id === 'ollama' && (
+                                    <div className="field-hint">
+                                        No API key needed. Make sure Ollama is running locally. Install models with: ollama pull llama3.3
                                     </div>
                                 )}
                             </div>

@@ -289,6 +289,284 @@ function registerGitIPC(ipcMain) {
         if (!name) return { error: 'Remote name is required' };
         return runGit(`remote remove "${name}"`, repoPath);
     });
+    // ══════════════════════════════════════════
+    //  GitHub API Operations (requires connected GitHub account)
+    // ══════════════════════════════════════════
+
+    // Clone a repository
+    ipcMain.handle('git-clone', async (_event, repoUrl, targetPath) => {
+        if (!repoUrl || !targetPath) return { error: 'Repository URL and target path are required' };
+        const token = getGithubToken();
+        // Inject token into HTTPS URLs for private repos
+        let cloneUrl = repoUrl;
+        if (token && repoUrl.startsWith('https://github.com/')) {
+            cloneUrl = repoUrl.replace('https://github.com/', `https://${token}@github.com/`);
+        }
+        try {
+            execSync(`git clone "${cloneUrl}" "${targetPath}"`, {
+                encoding: 'utf-8',
+                timeout: 120000,
+                maxBuffer: 5 * 1024 * 1024,
+                stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            return { success: true };
+        } catch (err) {
+            return { success: false, error: err.stderr?.trim() || err.message };
+        }
+    });
+
+    // Authenticated push (uses GitHub token in remote URL)
+    ipcMain.handle('git-push-auth', async (_event, repoPath, remote = 'origin', branch) => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected. Connect in Settings > Connectors.' };
+        // Get current remote URL
+        const remoteResult = runGit(`remote get-url ${remote}`, repoPath);
+        if (!remoteResult.success) return { error: `No remote '${remote}' found. Add one first.` };
+        const originalUrl = remoteResult.output;
+        // Inject token for auth
+        let authUrl = originalUrl;
+        if (originalUrl.startsWith('https://github.com/')) {
+            authUrl = originalUrl.replace('https://github.com/', `https://${token}@github.com/`);
+        } else if (originalUrl.match(/^https:\/\/[^@]+@github\.com\//)) {
+            authUrl = originalUrl.replace(/https:\/\/[^@]+@github\.com\//, `https://${token}@github.com/`);
+        }
+        // Temporarily set auth URL, push, restore
+        try {
+            runGit(`remote set-url ${remote} "${authUrl}"`, repoPath);
+            const branchArg = branch || '';
+            const result = runGit(`push -u ${remote} ${branchArg}`.trim(), repoPath, 60000);
+            runGit(`remote set-url ${remote} "${originalUrl}"`, repoPath);
+            return result;
+        } catch (err) {
+            runGit(`remote set-url ${remote} "${originalUrl}"`, repoPath);
+            return { success: false, error: err.message };
+        }
+    });
+
+    // Authenticated pull (uses GitHub token)
+    ipcMain.handle('git-pull-auth', async (_event, repoPath, remote = 'origin', branch) => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        const remoteResult = runGit(`remote get-url ${remote}`, repoPath);
+        if (!remoteResult.success) return { error: `No remote '${remote}' found.` };
+        const originalUrl = remoteResult.output;
+        let authUrl = originalUrl;
+        if (originalUrl.startsWith('https://github.com/')) {
+            authUrl = originalUrl.replace('https://github.com/', `https://${token}@github.com/`);
+        }
+        try {
+            runGit(`remote set-url ${remote} "${authUrl}"`, repoPath);
+            const branchArg = branch ? `${remote} ${branch}` : '';
+            const result = runGit(`pull ${branchArg}`.trim(), repoPath, 60000);
+            runGit(`remote set-url ${remote} "${originalUrl}"`, repoPath);
+            return result;
+        } catch (err) {
+            runGit(`remote set-url ${remote} "${originalUrl}"`, repoPath);
+            return { success: false, error: err.message };
+        }
+    });
+
+    // List user's GitHub repos
+    ipcMain.handle('git-github-repos', async (_event, page = 1, perPage = 30, sort = 'updated') => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        try {
+            const res = await githubAPI(`/user/repos?sort=${sort}&per_page=${perPage}&page=${page}&type=all`, token);
+            const repos = res.map(r => ({
+                id: r.id, name: r.name, fullName: r.full_name,
+                description: r.description, private: r.private,
+                htmlUrl: r.html_url, cloneUrl: r.clone_url,
+                language: r.language, stars: r.stargazers_count,
+                forks: r.forks_count, updatedAt: r.updated_at,
+                defaultBranch: r.default_branch,
+            }));
+            return { success: true, repos };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    // Create a pull request
+    ipcMain.handle('git-github-create-pr', async (_event, repoPath, title, body, head, base) => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        const owner_repo = await getOwnerRepo(repoPath);
+        if (!owner_repo) return { error: 'Cannot determine GitHub owner/repo from remotes.' };
+        try {
+            const res = await githubAPI(`/repos/${owner_repo}/pulls`, token, 'POST', { title, body: body || '', head, base: base || 'main' });
+            return { success: true, pr: { number: res.number, url: res.html_url, title: res.title, state: res.state } };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    // List pull requests
+    ipcMain.handle('git-github-list-prs', async (_event, repoPath, state = 'open') => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        const owner_repo = await getOwnerRepo(repoPath);
+        if (!owner_repo) return { error: 'Cannot determine GitHub owner/repo from remotes.' };
+        try {
+            const res = await githubAPI(`/repos/${owner_repo}/pulls?state=${state}&per_page=30`, token);
+            const prs = res.map(pr => ({
+                number: pr.number, title: pr.title, state: pr.state,
+                url: pr.html_url, author: pr.user?.login,
+                head: pr.head?.ref, base: pr.base?.ref,
+                createdAt: pr.created_at, updatedAt: pr.updated_at,
+                draft: pr.draft, mergeable: pr.mergeable,
+                additions: pr.additions, deletions: pr.deletions,
+                labels: (pr.labels || []).map(l => l.name),
+            }));
+            return { success: true, prs };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    // Get PR details (comments, reviews, checks)
+    ipcMain.handle('git-github-pr-detail', async (_event, repoPath, prNumber) => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        const owner_repo = await getOwnerRepo(repoPath);
+        if (!owner_repo) return { error: 'Cannot determine GitHub owner/repo from remotes.' };
+        try {
+            const [pr, comments, reviews] = await Promise.all([
+                githubAPI(`/repos/${owner_repo}/pulls/${prNumber}`, token),
+                githubAPI(`/repos/${owner_repo}/issues/${prNumber}/comments`, token),
+                githubAPI(`/repos/${owner_repo}/pulls/${prNumber}/reviews`, token),
+            ]);
+            return {
+                success: true,
+                pr: {
+                    number: pr.number, title: pr.title, body: pr.body,
+                    state: pr.state, url: pr.html_url, author: pr.user?.login,
+                    head: pr.head?.ref, base: pr.base?.ref,
+                    mergeable: pr.mergeable, merged: pr.merged,
+                    additions: pr.additions, deletions: pr.deletions,
+                    changedFiles: pr.changed_files,
+                    createdAt: pr.created_at, updatedAt: pr.updated_at,
+                },
+                comments: comments.map(c => ({
+                    id: c.id, body: c.body, author: c.user?.login,
+                    createdAt: c.created_at,
+                })),
+                reviews: reviews.map(r => ({
+                    id: r.id, state: r.state, body: r.body,
+                    author: r.user?.login, submittedAt: r.submitted_at,
+                })),
+            };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    // Merge a PR
+    ipcMain.handle('git-github-merge-pr', async (_event, repoPath, prNumber, mergeMethod = 'merge') => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        const owner_repo = await getOwnerRepo(repoPath);
+        if (!owner_repo) return { error: 'Cannot determine GitHub owner/repo.' };
+        try {
+            const res = await githubAPI(`/repos/${owner_repo}/pulls/${prNumber}/merge`, token, 'PUT', { merge_method: mergeMethod });
+            return { success: true, sha: res.sha, message: res.message };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    // Create a GitHub repo
+    ipcMain.handle('git-github-create-repo', async (_event, name, description, isPrivate = true) => {
+        const token = getGithubToken();
+        if (!token) return { error: 'GitHub account not connected.' };
+        try {
+            const res = await githubAPI('/user/repos', token, 'POST', {
+                name, description: description || '', private: isPrivate, auto_init: false,
+            });
+            return { success: true, repo: { name: res.name, fullName: res.full_name, cloneUrl: res.clone_url, htmlUrl: res.html_url } };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    // Get GitHub connection status
+    ipcMain.handle('git-github-status', async () => {
+        const token = getGithubToken();
+        if (!token) return { connected: false };
+        try {
+            const user = await githubAPI('/user', token);
+            return { connected: true, username: user.login, avatarUrl: user.avatar_url, name: user.name };
+        } catch {
+            return { connected: false };
+        }
+    });
 }
 
-module.exports = { registerGitIPC };
+// ── GitHub API helper ──
+
+function githubAPI(endpoint, token, method = 'GET', body = null) {
+    const https = require('https');
+    return new Promise((resolve, reject) => {
+        const options = {
+            hostname: 'api.github.com',
+            path: endpoint,
+            method,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'User-Agent': 'Onicode',
+                'X-GitHub-Api-Version': '2022-11-28',
+            },
+        };
+        if (body) {
+            options.headers['Content-Type'] = 'application/json';
+        }
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (res.statusCode >= 400) {
+                        reject(new Error(parsed.message || `GitHub API ${res.statusCode}`));
+                    } else {
+                        resolve(parsed);
+                    }
+                } catch { resolve(data); }
+            });
+        });
+        req.on('error', reject);
+        if (body) req.write(JSON.stringify(body));
+        req.end();
+    });
+}
+
+// ── Get GitHub token from connectors ──
+
+function getGithubToken() {
+    const fs = require('fs');
+    const connPath = require('path').join(
+        process.env.HOME || process.env.USERPROFILE || '/tmp',
+        '.onicode', 'connectors.json'
+    );
+    try {
+        if (fs.existsSync(connPath)) {
+            const data = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
+            return data.github?.accessToken || null;
+        }
+    } catch {}
+    return null;
+}
+
+// ── Extract owner/repo from git remotes ──
+
+async function getOwnerRepo(repoPath) {
+    const result = runGit('remote get-url origin', repoPath);
+    if (!result.success) return null;
+    const url = result.output;
+    // https://github.com/owner/repo.git or git@github.com:owner/repo.git
+    let match = url.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+    if (match) return `${match[1]}/${match[2]}`;
+    return null;
+}
+
+module.exports = { registerGitIPC, getGithubToken };

@@ -84,6 +84,7 @@ interface ProviderConfig {
     selectedModel?: string;
     connected?: boolean;
     enabled?: boolean;
+    models?: string[];
 }
 
 // ══════════════════════════════════════════
@@ -111,7 +112,7 @@ function getActiveProvider(): ProviderConfig | null {
         const saved = localStorage.getItem('onicode-providers');
         if (!saved) return null;
         const providers: ProviderConfig[] = JSON.parse(saved);
-        return providers.find((p) => p.enabled && p.connected && p.apiKey?.trim()) || null;
+        return providers.find((p) => p.enabled && p.connected && (p.apiKey?.trim() || p.id === 'ollama')) || null;
     } catch {
         return null;
     }
@@ -124,10 +125,10 @@ function getApiEndpoint(provider: ProviderConfig): string {
 }
 
 /**
- * Load conversations — prefer SQLite if available, fallback to localStorage.
- * On first run with SQLite, migrates existing localStorage conversations.
+ * Load conversations from localStorage (sync, used for initial render).
+ * After mount, SQLite becomes the primary source via async load.
  */
-function loadConversations(): Conversation[] {
+function loadConversationsFromCache(): Conversation[] {
     try {
         const saved = localStorage.getItem(CONVERSATIONS_KEY);
         return saved ? JSON.parse(saved) : [];
@@ -136,15 +137,18 @@ function loadConversations(): Conversation[] {
     }
 }
 
-function saveConversations(convs: Conversation[]) {
+/**
+ * Save conversations to localStorage cache (sync, for instant UI).
+ */
+function saveConversationsCache(convs: Conversation[]) {
     localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(convs));
 }
 
 /**
- * Save a single conversation to SQLite (fire-and-forget).
- * Falls back to localStorage-only if SQLite is unavailable.
+ * Persist a single conversation to SQLite (primary storage).
+ * Also updates localStorage cache for instant sync.
  */
-function persistToSQLite(conv: Conversation) {
+function persistConversationToSQLite(conv: Conversation) {
     if (!isElectron || !window.onicode?.conversationSave) return;
     window.onicode.conversationSave({
         id: conv.id,
@@ -155,7 +159,7 @@ function persistToSQLite(conv: Conversation) {
         projectName: conv.projectName,
         createdAt: conv.createdAt,
         updatedAt: conv.updatedAt,
-    }).catch(() => { /* SQLite save failed, localStorage still has it */ });
+    }).catch(() => { /* SQLite save failed, localStorage cache still has it */ });
 }
 
 /**
@@ -166,17 +170,59 @@ function deleteFromSQLite(convId: string) {
     window.onicode.conversationDelete(convId).catch(() => { });
 }
 
-/** Migrate localStorage conversations to SQLite (one-time) */
-async function migrateConversationsToSQLite() {
-    if (!isElectron || !window.onicode?.conversationMigrate) return;
+/**
+ * Load all conversations from SQLite (async, primary source).
+ * If SQLite is empty, migrates from localStorage and returns the migrated data.
+ */
+async function loadConversationsFromSQLite(): Promise<Conversation[] | null> {
+    if (!isElectron || !window.onicode?.conversationList) return null;
     try {
-        const convs = loadConversations();
-        if (convs.length === 0) return;
-        const result = await window.onicode.conversationMigrate(convs);
-        if (result.success && result.migrated && result.migrated > 0) {
-            console.log(`[Onicode] Migrated ${result.migrated} conversations to SQLite`);
+        const res = await window.onicode.conversationList(200, 0);
+        if (!res.success || !res.conversations) return null;
+
+        // Map SQLite rows to Conversation type
+        let convs: Conversation[] = res.conversations.map((c: Record<string, unknown>) => ({
+            id: c.id as string,
+            title: c.title as string,
+            messages: (c.messages || []) as Message[],
+            createdAt: c.created_at as number,
+            updatedAt: c.updated_at as number,
+            scope: (c.scope || 'general') as ChatScope,
+            projectId: c.project_id as string | undefined,
+            projectName: c.project_name as string | undefined,
+        }));
+
+        // If SQLite is empty but localStorage has data, migrate
+        if (convs.length === 0) {
+            const cached = loadConversationsFromCache();
+            if (cached.length > 0 && window.onicode.conversationMigrate) {
+                const migRes = await window.onicode.conversationMigrate(cached);
+                if (migRes.success && migRes.migrated && migRes.migrated > 0) {
+                    console.log(`[Onicode] Migrated ${migRes.migrated} conversations to SQLite`);
+                    // Re-load from SQLite to get proper format
+                    const reloaded = await window.onicode.conversationList(200, 0);
+                    if (reloaded.success && reloaded.conversations) {
+                        convs = reloaded.conversations.map((c: Record<string, unknown>) => ({
+                            id: c.id as string,
+                            title: c.title as string,
+                            messages: (c.messages || []) as Message[],
+                            createdAt: c.created_at as number,
+                            updatedAt: c.updated_at as number,
+                            scope: (c.scope || 'general') as ChatScope,
+                            projectId: c.project_id as string | undefined,
+                            projectName: c.project_name as string | undefined,
+                        }));
+                    }
+                }
+            }
         }
-    } catch { /* migration failed, not critical */ }
+
+        // Sync localStorage cache with SQLite truth
+        saveConversationsCache(convs);
+        return convs;
+    } catch {
+        return null;
+    }
 }
 
 function generateTitle(content: string): string {
@@ -204,7 +250,7 @@ interface ChatViewProps {
 
 export default function ChatView({ scope = 'general', activeProject, onChangeScope }: ChatViewProps) {
     // ── Conversation state ──
-    const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+    const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
     const [activeConvId, setActiveConvId] = useState<string | null>(() => {
         return localStorage.getItem(ACTIVE_CONV_KEY) || null;
     });
@@ -214,7 +260,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const [messages, setMessages] = useState<Message[]>(() => {
         const id = localStorage.getItem(ACTIVE_CONV_KEY);
         if (id) {
-            const convs = loadConversations();
+            const convs = loadConversationsFromCache();
             const conv = convs.find((c) => c.id === id);
             if (conv) return conv.messages;
         }
@@ -260,6 +306,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const [thinkingLevel, setThinkingLevel] = useState<string>(() =>
         localStorage.getItem('onicode-thinking-level') || 'medium'
     );
+    const [showModelPicker, setShowModelPicker] = useState(false);
     const sessionStartRef = useRef<number | null>(null);
 
     // ── Refs ──
@@ -278,16 +325,25 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     // Keep ref in sync with prop so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
 
-    // ── Migrate localStorage to SQLite on first mount ──
+    // ── Load from SQLite (primary source) on mount ──
     useEffect(() => {
-        migrateConversationsToSQLite();
+        loadConversationsFromSQLite().then(sqliteConvs => {
+            if (!sqliteConvs) return; // SQLite unavailable, keep localStorage data
+            setConversations(sqliteConvs);
+            // If we have an active conversation, update messages from SQLite data
+            const activeId = localStorage.getItem(ACTIVE_CONV_KEY);
+            if (activeId) {
+                const conv = sqliteConvs.find(c => c.id === activeId);
+                if (conv) setMessages(conv.messages);
+            }
+        });
     }, []);
 
-    // ── Persistence (dual-write: localStorage + SQLite) ──
+    // ── Persistence (SQLite primary, localStorage cache) ──
     const persistConversation = useCallback((msgs: Message[], convId: string | null) => {
         if (msgs.length === 0) return convId;
 
-        const convs = loadConversations();
+        const convs = loadConversationsFromCache();
         let id = convId;
         let convToSave: Conversation | null = null;
 
@@ -323,12 +379,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             convToSave = newConv;
         }
 
-        saveConversations(convs);
+        saveConversationsCache(convs);
         setConversations(convs);
         localStorage.setItem(ACTIVE_CONV_KEY, id);
 
-        // Also persist to SQLite
-        if (convToSave) persistToSQLite(convToSave);
+        // Persist to SQLite (primary storage)
+        if (convToSave) persistConversationToSQLite(convToSave);
 
         return id;
     }, [scope, activeProject]);
@@ -477,6 +533,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         return removeListener;
     }, []);
 
+    // ── Auto-commit notification listener ──
+    useEffect(() => {
+        if (!window.onicode?.onAutoCommit) return;
+        const removeListener = window.onicode.onAutoCommit((data) => {
+            setMessages(prev => [...prev, {
+                id: `auto-commit-${Date.now()}`,
+                role: 'ai' as const,
+                content: `Auto-committed: \`${data.message}\``,
+                timestamp: Date.now(),
+                toolSteps: [],
+            }]);
+        });
+        return removeListener;
+    }, []);
+
     const handleAnswerQuestion = React.useCallback((answer: string | string[]) => {
         if (!pendingQuestion || !window.onicode?.answerQuestion) return;
         window.onicode.answerQuestion(pendingQuestion.questionId, answer);
@@ -599,12 +670,14 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         if (!window.onicode?.onSessionTitle) return;
         const unsub = window.onicode.onSessionTitle((title: string) => {
             if (!activeConvId || !title) return;
-            const convs = loadConversations();
+            const convs = loadConversationsFromCache();
             const idx = convs.findIndex(c => c.id === activeConvId);
             if (idx >= 0) {
                 convs[idx].title = title;
-                saveConversations(convs);
+                saveConversationsCache(convs);
                 setConversations(convs);
+                // Update title in SQLite too
+                persistConversationToSQLite(convs[idx]);
             }
         });
         return unsub;
@@ -1404,8 +1477,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     }, [newChat]);
 
     const deleteConversation = useCallback((convId: string) => {
-        const convs = loadConversations().filter((c) => c.id !== convId);
-        saveConversations(convs);
+        const convs = loadConversationsFromCache().filter((c) => c.id !== convId);
+        saveConversationsCache(convs);
         setConversations(convs);
         deleteFromSQLite(convId);
         if (activeConvId === convId) newChat();
@@ -1480,6 +1553,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 find_implementation: 'Found', impact_analysis: 'Impact', prepare_edit_context: 'Context',
                 smart_read: 'Smart Read', batch_search: 'Batch Search',
                 verify_project: 'Verified',
+                git_create_pr: 'PR Created', git_list_prs: 'PRs', git_publish: 'Published',
+                gh_cli: 'GitHub', gws_cli: 'Workspace',
                 ask_user_question: 'Question',
                 sequential_thinking: 'Thinking',
                 trajectory_search: 'History Search',
@@ -1735,6 +1810,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const status = r?.status ?? 'checking';
                     return `Status: ${status}`;
                 }
+                case 'gh_cli': {
+                    const cmd = String(a.command || '').slice(0, 60);
+                    const ok = r?.success;
+                    return ok ? `gh ${cmd}` : `gh ${cmd} (failed)`;
+                }
+                case 'gws_cli': {
+                    const cmd = String(a.command || '').slice(0, 60);
+                    const ok = r?.success;
+                    return ok ? `gws ${cmd}` : `gws ${cmd} (failed)`;
+                }
                 default:
                     return '';
             }
@@ -1770,6 +1855,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'read_notebook': return !!(r.cells && Array.isArray(r.cells) && (r.cells as unknown[]).length > 0);
                 case 'read_deployment_config': return true;
                 case 'deploy_web_app': return !!(r.output || r.url);
+                case 'gh_cli': return !!(r.output || r.data || r.error);
+                case 'gws_cli': return !!(r.output || r.data || r.error);
                 default: return false;
             }
         };
@@ -2135,8 +2222,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const summary = r.summary as { critical?: number; high?: number; medium?: number; low?: number; total_issues?: number; verdict?: string } | undefined;
                     const issues = (r.issues || []) as Array<{ severity: string; type: string; file?: string; message: string }>;
                     const filesScanned = r.files_scanned as number;
-                    const severityColor: Record<string, string> = { critical: '#ff4444', high: '#ff8800', medium: '#ffcc00', low: '#888' };
-                    const verdictColor = summary?.critical ? '#ff4444' : summary?.high ? '#ff8800' : '#44cc44';
+                    const severityColor: Record<string, string> = { critical: 'var(--error, #ff4444)', high: 'var(--warning, #ff8800)', medium: 'var(--warning-light, #ffcc00)', low: 'var(--text-muted, #888)' };
+                    const verdictColor = summary?.critical ? 'var(--error, #ff4444)' : summary?.high ? 'var(--warning, #ff8800)' : 'var(--success, #44cc44)';
                     return (
                         <div className="tool-step-expanded">
                             <div className="tool-step-terminal">
@@ -2155,7 +2242,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                     <div style={{ padding: '4px 8px' }}>
                                         {issues.slice(0, 20).map((issue, i) => (
                                             <div key={i} style={{ padding: '2px 0', fontSize: '0.8rem', display: 'flex', gap: 6 }}>
-                                                <span style={{ color: severityColor[issue.severity] || '#888', fontWeight: 'bold', minWidth: 60 }}>
+                                                <span style={{ color: severityColor[issue.severity] || 'var(--text-muted, #888)', fontWeight: 'bold', minWidth: 60 }}>
                                                     {issue.severity.toUpperCase()}
                                                 </span>
                                                 {issue.file && <span style={{ opacity: 0.6 }}>{issue.file}:</span>}
@@ -2176,7 +2263,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const branch = a.branch_id as string || null;
                     return (
                         <div className="tool-step-expanded">
-                            <div className="tool-step-terminal" style={{ borderLeft: `3px solid ${isRev ? '#ffcc00' : branch ? '#88aaff' : 'var(--text-muted)'}` }}>
+                            <div className="tool-step-terminal" style={{ borderLeft: `3px solid ${isRev ? 'var(--warning-light, #ffcc00)' : branch ? 'var(--accent-secondary, #88aaff)' : 'var(--text-muted)'}` }}>
                                 <div className="tool-step-terminal-header">
                                     <span className="tool-step-terminal-prompt">
                                         Thought {num}/{total}{isRev ? ' (revision)' : ''}{branch ? ` [${branch}]` : ''}
@@ -2224,7 +2311,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                 <div style={{ padding: '4px 8px', fontSize: '0.8rem' }}>
                                     {results.slice(0, 30).map((res, i) => (
                                         <div key={i} style={{ padding: '1px 0', display: 'flex', gap: 8 }}>
-                                            <span style={{ color: res.type === 'directory' ? '#88aaff' : 'inherit' }}>
+                                            <span style={{ color: res.type === 'directory' ? 'var(--accent-secondary, #88aaff)' : 'inherit' }}>
                                                 {res.type === 'directory' ? '📁' : '📄'} {res.path}
                                             </span>
                                             {res.size != null && <span style={{ opacity: 0.5, marginLeft: 'auto' }}>{(res.size / 1024).toFixed(1)}KB</span>}
@@ -2316,6 +2403,46 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </div>
                     );
                 }
+                case 'gh_cli': {
+                    const output = String(r.output || r.data || r.error || '');
+                    const cmd = String(a.command || '');
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">$ gh {cmd}</span>
+                                    <span className={`tool-step-exit-code ${r.success ? 'success' : 'error'}`}>
+                                        {r.success ? 'OK' : 'FAILED'}
+                                    </span>
+                                </div>
+                                <pre className="tool-step-stdout" style={{ maxHeight: 300, overflow: 'auto' }}>
+                                    {output.slice(0, 5000)}
+                                    {output.length > 5000 && '\n... (truncated)'}
+                                </pre>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'gws_cli': {
+                    const output = String(r.output || r.data || r.error || '');
+                    const cmd = String(a.command || '');
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">$ gws {cmd}</span>
+                                    <span className={`tool-step-exit-code ${r.success ? 'success' : 'error'}`}>
+                                        {r.success ? 'OK' : 'FAILED'}
+                                    </span>
+                                </div>
+                                <pre className="tool-step-stdout" style={{ maxHeight: 300, overflow: 'auto' }}>
+                                    {output.slice(0, 5000)}
+                                    {output.length > 5000 && '\n... (truncated)'}
+                                </pre>
+                            </div>
+                        </div>
+                    );
+                }
                 default:
                     return null;
             }
@@ -2324,7 +2451,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status', 'gh_cli', 'gws_cli']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },
@@ -2830,7 +2957,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
                 {/* ── Permission Approval Card ── */}
                 {pendingApproval && (
-                    <div className="ask-user-card" style={{ borderColor: '#ff8800' }}>
+                    <div className="ask-user-card" style={{ borderColor: 'var(--warning, #ff8800)' }}>
                         <div className="ask-user-question">
                             Allow <code style={{ background: 'var(--hover)', padding: '2px 6px', borderRadius: 4 }}>{pendingApproval.tool}</code>?
                         </div>
@@ -2843,7 +2970,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             <button
                                 type="button"
                                 className="ask-user-option"
-                                style={{ borderColor: '#44cc44' }}
+                                style={{ borderColor: 'var(--success, #44cc44)' }}
                                 onClick={() => {
                                     window.onicode?.respondToPermission(pendingApproval.approvalId, true);
                                     setPendingApproval(null);
@@ -2854,7 +2981,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             <button
                                 type="button"
                                 className="ask-user-option"
-                                style={{ borderColor: '#ff4444' }}
+                                style={{ borderColor: 'var(--error, #ff4444)' }}
                                 onClick={() => {
                                     window.onicode?.respondToPermission(pendingApproval.approvalId, false);
                                     setPendingApproval(null);
@@ -2965,7 +3092,54 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             <circle cx="12" cy="12" r="10" />
                             <path d="M12 6v6l4 2" />
                         </svg>
-                        <span className="context-model">{getActiveProvider()?.selectedModel || 'gpt-4o'}</span>
+                        <button
+                            className="context-model"
+                            style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0, fontSize: 'inherit', fontFamily: 'inherit', position: 'relative' }}
+                            onClick={() => setShowModelPicker(!showModelPicker)}
+                            title="Click to change model"
+                        >
+                            {getActiveProvider()?.selectedModel || 'gpt-4o'}
+                            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ marginLeft: 3, verticalAlign: 'middle' }}><polyline points="6 9 12 15 18 9" /></svg>
+                        </button>
+                        {showModelPicker && (() => {
+                            const provider = getActiveProvider();
+                            const DEFAULT_MODELS: Record<string, string[]> = {
+                                codex: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3', 'o3-mini', 'o4-mini', 'codex-mini-latest'],
+                                oniai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini', 'claude-sonnet-4-20250514'],
+                                openclaw: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini'],
+                                anthropic: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-3-5-20241022'],
+                                ollama: ['llama3', 'codellama', 'mistral', 'deepseek-coder'],
+                            };
+                            const models = provider?.models?.length ? provider.models : (DEFAULT_MODELS[provider?.id || ''] || ['gpt-4o', 'gpt-4o-mini', 'o3-mini']);
+                            return (
+                                <div style={{
+                                    position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
+                                    background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8,
+                                    padding: 4, zIndex: 1000, minWidth: 180, maxHeight: 240, overflow: 'auto',
+                                    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                                }}>
+                                    {models.map((m: string) => (
+                                        <button key={m} onClick={() => {
+                                            try {
+                                                const saved = localStorage.getItem('onicode-providers');
+                                                if (saved) {
+                                                    const providers = JSON.parse(saved);
+                                                    const p = providers.find((pp: { id: string }) => pp.id === provider?.id);
+                                                    if (p) { p.selectedModel = m; localStorage.setItem('onicode-providers', JSON.stringify(providers)); }
+                                                }
+                                            } catch {}
+                                            setShowModelPicker(false);
+                                        }} style={{
+                                            display: 'block', width: '100%', textAlign: 'left', padding: '5px 10px',
+                                            fontSize: 11, borderRadius: 4, border: 'none', cursor: 'pointer',
+                                            background: m === provider?.selectedModel ? 'var(--accent)' : 'transparent',
+                                            color: m === provider?.selectedModel ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
+                                            fontFamily: 'JetBrains Mono, monospace',
+                                        }}>{m}</button>
+                                    ))}
+                                </div>
+                            );
+                        })()}
                         <span className="context-divider">·</span>
                         <span>~{contextInfo.tokens.toLocaleString()} tokens · {contextInfo.messages} msgs</span>
                         <span className="context-divider">·</span>

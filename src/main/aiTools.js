@@ -1938,6 +1938,94 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    // ── GitHub PR Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'git_create_pr',
+            description: 'Create a pull request on GitHub for the current branch. Requires GitHub account to be connected.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'PR title' },
+                    body: { type: 'string', description: 'PR description/body (markdown)' },
+                    base: { type: 'string', description: 'Base branch to merge into (default: main)' },
+                    cwd: { type: 'string', description: 'Repository path' },
+                },
+                required: ['title'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_list_prs',
+            description: 'List pull requests for the current repository on GitHub.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    state: { type: 'string', enum: ['open', 'closed', 'all'], description: 'Filter by state (default: open)' },
+                    cwd: { type: 'string', description: 'Repository path' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'git_publish',
+            description: 'Create a new GitHub repository and push the local repo to it. Requires GitHub account.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Repository name' },
+                    description: { type: 'string', description: 'Repository description' },
+                    private: { type: 'boolean', description: 'Make repository private (default: true)' },
+                    cwd: { type: 'string', description: 'Repository path' },
+                },
+                required: ['name'],
+            },
+        },
+    },
+    // ══════════════════════════════════════════
+    //  GitHub CLI (gh) Tools
+    // ══════════════════════════════════════════
+    {
+        type: 'function',
+        function: {
+            name: 'gh_cli',
+            description: 'Execute GitHub CLI (gh) commands. Use for ALL GitHub operations: issues, PRs, repos, releases, actions, gists, codespaces, API calls. The gh CLI is authenticated via the connected GitHub account. Examples: "pr list", "issue create --title Bug --body Details", "api repos/{owner}/{repo}", "release list", "run list".',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: { type: 'string', description: 'The gh subcommand to run (e.g. "pr list", "issue view 123", "repo clone owner/repo", "api /user/repos")' },
+                    cwd: { type: 'string', description: 'Working directory (defaults to current project)' },
+                    flags: { type: 'string', description: 'Additional flags as a single string (e.g. "--json number,title,state --limit 20")' },
+                },
+                required: ['command'],
+            },
+        },
+    },
+    // ══════════════════════════════════════════
+    //  Google Workspace CLI (gws) Tools
+    // ══════════════════════════════════════════
+    {
+        type: 'function',
+        function: {
+            name: 'gws_cli',
+            description: 'Execute Google Workspace CLI (gws) commands for Gmail, Drive, Docs, Sheets, Calendar, and 30+ Google services. The gws CLI uses the connected Google account. Common operations: "gmail users messages list --params {\"userId\":\"me\",\"maxResults\":10}", "drive files list", "sheets spreadsheets create --json {}", "calendar events list", "docs documents get --params {\"documentId\":\"...\"}". Use --json for structured input and --params for query parameters.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: { type: 'string', description: 'The gws subcommand (e.g. "gmail users messages list", "drive files list", "sheets spreadsheets create")' },
+                    params: { type: 'string', description: 'JSON string for --params flag (query parameters)' },
+                    json_body: { type: 'string', description: 'JSON string for --json flag (request body)' },
+                    flags: { type: 'string', description: 'Additional flags (e.g. "--page-all", "--dry-run")' },
+                },
+                required: ['command'],
+            },
+        },
+    },
     // ══════════════════════════════════════════
     //  Cascade-Level Tools
     // ══════════════════════════════════════════
@@ -3528,6 +3616,34 @@ async function executeTool(name, args) {
                     try {
                         executeHook('OnTaskComplete', { ...hookContext, taskContent: task.content });
                     } catch { /* non-fatal */ }
+
+                    // Auto-commit on task completion (if enabled and in a git repo)
+                    try {
+                        const autoCommitEnabled = _autoCommitCheck();
+                        if (autoCommitEnabled && _currentProjectPath) {
+                            const gitDir = path.join(_currentProjectPath, '.git');
+                            if (fs.existsSync(gitDir)) {
+                                // Check if there are staged or unstaged changes
+                                const statusOut = execSync('git status --porcelain', {
+                                    cwd: _currentProjectPath, encoding: 'utf-8', timeout: 5000,
+                                    stdio: ['pipe', 'pipe', 'pipe'],
+                                }).trim();
+                                if (statusOut) {
+                                    // Stage all changes and commit with task description
+                                    const safeMsg = (task.content || 'Task completed').replace(/"/g, '\\"').slice(0, 120);
+                                    execSync(`git add -A && git commit -m "task: ${safeMsg}"`, {
+                                        cwd: _currentProjectPath, timeout: 10000,
+                                        stdio: ['pipe', 'pipe', 'pipe'],
+                                        env: { ...process.env, GIT_AUTHOR_NAME: 'Onicode', GIT_AUTHOR_EMAIL: 'ai@onicode.dev', GIT_COMMITTER_NAME: 'Onicode', GIT_COMMITTER_EMAIL: 'ai@onicode.dev' },
+                                    });
+                                    logger.info('git', `Auto-committed on task completion: "${safeMsg}"`);
+                                    sendToRenderer('ai-auto-commit', { message: `task: ${safeMsg}`, taskId: task.id });
+                                }
+                            }
+                        }
+                    } catch (commitErr) {
+                        logger.warn('git', `Auto-commit on task completion failed (non-critical): ${commitErr.message}`);
+                    }
                 }
 
                 return { success: true, task, summary: taskManager.getSummary() };
@@ -5055,6 +5171,198 @@ async function executeTool(name, args) {
                     return { success: true, ref: args.ref, file_path: args.file_path, content: output };
                 } catch (err) {
                     return { error: `Git show failed: ${err.stderr?.slice(0, 300) || err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_create_pr': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const { getGithubToken } = require('./git');
+                const token = getGithubToken();
+                if (!token) return { error: 'GitHub account not connected. User must connect in Settings > Connectors.' };
+                try {
+                    // Get current branch
+                    const branchOut = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    const https = require('https');
+                    // Get owner/repo from remote
+                    const remoteUrl = execSync('git remote get-url origin', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+                    if (!match) return { error: 'Cannot determine GitHub owner/repo from remote URL' };
+                    const ownerRepo = `${match[1]}/${match[2]}`;
+                    // First push current branch
+                    const authUrl = remoteUrl.replace(/https:\/\/[^@]*github\.com\//, `https://${token}@github.com/`);
+                    try {
+                        execSync(`git remote set-url origin "${authUrl}"`, { cwd, encoding: 'utf-8', timeout: 5000 });
+                        execSync(`git push -u origin ${branchOut}`, { cwd, encoding: 'utf-8', timeout: 30000 });
+                        execSync(`git remote set-url origin "${remoteUrl}"`, { cwd, encoding: 'utf-8', timeout: 5000 });
+                    } catch (pushErr) {
+                        try { execSync(`git remote set-url origin "${remoteUrl}"`, { cwd, encoding: 'utf-8', timeout: 5000 }); } catch {}
+                    }
+                    // Create PR via API
+                    const prData = await new Promise((resolve, reject) => {
+                        const body = JSON.stringify({ title: args.title, body: args.body || '', head: branchOut, base: args.base || 'main' });
+                        const req = https.request({ hostname: 'api.github.com', path: `/repos/${ownerRepo}/pulls`, method: 'POST',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'User-Agent': 'Onicode', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' }
+                        }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { const p = JSON.parse(d); if (res.statusCode >= 400) reject(new Error(p.message)); else resolve(p); } catch { resolve(d); } }); });
+                        req.on('error', reject); req.write(body); req.end();
+                    });
+                    return { success: true, pr_number: prData.number, url: prData.html_url, title: prData.title, head: branchOut, base: args.base || 'main' };
+                } catch (err) {
+                    return { error: `PR creation failed: ${err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_list_prs': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const { getGithubToken } = require('./git');
+                const token = getGithubToken();
+                if (!token) return { error: 'GitHub account not connected.' };
+                try {
+                    const remoteUrl = execSync('git remote get-url origin', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+                    if (!match) return { error: 'Cannot determine GitHub owner/repo' };
+                    const ownerRepo = `${match[1]}/${match[2]}`;
+                    const https = require('https');
+                    const state = args.state || 'open';
+                    const prsData = await new Promise((resolve, reject) => {
+                        const req = https.request({ hostname: 'api.github.com', path: `/repos/${ownerRepo}/pulls?state=${state}&per_page=20`, method: 'GET',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'User-Agent': 'Onicode', 'X-GitHub-Api-Version': '2022-11-28' }
+                        }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve([]); } }); });
+                        req.on('error', reject); req.end();
+                    });
+                    const prs = (Array.isArray(prsData) ? prsData : []).map(pr => ({
+                        number: pr.number, title: pr.title, state: pr.state, author: pr.user?.login,
+                        head: pr.head?.ref, base: pr.base?.ref, url: pr.html_url,
+                        draft: pr.draft, labels: (pr.labels || []).map(l => l.name),
+                    }));
+                    return { success: true, count: prs.length, prs };
+                } catch (err) {
+                    return { error: `List PRs failed: ${err.message?.slice(0, 300)}` };
+                }
+            }
+
+            case 'git_publish': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const { getGithubToken } = require('./git');
+                const token = getGithubToken();
+                if (!token) return { error: 'GitHub account not connected.' };
+                try {
+                    const https = require('https');
+                    const repoData = await new Promise((resolve, reject) => {
+                        const body = JSON.stringify({ name: args.name, description: args.description || '', private: args.private !== false, auto_init: false });
+                        const req = https.request({ hostname: 'api.github.com', path: '/user/repos', method: 'POST',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'User-Agent': 'Onicode', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' }
+                        }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { const p = JSON.parse(d); if (res.statusCode >= 400) reject(new Error(p.message)); else resolve(p); } catch { resolve(d); } }); });
+                        req.on('error', reject); req.write(body); req.end();
+                    });
+                    // Add remote and push
+                    const cloneUrl = repoData.clone_url;
+                    const authUrl = cloneUrl.replace('https://github.com/', `https://${token}@github.com/`);
+                    execSync(`git remote add origin "${cloneUrl}"`, { cwd, encoding: 'utf-8', timeout: 5000 });
+                    const branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 5000 }).trim() || 'main';
+                    execSync(`git remote set-url origin "${authUrl}"`, { cwd, encoding: 'utf-8', timeout: 5000 });
+                    execSync(`git push -u origin ${branch}`, { cwd, encoding: 'utf-8', timeout: 60000 });
+                    execSync(`git remote set-url origin "${cloneUrl}"`, { cwd, encoding: 'utf-8', timeout: 5000 });
+                    return { success: true, name: repoData.full_name, url: repoData.html_url, clone_url: cloneUrl, private: repoData.private };
+                } catch (err) {
+                    return { error: `Publish failed: ${err.message?.slice(0, 300)}` };
+                }
+            }
+
+            // ══════════════════════════════════════════
+            //  GitHub CLI (gh) Executor
+            // ══════════════════════════════════════════
+
+            case 'gh_cli': {
+                const cwd = args.cwd || _currentProjectPath || os.homedir();
+                const command = args.command;
+                if (!command || typeof command !== 'string') return { error: 'command is required' };
+
+                // Get GitHub token for authentication
+                const { getGithubToken: getGhToken } = require('./git');
+                const ghToken = getGhToken();
+                const ghEnv = { ...process.env };
+                if (ghToken) ghEnv.GH_TOKEN = ghToken;
+
+                try {
+                    const flags = args.flags ? ` ${args.flags}` : '';
+                    const fullCmd = `gh ${command}${flags}`;
+                    logger.info('gh_cli', `Executing: ${fullCmd}`);
+                    const output = execSync(fullCmd, {
+                        cwd,
+                        encoding: 'utf-8',
+                        timeout: 30000,
+                        maxBuffer: 5 * 1024 * 1024,
+                        stdio: ['pipe', 'pipe', 'pipe'],
+                        env: ghEnv,
+                    });
+                    // Try to parse JSON output
+                    try {
+                        const parsed = JSON.parse(output);
+                        return { success: true, data: parsed };
+                    } catch {
+                        return { success: true, output: output.trim().slice(0, 12000) };
+                    }
+                } catch (err) {
+                    const stderr = (err.stderr || '').trim();
+                    const stdout = (err.stdout || '').trim();
+                    return { error: `gh command failed: ${stderr || stdout || err.message}`.slice(0, 2000) };
+                }
+            }
+
+            // ══════════════════════════════════════════
+            //  Google Workspace CLI (gws) Executor
+            // ══════════════════════════════════════════
+
+            case 'gws_cli': {
+                const command = args.command;
+                if (!command || typeof command !== 'string') return { error: 'command is required' };
+
+                // Get Google token with auto-refresh
+                let googleToken = null;
+                try {
+                    const { getValidGoogleToken } = require('./connectors');
+                    googleToken = await getValidGoogleToken();
+                } catch {
+                    // Fallback: read directly from connectors.json
+                    const connPath = path.join(os.homedir(), '.onicode', 'connectors.json');
+                    try {
+                        if (fs.existsSync(connPath)) {
+                            const connData = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
+                            googleToken = connData.gmail?.accessToken || connData.google?.accessToken || null;
+                        }
+                    } catch {}
+                }
+
+                const gwsEnv = { ...process.env };
+                if (googleToken) gwsEnv.GOOGLE_WORKSPACE_CLI_TOKEN = googleToken;
+
+                try {
+                    let fullCmd = `gws ${command}`;
+                    if (args.params) fullCmd += ` --params '${args.params}'`;
+                    if (args.json_body) fullCmd += ` --json '${args.json_body}'`;
+                    if (args.flags) fullCmd += ` ${args.flags}`;
+                    logger.info('gws_cli', `Executing: ${fullCmd}`);
+                    const output = execSync(fullCmd, {
+                        encoding: 'utf-8',
+                        timeout: 30000,
+                        maxBuffer: 5 * 1024 * 1024,
+                        stdio: ['pipe', 'pipe', 'pipe'],
+                        env: gwsEnv,
+                    });
+                    // Parse JSON output (gws always outputs JSON)
+                    try {
+                        const parsed = JSON.parse(output);
+                        return { success: true, data: parsed };
+                    } catch {
+                        return { success: true, output: output.trim().slice(0, 12000) };
+                    }
+                } catch (err) {
+                    const stderr = (err.stderr || '').trim();
+                    const stdout = (err.stdout || '').trim();
+                    if (stderr.includes('not found') || stderr.includes('command not found') || err.message.includes('ENOENT')) {
+                        return { error: 'Google Workspace CLI (gws) is not installed. Install with: npm install -g @googleworkspace/cli' };
+                    }
+                    return { error: `gws command failed: ${stderr || stdout || err.message}`.slice(0, 2000) };
                 }
             }
 
