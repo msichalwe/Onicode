@@ -234,7 +234,11 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] System prompt caching
 - [x] Semantic compaction (AI-powered conversation summarization)
 - [x] Browser widget (Puppeteer preview with URL navigation + screenshots)
-- [x] 51+ AI tools total (43 base + 3 orchestrator + 5 context engine + MCP dynamic tools)
+- [x] 62+ AI tools total (54 base + 3 orchestrator + 5 context engine + MCP dynamic tools)
+- [x] Cascade-level tools: ask_user_question, sequential_thinking, trajectory_search, find_by_name, read_url_content, view_content_chunk, read_notebook, edit_notebook, deploy tools
+- [x] Post-edit lint feedback (JS/TS/JSON/Python syntax checking in edit_file/create_file results)
+- [x] Real permission approval gates (user approve/deny UI for 'ask' permissions)
+- [x] Cascade-inspired system prompt (intent classification, decision model, tool preference order)
 - [x] Context Engine (dependency graph, file outlines, pre-retrieval pipeline, multi-signal ranking)
 - [x] MCP client (stdio JSON-RPC, tool discovery, dynamic tool injection, Settings UI)
 
@@ -246,6 +250,12 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [ ] **Ollama provider** — local models
 - [ ] **Editor Shell** — VS Code workbench (lazy-loaded)
 - [x] **MCP client** — stdio server management, JSON-RPC 2.0, dynamic tool injection
+- [x] **Lint error feedback** — After edits, run syntax check and inject errors as feedback
+- [ ] **IDE state injection** — Active file, cursor position, user manual edits as diffs (requires Editor Shell)
+- [x] **Deployment tools** — Netlify/Vercel deploy via CLI (read_deployment_config, deploy_web_app, check_deploy_status)
+- [x] **Jupyter notebook** — Read/edit .ipynb files (read_notebook, edit_notebook)
+- [x] **URL content reading** — read_url_content + view_content_chunk (paginated web reading)
+- [ ] **Knowledge graph memory** — Entity/relation memory via MCP (Cascade uses this)
 - [ ] **Auto-update** — electron-updater for seamless updates
 - [ ] **SQLite conversation migration** — full migration from localStorage
 - [ ] **Mobile companion** — React Native app

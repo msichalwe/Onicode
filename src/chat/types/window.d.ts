@@ -53,6 +53,36 @@ interface OnicodeAPI {
     onAgentStep: (callback: (data: { round: number; status: string; agentId?: string; task?: string }) => void) => () => void;
     onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
 
+    // Ask User Question (Cascade-level)
+    answerQuestion: (questionId: string, answer: string | string[]) => Promise<{ success: boolean }>;
+    respondToPermission: (approvalId: string, approved: boolean) => Promise<{ success: boolean }>;
+    onPermissionRequest: (callback: (data: {
+        approvalId: string;
+        tool: string;
+        args: Record<string, unknown>;
+        mode: string;
+    }) => void) => () => void;
+    onAskUser: (callback: (data: {
+        questionId: string;
+        question: string;
+        options: Array<{ label: string; description?: string }>;
+        allowMultiple: boolean;
+    }) => void) => () => void;
+    onThinkingStep: (callback: (data: {
+        step: {
+            number: number;
+            total: number;
+            thought: string;
+            isRevision: boolean;
+            revisesThought: number | null;
+            branchFromThought: number | null;
+            branchId: string | null;
+            timestamp: number;
+        };
+        chainLength: number;
+        nextNeeded: boolean;
+    }) => void) => () => void;
+
     // Agent & Process Runtime
     listAgents: () => Promise<Array<{ id: string; task: string; status: string; createdAt: number; result?: string; role?: string }>>;
     listBackgroundProcesses: () => Promise<Array<{ id: string; command: string; status: string; pid?: number; port?: number; startedAt?: number }>>;

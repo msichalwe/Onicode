@@ -14,7 +14,7 @@ const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath } = require('./aiTools');
+const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval } = require('./aiTools');
 const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
@@ -971,7 +971,25 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             const forceTools = _forceNoToolsNextRound ? false : (autoContinueCount > 0);
             const includeTools = !_forceNoToolsNextRound; // Completely remove tools to force text response
             _forceNoToolsNextRound = false; // Reset for next iteration
-            const result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools, forceTools, reasoningEffort);
+
+            // ── Stream with auto-retry for transient network errors ──
+            let result;
+            const TRANSIENT_ERRORS_CGP = ['ERR_QUIC_PROTOCOL_ERROR', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_CONNECTION_RESET', 'ERR_NETWORK_CHANGED', 'EPIPE', 'socket hang up', 'network error'];
+            const MAX_RETRIES_CGP = 2;
+            for (let attempt = 0; attempt <= MAX_RETRIES_CGP; attempt++) {
+                try {
+                    result = await streamChatGPTSingle(inputItems, instructions, accessToken, accountId, model, includeTools, forceTools, reasoningEffort);
+                    break; // Success
+                } catch (retryErr) {
+                    const errMsg = retryErr.message || String(retryErr);
+                    const isTransient = TRANSIENT_ERRORS_CGP.some(e => errMsg.includes(e));
+                    if (!isTransient || attempt === MAX_RETRIES_CGP) throw retryErr; // Re-throw to outer catch
+                    const delay = (attempt + 1) * 3000;
+                    logger.warn('agent-loop', `Transient error "${errMsg}" — retrying in ${delay/1000}s (attempt ${attempt + 1}/${MAX_RETRIES_CGP})`);
+                    mainWindow?.webContents.send('ai-stream-chunk', `\n*[Network error — retrying in ${delay/1000}s...]*\n`);
+                    await new Promise(r => setTimeout(r, delay));
+                }
+            }
 
             // No function calls — check if we should auto-continue
             if (!result.functionCalls || result.functionCalls.length === 0) {
@@ -1077,7 +1095,14 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             mainWindow?.webContents.send('ai-agent-step', { round, status: 'executing' });
             for (const fn of result.functionCalls) {
                 let args = {};
-                try { args = JSON.parse(fn.arguments); } catch { }
+                try {
+                    args = JSON.parse(fn.arguments);
+                } catch (parseErr) {
+                    logger.warn('tool-args', `Malformed JSON in ${fn.name} tool call: ${fn.arguments?.slice(0, 200)}`);
+                    // Try to salvage — common issue is trailing garbage from streaming
+                    const cleaned = (fn.arguments || '').replace(/[}\]]*\s*,?\s*\{[^}]*$/g, '').trim();
+                    try { args = JSON.parse(cleaned.endsWith('}') ? cleaned : cleaned + '}'); } catch { }
+                }
 
                 toolsUsed.add(fn.name);
 
@@ -1914,7 +1939,20 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
         const forceTools = _forceNoToolsNextRound ? false : (autoContinueCount > 0);
         const includeTools = !_forceNoToolsNextRound;
         _forceNoToolsNextRound = false; // Reset for next iteration
-        const result = await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
+        // ── Stream with auto-retry for transient network errors ──
+        let result;
+        const TRANSIENT_ERRORS = ['ERR_QUIC_PROTOCOL_ERROR', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_CONNECTION_RESET', 'ERR_NETWORK_CHANGED', 'EPIPE', 'socket hang up', 'network error'];
+        const MAX_RETRIES = 2;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            result = await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
+            if (!result.error) break;
+            const isTransient = TRANSIENT_ERRORS.some(e => result.error.includes(e));
+            if (!isTransient || attempt === MAX_RETRIES) break;
+            const delay = (attempt + 1) * 3000; // 3s, 6s
+            logger.warn('agent-loop', `Transient error "${result.error}" — retrying in ${delay/1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            mainWindow?.webContents.send('ai-stream-chunk', `\n*[Network error — retrying in ${delay/1000}s...]*\n`);
+            await new Promise(r => setTimeout(r, delay));
+        }
 
         if (result.error) {
             // Check if there are in-progress tasks — inform user they can continue
@@ -2072,8 +2110,11 @@ async function streamOpenAI(messages, providerConfig, projectPath) {
             let args;
             try {
                 args = JSON.parse(tc.arguments);
-            } catch {
-                args = {};
+            } catch (parseErr) {
+                logger.warn('tool-args', `Malformed JSON in ${tc.name} tool call: ${tc.arguments?.slice(0, 200)}`);
+                // Try to salvage — common issue is trailing garbage from streaming
+                const cleaned = (tc.arguments || '').replace(/[}\]]*\s*,?\s*\{[^}]*$/g, '').trim();
+                try { args = JSON.parse(cleaned.endsWith('}') ? cleaned : cleaned + '}'); } catch { args = {}; }
             }
 
             // Track tool types used
@@ -2243,6 +2284,20 @@ ipcMain.handle('ai-abort', () => {
 });
 
 // ══════════════════════════════════════════
+//  IPC: Ask User Question (Cascade-level)
+// ══════════════════════════════════════════
+
+ipcMain.handle('ai-user-answer', (_event, { questionId, answer }) => {
+    resolveUserAnswer(questionId, answer);
+    return { success: true };
+});
+
+ipcMain.handle('ai-permission-response', (_event, { approvalId, approved }) => {
+    resolvePermissionApproval(approvalId, approved);
+    return { success: true };
+});
+
+// ══════════════════════════════════════════
 //  IPC: Agent & Process Runtime
 // ══════════════════════════════════════════
 
@@ -2254,7 +2309,7 @@ ipcMain.handle('list-background-processes', () => {
     return getBackgroundProcesses().map(p => ({
         id: p.id || String(p.pid),
         command: p.command || 'unknown',
-        status: p.status || 'running',
+        status: p.running ? 'running' : (p.exitCode != null ? (p.exitCode === 0 ? 'done' : 'error') : 'done'),
         pid: p.pid,
         port: p.port,
         startedAt: p.startedAt,
@@ -2542,6 +2597,17 @@ const DEFAULT_PERMISSIONS = {
     get_orchestration_status: 'allow',
     get_agent_status: 'allow',
     verify_project: 'allow',
+    ask_user_question: 'allow',
+    sequential_thinking: 'allow',
+    trajectory_search: 'allow',
+    find_by_name: 'allow',
+    read_url_content: 'allow',
+    view_content_chunk: 'allow',
+    read_notebook: 'allow',
+    edit_notebook: 'allow',
+    read_deployment_config: 'allow',
+    deploy_web_app: 'ask',
+    check_deploy_status: 'allow',
     get_system_logs: 'allow',
     get_changelog: 'allow',
     git_diff: 'allow',

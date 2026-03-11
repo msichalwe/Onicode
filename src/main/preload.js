@@ -55,6 +55,25 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('ai-agent-step', handler);
     },
 
+    // Ask User Question (Cascade-level structured questions)
+    answerQuestion: (questionId, answer) => ipcRenderer.invoke('ai-user-answer', { questionId, answer }),
+    respondToPermission: (approvalId, approved) => ipcRenderer.invoke('ai-permission-response', { approvalId, approved }),
+    onPermissionRequest: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-permission-request', handler);
+        return () => ipcRenderer.removeListener('ai-permission-request', handler);
+    },
+    onAskUser: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-ask-user', handler);
+        return () => ipcRenderer.removeListener('ai-ask-user', handler);
+    },
+    onThinkingStep: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-thinking-step', handler);
+        return () => ipcRenderer.removeListener('ai-thinking-step', handler);
+    },
+
     // Agent & process runtime
     listAgents: () => ipcRenderer.invoke('list-agents'),
     listBackgroundProcesses: () => ipcRenderer.invoke('list-background-processes'),

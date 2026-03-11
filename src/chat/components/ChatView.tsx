@@ -53,6 +53,7 @@ export interface Message {
     toolSteps?: ToolStep[];
     questionsAnswered?: boolean;
     questionAnswers?: Record<number, string[]>;
+    isError?: boolean;
 }
 
 export interface Attachment {
@@ -246,6 +247,18 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     const [showScrollBtn, setShowScrollBtn] = useState(false);
     const [contextInfo, setContextInfo] = useState<{ tokens: number; messages: number } | null>(null);
+    const [pendingQuestion, setPendingQuestion] = useState<{
+        questionId: string;
+        question: string;
+        options: Array<{ label: string; description?: string }>;
+        allowMultiple: boolean;
+    } | null>(null);
+    const [selectedOptions, setSelectedOptions] = useState<Set<number>>(new Set());
+    const [pendingApproval, setPendingApproval] = useState<{
+        approvalId: string;
+        tool: string;
+        args: Record<string, unknown>;
+    } | null>(null);
     const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
     const [sessionTimer, setSessionTimer] = useState<number>(0);
     const [thinkingLevel, setThinkingLevel] = useState<string>(() =>
@@ -448,6 +461,32 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             setShowMentionMenu(false);
         }
     }, [input]);
+
+    // ── Ask User Question listener (Cascade-level) ──
+    useEffect(() => {
+        if (!window.onicode?.onAskUser) return;
+        const removeListener = window.onicode.onAskUser((data) => {
+            setPendingQuestion(data);
+            setSelectedOptions(new Set());
+        });
+        return removeListener;
+    }, []);
+
+    // ── Permission Approval listener ──
+    useEffect(() => {
+        if (!window.onicode?.onPermissionRequest) return;
+        const removeListener = window.onicode.onPermissionRequest((data) => {
+            setPendingApproval(data);
+        });
+        return removeListener;
+    }, []);
+
+    const handleAnswerQuestion = React.useCallback((answer: string | string[]) => {
+        if (!pendingQuestion || !window.onicode?.answerQuestion) return;
+        window.onicode.answerQuestion(pendingQuestion.questionId, answer);
+        setPendingQuestion(null);
+        setSelectedOptions(new Set());
+    }, [pendingQuestion]);
 
     // ── Project-scoped attachments (loaded from SQLite) ──
     const [projectAttachments, setProjectAttachments] = useState<Attachment[]>([]);
@@ -667,7 +706,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             if (error) {
                 setMessages((prev) => [...prev, {
                     id: generateId(), role: 'ai' as const,
-                    content: `Failed to get response: ${error}\n\nCheck your API key and connection in **Settings**.`,
+                    content: `Failed to get response: ${error}\n\nCheck your API key and connection in **Settings**, or click Retry below.`,
+                    isError: true,
                     timestamp: Date.now(),
                     toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
                 }]);
@@ -710,7 +750,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             sendingRef.current = false;
             setMessages((prev) => [...prev, {
                 id: generateId(), role: 'ai' as const,
-                content: `Failed to get response: ${result.error}\n\nCheck your API key and connection in **Settings**.`,
+                content: `Failed to get response: ${result.error}\n\nCheck your API key and connection in **Settings**, or click Retry below.`,
+                isError: true,
                 timestamp: Date.now(),
             }]);
         }
@@ -792,7 +833,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             const errorMessage = err instanceof Error ? err.message : 'Unknown error';
             setMessages((prev) => [...prev, {
                 id: generateId(), role: 'ai' as const,
-                content: `Failed to get response: ${errorMessage}\n\nCheck your API key and connection in **Settings**.`,
+                content: `Failed to get response: ${errorMessage}\n\nCheck your API key and connection in **Settings**, or click Retry below.`,
+                isError: true,
                 timestamp: Date.now(),
             }]);
         }
@@ -1442,6 +1484,17 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 find_implementation: 'Found', impact_analysis: 'Impact', prepare_edit_context: 'Context',
                 smart_read: 'Smart Read', batch_search: 'Batch Search',
                 verify_project: 'Verified',
+                ask_user_question: 'Question',
+                sequential_thinking: 'Thinking',
+                trajectory_search: 'History Search',
+                find_by_name: 'Found Files',
+                read_url_content: 'Web Fetch',
+                view_content_chunk: 'Reading',
+                read_notebook: 'Notebook',
+                edit_notebook: 'Edit Notebook',
+                read_deployment_config: 'Deploy Config',
+                deploy_web_app: 'Deploying',
+                check_deploy_status: 'Deploy Status',
             };
             return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
@@ -1632,6 +1685,60 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const qCount = Array.isArray(a.queries) ? (a.queries as unknown[]).length : '?';
                     return `${qCount} queries → ${total} results`;
                 }
+                case 'ask_user_question': {
+                    const answer = r?.answer;
+                    return answer ? `→ ${String(answer).slice(0, 60)}` : '(waiting...)';
+                }
+                case 'sequential_thinking': {
+                    const num = a.thought_number ?? '?';
+                    const total = a.total_thoughts ?? '?';
+                    const isRev = a.is_revision ? ' (revision)' : '';
+                    const branch = a.branch_id ? ` [${a.branch_id}]` : '';
+                    return `Step ${num}/${total}${isRev}${branch}`;
+                }
+                case 'trajectory_search': {
+                    const total = r?.total ?? '?';
+                    return `"${String(a.query || '').slice(0, 40)}" (${total} results)`;
+                }
+                case 'find_by_name': {
+                    const total = r?.total ?? '?';
+                    return `"${String(a.pattern || '')}" (${total} found)`;
+                }
+                case 'read_url_content': {
+                    const url = String(a.url || '');
+                    const domain = url.replace(/^https?:\/\//, '').split('/')[0];
+                    const chunks = r?.total_chunks ?? '?';
+                    return `${domain} (${chunks} chunks)`;
+                }
+                case 'view_content_chunk': {
+                    const pos = a.position ?? '?';
+                    const total = r?.total_chunks ?? '?';
+                    return `Chunk ${pos}/${total}`;
+                }
+                case 'read_notebook': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const cells = r?.total_cells ?? '?';
+                    return `${fname} (${cells} cells)`;
+                }
+                case 'edit_notebook': {
+                    const fname = String(a.file_path || '').split('/').pop();
+                    const mode = a.edit_mode || 'replace';
+                    return `${fname} (${mode} cell ${a.cell_number ?? 0})`;
+                }
+                case 'read_deployment_config': {
+                    const framework = r?.framework ?? 'unknown';
+                    const ready = r?.ready ? 'ready' : 'not ready';
+                    return `${framework} — ${ready}`;
+                }
+                case 'deploy_web_app': {
+                    const provider = a.provider || 'netlify';
+                    const url = r?.url ? String(r.url) : 'deploying...';
+                    return `${provider}: ${url}`;
+                }
+                case 'check_deploy_status': {
+                    const status = r?.status ?? 'checking';
+                    return `Status: ${status}`;
+                }
                 default:
                     return '';
             }
@@ -1660,6 +1767,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'orchestrate': return !!(r.summary || r.report);
                 case 'spawn_specialist': return !!(r.result || r.content);
                 case 'verify_project': return !!(r.issues || r.summary);
+                case 'sequential_thinking': return true;
+                case 'trajectory_search': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
+                case 'find_by_name': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
+                case 'read_url_content': return !!(r.first_chunk);
+                case 'read_notebook': return !!(r.cells && Array.isArray(r.cells) && (r.cells as unknown[]).length > 0);
+                case 'read_deployment_config': return true;
+                case 'deploy_web_app': return !!(r.output || r.url);
                 default: return false;
             }
         };
@@ -2058,6 +2172,154 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         </div>
                     );
                 }
+                case 'sequential_thinking': {
+                    const thought = String(a.thought || r?.thought || '');
+                    const num = Number(a.thought_number || r?.thought_number || 0);
+                    const total = Number(a.total_thoughts || r?.total_thoughts || 0);
+                    const isRev = a.is_revision || false;
+                    const branch = a.branch_id as string || null;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal" style={{ borderLeft: `3px solid ${isRev ? '#ffcc00' : branch ? '#88aaff' : 'var(--text-muted)'}` }}>
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">
+                                        Thought {num}/{total}{isRev ? ' (revision)' : ''}{branch ? ` [${branch}]` : ''}
+                                    </span>
+                                </div>
+                                <div style={{ padding: '6px 8px', fontSize: '0.85rem', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                                    {thought}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'trajectory_search': {
+                    const results = (r.results || []) as Array<{ conversation_title: string; role: string; score: number; snippet: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">History: &quot;{String(a.query || '').slice(0, 40)}&quot;</span>
+                                    <span className="tool-step-exit-code">{results.length} matches</span>
+                                </div>
+                                {results.slice(0, 10).map((res, i) => (
+                                    <div key={i} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border)', fontSize: '0.8rem' }}>
+                                        <div style={{ display: 'flex', gap: 8, opacity: 0.7, marginBottom: 2 }}>
+                                            <span>{res.conversation_title}</span>
+                                            <span>({res.role})</span>
+                                            <span style={{ marginLeft: 'auto' }}>score: {res.score}</span>
+                                        </div>
+                                        <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.78rem' }}>{String(res.snippet || '').slice(0, 300)}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'find_by_name': {
+                    const results = (r.results || []) as Array<{ path: string; name: string; type: string; size: number | null }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">Find: &quot;{String(a.pattern || '')}&quot;</span>
+                                    <span className="tool-step-exit-code">{results.length} results</span>
+                                </div>
+                                <div style={{ padding: '4px 8px', fontSize: '0.8rem' }}>
+                                    {results.slice(0, 30).map((res, i) => (
+                                        <div key={i} style={{ padding: '1px 0', display: 'flex', gap: 8 }}>
+                                            <span style={{ color: res.type === 'directory' ? '#88aaff' : 'inherit' }}>
+                                                {res.type === 'directory' ? '📁' : '📄'} {res.path}
+                                            </span>
+                                            {res.size != null && <span style={{ opacity: 0.5, marginLeft: 'auto' }}>{(res.size / 1024).toFixed(1)}KB</span>}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'read_url_content': {
+                    const content = String(r.first_chunk || '');
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">{String(r.url || a.url || '')}</span>
+                                    <span className="tool-step-exit-code">{String(r.total_chunks)} chunks, {String(r.total_chars)} chars</span>
+                                </div>
+                                <div className="tool-step-terminal-text" style={{ whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto' }}>
+                                    {content.slice(0, 2000)}
+                                    {content.length > 2000 && '\n... (truncated)'}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'read_notebook': {
+                    const cells = (r.cells || []) as Array<{ cell_number: number; cell_type: string; source: string; execution_count: number | null }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">{String(a.file_path || '').split('/').pop()}</span>
+                                    <span className="tool-step-exit-code">{cells.length} cells ({String(r.kernel || 'unknown')})</span>
+                                </div>
+                                {cells.slice(0, 20).map((cell, i) => (
+                                    <div key={i} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border)' }}>
+                                        <div style={{ display: 'flex', gap: 8, fontSize: '0.75rem', opacity: 0.6, marginBottom: 2 }}>
+                                            <span>[{cell.cell_number}]</span>
+                                            <span style={{ color: cell.cell_type === 'code' ? 'var(--accent)' : 'var(--text-secondary)' }}>
+                                                {cell.cell_type}
+                                            </span>
+                                            {cell.execution_count != null && <span>exec: {cell.execution_count}</span>}
+                                        </div>
+                                        <pre style={{ margin: 0, fontSize: '0.78rem', whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto' }}>
+                                            {String(cell.source || '').slice(0, 500)}
+                                        </pre>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'read_deployment_config': {
+                    const issues = (r.issues || []) as string[];
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">Deploy Config</span>
+                                    <span className="tool-step-exit-code">{r.ready ? 'READY' : 'NOT READY'}</span>
+                                </div>
+                                <div style={{ padding: '4px 8px', fontSize: '0.8rem' }}>
+                                    <div>Framework: {String(r.framework || 'unknown')}</div>
+                                    <div>Build script: {r.has_build ? 'yes' : 'no'}</div>
+                                    {r.config_files != null && <div>Config: {(r.config_files as string[]).join(', ') || 'none'}</div>}
+                                    {issues.length > 0 && (
+                                        <div style={{ color: 'var(--error, #ff4444)', marginTop: 4 }}>
+                                            {issues.map((issue, i) => <div key={i}>- {issue}</div>)}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                case 'deploy_web_app': {
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-terminal">
+                                <div className="tool-step-terminal-header">
+                                    <span className="tool-step-terminal-prompt">Deploy ({String(a.provider || 'netlify')})</span>
+                                    <span className="tool-step-exit-code">{r.success ? 'SUCCESS' : 'FAILED'}</span>
+                                </div>
+                                {r.url != null && <div style={{ padding: '4px 8px', fontSize: '0.85rem', color: 'var(--accent)' }}>{String(r.url)}</div>}
+                                {r.output != null && <div className="tool-step-terminal-text">{String(r.output).slice(0, 500)}</div>}
+                            </div>
+                        </div>
+                    );
+                }
                 default:
                     return null;
             }
@@ -2066,7 +2328,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },
@@ -2350,6 +2612,18 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                     ) : (
                                         <div className="message-bubble">{renderMessageContent(message.content)}</div>
                                     )}
+                                    {message.isError && !isTyping && (
+                                        <button
+                                            type="button"
+                                            className="retry-button"
+                                            onClick={() => {
+                                                sendToAI('continue', messages.filter(m => m.id !== message.id));
+                                            }}
+                                        >
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                                            Retry
+                                        </button>
+                                    )}
                                     {message.attachments && message.attachments.length > 0 && (
                                         <div className="message-attachments">
                                             {message.attachments.map((att, i) => (
@@ -2554,6 +2828,98 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                     <line x1="6" y1="6" x2="18" y2="18" />
                                 </svg>
                             </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* ── Permission Approval Card ── */}
+                {pendingApproval && (
+                    <div className="ask-user-card" style={{ borderColor: '#ff8800' }}>
+                        <div className="ask-user-question">
+                            Allow <code style={{ background: 'var(--hover)', padding: '2px 6px', borderRadius: 4 }}>{pendingApproval.tool}</code>?
+                        </div>
+                        {pendingApproval.args.command != null && (
+                            <div style={{ padding: '4px 8px', fontSize: '0.82rem', fontFamily: 'var(--font-mono)', background: 'var(--hover)', borderRadius: 6, marginBottom: 8 }}>
+                                {String(pendingApproval.args.command).slice(0, 200)}
+                            </div>
+                        )}
+                        <div className="ask-user-options">
+                            <button
+                                type="button"
+                                className="ask-user-option"
+                                style={{ borderColor: '#44cc44' }}
+                                onClick={() => {
+                                    window.onicode?.respondToPermission(pendingApproval.approvalId, true);
+                                    setPendingApproval(null);
+                                }}
+                            >
+                                <span className="ask-user-option-label">Allow</span>
+                            </button>
+                            <button
+                                type="button"
+                                className="ask-user-option"
+                                style={{ borderColor: '#ff4444' }}
+                                onClick={() => {
+                                    window.onicode?.respondToPermission(pendingApproval.approvalId, false);
+                                    setPendingApproval(null);
+                                }}
+                            >
+                                <span className="ask-user-option-label">Deny</span>
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* ── Ask User Question Card ── */}
+                {pendingQuestion && (
+                    <div className="ask-user-card">
+                        <div className="ask-user-question">{pendingQuestion.question}</div>
+                        <div className="ask-user-options">
+                            {pendingQuestion.options.map((opt, i) => (
+                                <button
+                                    key={i}
+                                    type="button"
+                                    className={`ask-user-option ${selectedOptions.has(i) ? 'selected' : ''}`}
+                                    onClick={() => {
+                                        if (pendingQuestion.allowMultiple) {
+                                            setSelectedOptions(prev => {
+                                                const next = new Set(prev);
+                                                if (next.has(i)) next.delete(i); else next.add(i);
+                                                return next;
+                                            });
+                                        } else {
+                                            handleAnswerQuestion(opt.label);
+                                        }
+                                    }}
+                                >
+                                    <span className="ask-user-option-label">{opt.label}</span>
+                                    {opt.description && <span className="ask-user-option-desc">{opt.description}</span>}
+                                </button>
+                            ))}
+                        </div>
+                        {pendingQuestion.allowMultiple && selectedOptions.size > 0 && (
+                            <button
+                                type="button"
+                                className="ask-user-confirm"
+                                onClick={() => {
+                                    const selected = [...selectedOptions].map(i => pendingQuestion.options[i].label);
+                                    handleAnswerQuestion(selected);
+                                }}
+                            >
+                                Confirm ({selectedOptions.size} selected)
+                            </button>
+                        )}
+                        <div className="ask-user-custom">
+                            <input
+                                type="text"
+                                placeholder="Or type a custom answer..."
+                                className="ask-user-custom-input"
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && (e.target as HTMLInputElement).value.trim()) {
+                                        handleAnswerQuestion((e.target as HTMLInputElement).value.trim());
+                                    }
+                                }}
+                            />
                         </div>
                     </div>
                 )}

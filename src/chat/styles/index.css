@@ -2927,6 +2927,122 @@ body {
   font-weight: 600;
 }
 
+/* ── Retry Button ── */
+.retry-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.retry-button:hover {
+  background: var(--hover);
+  border-color: var(--accent);
+}
+.retry-button svg {
+  opacity: 0.7;
+}
+
+/* ── Ask User Question Card (Cascade-level) ── */
+.ask-user-card {
+  margin: 8px 0;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  animation: slideUp 0.2s ease;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ask-user-question {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+.ask-user-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ask-user-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  text-align: left;
+  min-width: 100px;
+}
+.ask-user-option:hover {
+  border-color: var(--accent);
+  background: var(--hover);
+}
+.ask-user-option.selected {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+}
+.ask-user-option-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+.ask-user-option-desc {
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+.ask-user-confirm {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 8px;
+  font-family: inherit;
+}
+.ask-user-confirm:hover {
+  filter: brightness(1.1);
+}
+.ask-user-custom {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.ask-user-custom-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: inherit;
+  outline: none;
+}
+.ask-user-custom-input:focus {
+  border-color: var(--accent);
+}
+
 /* ── Attachments ── */
 .message-attachments {
   display: flex;

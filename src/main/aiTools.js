@@ -48,23 +48,61 @@ function setAgentModeRef(mode) { _agentMode = mode; }
 function setDangerousProtectionCheck(fn) { _dangerousProtectionCheck = fn; }
 function setAutoCommitCheck(fn) { _autoCommitCheck = fn; }
 
+const _pendingApprovals = new Map(); // approvalId -> { resolve, timeout }
+
 /**
  * Check if a tool is allowed to run given current permissions and agent mode.
  * Returns { allowed: true } or { allowed: false, reason: string }
+ * For 'ask' permissions, returns a Promise that resolves when user approves/denies.
  */
-function checkToolPermission(toolName) {
+function checkToolPermission(toolName, toolArgs) {
     if (!_permissions) return { allowed: true };
     const perm = _permissions[toolName] || 'allow';
     if (perm === 'allow') return { allowed: true };
     if (perm === 'deny') return { allowed: false, reason: `Tool "${toolName}" is denied by current permissions (agent mode: ${_agentMode})` };
     if (perm === 'ask') {
-        // For 'ask' tools, send a request to the renderer and wait for approval
-        // For now, auto-allow but log a warning — full ask UI comes later
-        logger.warn('permissions', `Tool "${toolName}" requires approval (auto-allowing for now)`);
-        sendToRenderer('ai-permission-request', { tool: toolName, mode: _agentMode });
-        return { allowed: true, warned: true };
+        const approvalId = `approve_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        logger.info('permissions', `Tool "${toolName}" requires user approval (${approvalId})`);
+
+        // Send approval request to renderer with tool details
+        sendToRenderer('ai-permission-request', {
+            approvalId,
+            tool: toolName,
+            args: toolArgs || {},
+            mode: _agentMode,
+        });
+
+        // Return a promise that resolves when user approves/denies
+        return new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+                _pendingApprovals.delete(approvalId);
+                resolve({ allowed: true, warned: true }); // Auto-allow after 60s timeout
+                logger.warn('permissions', `Approval timeout for ${toolName} — auto-allowing`);
+            }, 60000);
+
+            _pendingApprovals.set(approvalId, { resolve, timeout });
+        });
     }
     return { allowed: true };
+}
+
+/**
+ * Resolve a pending permission approval when the user responds.
+ * Called from index.js when renderer sends 'ai-permission-response'.
+ */
+function resolvePermissionApproval(approvalId, approved) {
+    const pending = _pendingApprovals.get(approvalId);
+    if (pending) {
+        clearTimeout(pending.timeout);
+        _pendingApprovals.delete(approvalId);
+        if (approved) {
+            pending.resolve({ allowed: true, approved: true });
+            logger.info('permissions', `User approved ${approvalId}`);
+        } else {
+            pending.resolve({ allowed: false, reason: 'User denied this action' });
+            logger.info('permissions', `User denied ${approvalId}`);
+        }
+    }
 }
 
 // ══════════════════════════════════════════
@@ -182,6 +220,159 @@ let _currentSessionId = null;
 let _currentProjectId = null;
 let _currentProjectPath = null;
 let _aiStreamingActive = false; // Lock: true when AI is actively executing tool calls
+
+// ── Cascade-level state ──
+const _pendingQuestions = new Map(); // questionId -> { resolve, timeout }
+let _thoughtChain = null; // Array of sequential thinking steps (reset per session)
+const _documentCache = new Map(); // documentId -> { url, content, chunks[], fetchedAt }
+
+/**
+ * Quick lint/syntax check after file edits.
+ * Returns array of diagnostic strings, or empty array if clean.
+ * Non-blocking — returns [] on any error rather than crashing the edit flow.
+ */
+function quickLintCheck(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    const diagnostics = [];
+
+    try {
+        if (['.js', '.mjs', '.cjs'].includes(ext)) {
+            // Node.js syntax check
+            const result = require('child_process').execSync(
+                `node --check "${filePath}" 2>&1`,
+                { encoding: 'utf-8', timeout: 5000 }
+            );
+        } else if (['.ts', '.tsx', '.jsx'].includes(ext)) {
+            // TypeScript syntax check — look for tsconfig in project
+            const projectDir = _currentProjectPath || path.dirname(filePath);
+            const tsconfig = path.join(projectDir, 'tsconfig.json');
+            if (fs.existsSync(tsconfig)) {
+                try {
+                    const result = require('child_process').execSync(
+                        `npx tsc --noEmit --pretty false "${filePath}" 2>&1`,
+                        { encoding: 'utf-8', timeout: 15000, cwd: projectDir }
+                    );
+                } catch (tsErr) {
+                    // tsc exits non-zero on errors
+                    const output = tsErr.stdout || tsErr.stderr || '';
+                    const lines = output.split('\n').filter(l => l.includes('error TS'));
+                    for (const line of lines.slice(0, 5)) {
+                        diagnostics.push(line.trim());
+                    }
+                }
+            }
+        } else if (ext === '.json') {
+            // JSON syntax check
+            JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        } else if (ext === '.py') {
+            try {
+                require('child_process').execSync(
+                    `python3 -m py_compile "${filePath}" 2>&1`,
+                    { encoding: 'utf-8', timeout: 5000 }
+                );
+            } catch (pyErr) {
+                const output = pyErr.stdout || pyErr.stderr || '';
+                if (output.trim()) diagnostics.push(output.trim().split('\n').slice(-2).join(' '));
+            }
+        }
+    } catch (err) {
+        // Syntax check itself failed (e.g., node --check found errors)
+        const output = err.stdout || err.stderr || err.message || '';
+        const lines = output.split('\n').filter(l => l.trim());
+        for (const line of lines.slice(0, 3)) {
+            diagnostics.push(line.trim());
+        }
+    }
+
+    return diagnostics;
+}
+
+/**
+ * Strip HTML to readable text (basic implementation for URL content reading).
+ */
+function htmlToText(html) {
+    return html
+        // Remove script/style blocks
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<nav[\s\S]*?<\/nav>/gi, '')
+        .replace(/<footer[\s\S]*?<\/footer>/gi, '')
+        // Convert common block elements to newlines
+        .replace(/<\/?(div|p|br|h[1-6]|li|tr|td|th|blockquote|pre|hr|section|article|header|main)[^>]*>/gi, '\n')
+        // Remove remaining tags
+        .replace(/<[^>]+>/g, '')
+        // Decode common entities
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+        // Collapse whitespace
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n\s*\n\s*\n+/g, '\n\n')
+        .trim();
+}
+
+/**
+ * Chunk text content into pages of ~4000 chars each.
+ */
+function chunkContent(content, chunkSize = 4000) {
+    const chunks = [];
+    for (let i = 0; i < content.length; i += chunkSize) {
+        chunks.push(content.slice(i, i + chunkSize));
+    }
+    return chunks;
+}
+
+/**
+ * Simple glob pattern matcher (supports * and ? wildcards)
+ */
+function matchGlob(name, pattern) {
+    const regex = pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.');
+    return new RegExp(`^${regex}$`, 'i').test(name);
+}
+
+/**
+ * Search messages in a conversation for relevant chunks
+ */
+function searchMessages(messages, query, limit, convId, convTitle) {
+    const results = [];
+    const queryLower = query.toLowerCase();
+    const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || '');
+        const contentLower = content.toLowerCase();
+
+        // Score based on query term matches
+        let score = 0;
+        for (const term of queryTerms) {
+            const occurrences = (contentLower.match(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+            score += occurrences;
+        }
+
+        if (score > 0) {
+            // Extract a relevant snippet (max 500 chars around the first match)
+            const firstMatch = contentLower.indexOf(queryTerms[0] || queryLower);
+            const snippetStart = Math.max(0, firstMatch - 100);
+            const snippet = content.slice(snippetStart, snippetStart + 500);
+
+            results.push({
+                conversation_id: convId,
+                conversation_title: convTitle || '(untitled)',
+                message_index: i,
+                role: msg.role,
+                score: Math.round(score * 100) / 100,
+                snippet: snippet + (content.length > snippetStart + 500 ? '...' : ''),
+                timestamp: msg.timestamp || null,
+            });
+        }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, limit);
+}
 
 function startSession(projectId, projectPath) {
     // GUARD: Never reset session while AI is actively streaming (prevents task wipe race condition)
@@ -1010,13 +1201,15 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'run_command',
-            description: 'Execute a terminal command and return stdout/stderr. Use for running scripts, installing packages, building, testing, git operations, etc.',
+            description: 'Execute a terminal command and return stdout/stderr. Use for running scripts, installing packages, building, testing, git operations, etc. Never use cd — use cwd instead.',
             parameters: {
                 type: 'object',
                 properties: {
-                    command: { type: 'string', description: 'The command to execute' },
-                    cwd: { type: 'string', description: 'Working directory for the command' },
-                    timeout: { type: 'integer', description: 'Timeout in milliseconds (default 30000)' },
+                    command: { type: 'string', description: 'The exact command to execute. Never includes cd — use cwd instead.' },
+                    cwd: { type: 'string', description: 'Working directory for the command (used instead of cd)' },
+                    timeout: { type: 'integer', description: 'Timeout in milliseconds (default 120000)' },
+                    blocking: { type: 'boolean', description: 'If true, blocks until command finishes (default: auto-detected). If false, runs async (for dev servers, watchers).' },
+                    safe_to_auto_run: { type: 'boolean', description: 'If true, this is a read-only command safe to auto-run (ls, cat, echo, pwd). NEVER set true for destructive commands (rm, install, curl, etc.).' },
                 },
                 required: ['command'],
             },
@@ -1745,6 +1938,213 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    // ══════════════════════════════════════════
+    //  Cascade-Level Tools
+    // ══════════════════════════════════════════
+    // ── Ask User Question (structured multiple-choice) ──
+    {
+        type: 'function',
+        function: {
+            name: 'ask_user_question',
+            description: 'Present the user with a structured question and up to 4 clickable options. Use when you need clarification, confirmation, or a choice from the user. The user can also provide free-text instead of picking an option. ALWAYS use this instead of asking questions in plain text — it provides a better UX with clickable buttons.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    question: { type: 'string', description: 'The question to ask the user' },
+                    options: {
+                        type: 'array',
+                        description: 'Up to 4 options for the user to choose from',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                label: { type: 'string', description: 'Short label for the option (shown on button)' },
+                                description: { type: 'string', description: 'Longer description of what this option means' },
+                            },
+                            required: ['label'],
+                        },
+                    },
+                    allow_multiple: { type: 'boolean', description: 'Whether the user can select more than one option (default: false)' },
+                },
+                required: ['question', 'options'],
+            },
+        },
+    },
+    // ── Sequential Thinking (structured chain-of-thought reasoning) ──
+    {
+        type: 'function',
+        function: {
+            name: 'sequential_thinking',
+            description: 'A structured reasoning tool for complex multi-step problems. Call this multiple times to build a chain of thought. Each call adds a numbered thought step. You can revise previous thoughts, branch into alternatives, and adjust the total number of steps dynamically. Use for: debugging with unclear root cause, multi-file refactoring planning, architecture decisions, any problem where you need to reason step by step before acting.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    thought: { type: 'string', description: 'The current thinking step content' },
+                    thought_number: { type: 'integer', description: 'Current step number (1-indexed)' },
+                    total_thoughts: { type: 'integer', description: 'Current estimate of total steps needed (can be adjusted)' },
+                    next_thought_needed: { type: 'boolean', description: 'Whether another thought step follows' },
+                    is_revision: { type: 'boolean', description: 'Whether this revises a previous thought' },
+                    revises_thought: { type: 'integer', description: 'Which thought number is being reconsidered' },
+                    branch_from_thought: { type: 'integer', description: 'Branching point thought number' },
+                    branch_id: { type: 'string', description: 'Identifier for the current branch (e.g., "approach-A")' },
+                },
+                required: ['thought', 'thought_number', 'total_thoughts', 'next_thought_needed'],
+            },
+        },
+    },
+    // ── Trajectory Search (search past conversations) ──
+    {
+        type: 'function',
+        function: {
+            name: 'trajectory_search',
+            description: 'Search through previous conversations for relevant context. Returns matching conversation chunks scored by relevance. Use when the user references past work, or when you need context from a previous session.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search query — can be a topic, file name, tool name, or natural language description' },
+                    conversation_id: { type: 'string', description: 'Optional: specific conversation ID to search within' },
+                    max_results: { type: 'integer', description: 'Maximum number of results to return (default: 10, max: 50)' },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    // ── Find by Name (enhanced file finder) ──
+    {
+        type: 'function',
+        function: {
+            name: 'find_by_name',
+            description: 'Search for files and directories by name pattern. Fast alternative to list_directory for locating files. Respects .gitignore by default. Use before read_file when you know the filename but not the exact path.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    search_directory: { type: 'string', description: 'The directory to search within' },
+                    pattern: { type: 'string', description: 'Glob pattern to match (e.g., "*.tsx", "README*", "auth*")' },
+                    type: { type: 'string', enum: ['file', 'directory', 'any'], description: 'Filter by type (default: "any")' },
+                    extensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to include without dot (e.g., ["ts", "tsx", "js"])' },
+                    excludes: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to exclude (e.g., ["node_modules/**", "dist/**"])' },
+                    max_depth: { type: 'integer', description: 'Maximum directory depth to search (default: unlimited)' },
+                },
+                required: ['search_directory', 'pattern'],
+            },
+        },
+    },
+
+    // ── URL Content & Pagination ──
+
+    {
+        type: 'function',
+        function: {
+            name: 'read_url_content',
+            description: 'Fetch and read content from a public HTTP/HTTPS URL. Returns the text content (HTML stripped) and a document_id for paginated reading with view_content_chunk. Use for documentation, API references, or any web page the user references.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'The URL to fetch (must be HTTP or HTTPS)' },
+                },
+                required: ['url'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'view_content_chunk',
+            description: 'View a specific chunk of a previously fetched web document. The document must have already been read by read_url_content. Use to page through long documents.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    document_id: { type: 'string', description: 'The document ID from a previous read_url_content call' },
+                    position: { type: 'integer', description: 'The chunk position to view (0-indexed)' },
+                },
+                required: ['document_id', 'position'],
+            },
+        },
+    },
+
+    // ── Jupyter Notebook ──
+
+    {
+        type: 'function',
+        function: {
+            name: 'read_notebook',
+            description: 'Read and parse a Jupyter notebook (.ipynb file). Shows cells with their IDs, types (code/markdown), source content, and outputs in a formatted view.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    file_path: { type: 'string', description: 'Absolute path to the .ipynb file' },
+                },
+                required: ['file_path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'edit_notebook',
+            description: 'Edit a Jupyter notebook cell. Can replace existing cell content or insert a new cell. Cannot delete cells.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    file_path: { type: 'string', description: 'Absolute path to the .ipynb file' },
+                    cell_number: { type: 'integer', description: '0-indexed cell number to edit (default: 0)' },
+                    new_source: { type: 'string', description: 'New content for the cell' },
+                    edit_mode: { type: 'string', enum: ['replace', 'insert'], description: '"replace" to replace cell content (default), "insert" to insert a new cell' },
+                    cell_type: { type: 'string', enum: ['code', 'markdown'], description: 'Cell type — required when edit_mode is "insert"' },
+                },
+                required: ['file_path', 'new_source'],
+            },
+        },
+    },
+
+    // ── Deployment ──
+
+    {
+        type: 'function',
+        function: {
+            name: 'read_deployment_config',
+            description: 'Read the deployment configuration for a web project. Detects framework, build settings, and readiness for deployment. Must be called before deploy_web_app.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    project_path: { type: 'string', description: 'Absolute path to the project root' },
+                },
+                required: ['project_path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'deploy_web_app',
+            description: 'Deploy a JavaScript web application to a hosting provider (Netlify/Vercel). Runs the build and deploys. Only source files needed — no pre-build required.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    project_path: { type: 'string', description: 'Absolute path to the project' },
+                    framework: { type: 'string', enum: ['nextjs', 'react', 'vue', 'svelte', 'astro', 'nuxt', 'gatsby', 'vite', 'remix', 'angular'], description: 'Framework enum' },
+                    provider: { type: 'string', enum: ['netlify', 'vercel'], description: 'Hosting provider (default: netlify)' },
+                    subdomain: { type: 'string', description: 'Unique subdomain for the URL (leave empty for re-deploys)' },
+                    project_id: { type: 'string', description: 'Existing project ID for re-deploys' },
+                },
+                required: ['project_path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'check_deploy_status',
+            description: 'Check whether a deployment build succeeded and the site is live.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    deployment_id: { type: 'string', description: 'The deployment ID from deploy_web_app' },
+                    provider: { type: 'string', enum: ['netlify', 'vercel'], description: 'Hosting provider' },
+                },
+                required: ['deployment_id'],
+            },
+        },
+    },
 ];
 
 // ══════════════════════════════════════════
@@ -1754,8 +2154,11 @@ const TOOL_DEFINITIONS = [
 async function executeTool(name, args) {
     const { executeHook, isDangerousCommand } = require('./hooks');
 
-    // ── Permission check ──
-    const permCheck = checkToolPermission(name);
+    // ── Permission check (may be async for 'ask' permissions) ──
+    let permCheck = checkToolPermission(name, args);
+    if (permCheck instanceof Promise) {
+        permCheck = await permCheck;
+    }
     if (!permCheck.allowed) {
         logger.warn('permissions', `Denied: ${name} — ${permCheck.reason}`);
         return { error: permCheck.reason };
@@ -1921,6 +2324,9 @@ async function executeTool(name, args) {
                         const fLinesAdded = new_string.split('\n').length;
                         sendToRenderer('ai-file-changed', { action: 'edited', path: file_path, linesAdded: fLinesAdded, linesRemoved: fLinesRemoved });
 
+                        // Lint feedback
+                        const fDiag = quickLintCheck(file_path);
+
                         return {
                             success: true,
                             file_path,
@@ -1928,7 +2334,8 @@ async function executeTool(name, args) {
                             similarity: Math.round(fuzzyResult.similarity * 100),
                             lines_removed: fLinesRemoved,
                             lines_added: fLinesAdded,
-                            warning: `Used fuzzy match (${Math.round(fuzzyResult.similarity * 100)}% similar). Original text had minor differences.`
+                            warning: `Used fuzzy match (${Math.round(fuzzyResult.similarity * 100)}% similar). Original text had minor differences.`,
+                            ...(fDiag.length > 0 ? { lint_errors: fDiag } : {}),
                         };
                     }
 
@@ -1952,12 +2359,16 @@ async function executeTool(name, args) {
                     linesRemoved: Math.max(0, linesRemoved - linesAdded),
                 });
 
+                // Lint feedback after edit
+                const editDiag = quickLintCheck(file_path);
+
                 return {
                     success: true,
                     file_path,
                     description: description || 'File edited',
                     lines_removed: linesRemoved,
                     lines_added: linesAdded,
+                    ...(editDiag.length > 0 ? { lint_errors: editDiag } : {}),
                 };
             }
 
@@ -1988,7 +2399,14 @@ async function executeTool(name, args) {
                     dir: dir,
                 });
 
-                return { success: true, file_path, lines: lineCount };
+                // Lint feedback after create
+                const createDiag = quickLintCheck(file_path);
+                return {
+                    success: true,
+                    file_path,
+                    lines: lineCount,
+                    ...(createDiag.length > 0 ? { lint_errors: createDiag } : {}),
+                };
             }
 
             case 'delete_file': {
@@ -3795,6 +4213,522 @@ async function executeTool(name, args) {
                 };
             }
 
+            // ══════════════════════════════════════════
+            //  Cascade-Level Tool Executors
+            // ══════════════════════════════════════════
+
+            case 'ask_user_question': {
+                const { question, options = [], allow_multiple = false } = args;
+                if (!question) return { error: 'question is required' };
+                if (!options.length) return { error: 'at least one option is required' };
+                if (options.length > 4) return { error: 'maximum 4 options allowed' };
+
+                const questionId = `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+                // Send question to renderer as a special UI event
+                sendToRenderer('ai-ask-user', {
+                    questionId,
+                    question,
+                    options: options.slice(0, 4),
+                    allowMultiple: allow_multiple,
+                });
+
+                logger.info('ask-user', `Question ${questionId}: ${question} (${options.length} options)`);
+
+                // Create a promise that resolves when the user answers
+                // The answer comes back via IPC 'ai-user-answer'
+                return new Promise((resolve) => {
+                    const timeout = setTimeout(() => {
+                        _pendingQuestions.delete(questionId);
+                        resolve({ question, answer: '(user did not respond within 5 minutes)', timed_out: true });
+                    }, 300000); // 5 min timeout
+
+                    _pendingQuestions.set(questionId, { resolve, timeout });
+                });
+            }
+
+            case 'sequential_thinking': {
+                const {
+                    thought,
+                    thought_number,
+                    total_thoughts,
+                    next_thought_needed,
+                    is_revision = false,
+                    revises_thought,
+                    branch_from_thought,
+                    branch_id,
+                } = args;
+
+                if (!thought || !thought_number || !total_thoughts) {
+                    return { error: 'thought, thought_number, and total_thoughts are required' };
+                }
+
+                // Initialize thought chain for this session if not exists
+                if (!_thoughtChain) _thoughtChain = [];
+
+                const step = {
+                    number: thought_number,
+                    total: total_thoughts,
+                    thought,
+                    isRevision: is_revision,
+                    revisesThought: revises_thought || null,
+                    branchFromThought: branch_from_thought || null,
+                    branchId: branch_id || null,
+                    timestamp: Date.now(),
+                };
+
+                // Handle revision: replace the revised thought
+                if (is_revision && revises_thought) {
+                    const idx = _thoughtChain.findIndex(t => t.number === revises_thought && !t.isRevision);
+                    if (idx >= 0) {
+                        _thoughtChain[idx].revised = true;
+                        _thoughtChain[idx].revisedBy = thought_number;
+                    }
+                }
+
+                _thoughtChain.push(step);
+
+                // Send thought step to renderer for display
+                sendToRenderer('ai-thinking-step', {
+                    step,
+                    chainLength: _thoughtChain.length,
+                    nextNeeded: next_thought_needed,
+                });
+
+                logger.info('thinking', `Step ${thought_number}/${total_thoughts}${is_revision ? ' (revision)' : ''}${branch_id ? ` [${branch_id}]` : ''}: ${thought.slice(0, 100)}`);
+
+                return {
+                    thought_number,
+                    total_thoughts,
+                    next_thought_needed,
+                    chain_length: _thoughtChain.length,
+                    ...(is_revision ? { revised_thought: revises_thought } : {}),
+                    ...(branch_id ? { branch_id } : {}),
+                };
+            }
+
+            case 'trajectory_search': {
+                const { query, conversation_id, max_results = 10 } = args;
+                if (!query) return { error: 'query is required' };
+
+                try {
+                    const { conversationStorage } = require('./storage');
+                    const limit = Math.min(max_results, 50);
+
+                    let results;
+                    if (conversation_id) {
+                        // Search within a specific conversation
+                        const conv = conversationStorage.get(conversation_id);
+                        if (!conv) return { error: `Conversation ${conversation_id} not found` };
+                        const messages = JSON.parse(conv.messages || '[]');
+                        results = searchMessages(messages, query, limit, conversation_id, conv.title);
+                    } else {
+                        // Search across all conversations
+                        const searchResults = conversationStorage.search(query);
+                        results = [];
+                        for (const sr of searchResults.slice(0, 10)) {
+                            const conv = conversationStorage.get(sr.id);
+                            if (!conv) continue;
+                            const messages = JSON.parse(conv.messages || '[]');
+                            const chunks = searchMessages(messages, query, Math.ceil(limit / Math.min(searchResults.length, 5)), sr.id, sr.title);
+                            results.push(...chunks);
+                        }
+                        // Sort by relevance score
+                        results.sort((a, b) => b.score - a.score);
+                        results = results.slice(0, limit);
+                    }
+
+                    logger.info('trajectory', `Search "${query}": ${results.length} results`);
+                    return { query, results, total: results.length };
+                } catch (err) {
+                    return { error: `Trajectory search failed: ${err.message}` };
+                }
+            }
+
+            case 'find_by_name': {
+                const {
+                    search_directory,
+                    pattern,
+                    type: filterType = 'any',
+                    extensions = [],
+                    excludes = [],
+                    max_depth,
+                } = args;
+
+                const expandedDir = search_directory.replace(/^~/, os.homedir());
+                if (!fs.existsSync(expandedDir)) {
+                    return { error: `Directory not found: ${search_directory}` };
+                }
+
+                try {
+                    const results = [];
+                    const defaultExcludes = ['node_modules', '.git', 'dist', 'build', '.next', '.nuxt', '__pycache__', '.venv', 'coverage', '.turbo'];
+                    const allExcludes = [...defaultExcludes, ...excludes.map(e => e.replace(/\/\*\*$/, ''))];
+
+                    function walkFind(dir, depth) {
+                        if (max_depth !== undefined && depth > max_depth) return;
+                        if (results.length >= 50) return; // Cap at 50
+
+                        let entries;
+                        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+                        for (const entry of entries) {
+                            if (results.length >= 50) break;
+                            if (allExcludes.includes(entry.name)) continue;
+                            if (entry.name.startsWith('.') && entry.name !== '.env' && entry.name !== '.gitignore') continue;
+
+                            const fullPath = path.join(dir, entry.name);
+                            const isDir = entry.isDirectory();
+
+                            // Type filter
+                            if (filterType === 'file' && isDir) {
+                                walkFind(fullPath, depth + 1);
+                                continue;
+                            }
+                            if (filterType === 'directory' && !isDir) continue;
+
+                            // Extension filter
+                            if (extensions.length > 0 && !isDir) {
+                                const ext = path.extname(entry.name).slice(1).toLowerCase();
+                                if (!extensions.includes(ext)) {
+                                    continue;
+                                }
+                            }
+
+                            // Pattern matching (simple glob)
+                            const matchesPattern = matchGlob(entry.name, pattern);
+
+                            if (matchesPattern) {
+                                try {
+                                    const stat = fs.statSync(fullPath);
+                                    results.push({
+                                        path: fullPath,
+                                        name: entry.name,
+                                        type: isDir ? 'directory' : 'file',
+                                        size: isDir ? null : stat.size,
+                                        modified: stat.mtime.toISOString(),
+                                    });
+                                } catch { /* skip inaccessible */ }
+                            }
+
+                            if (isDir) {
+                                walkFind(fullPath, depth + 1);
+                            }
+                        }
+                    }
+
+                    walkFind(expandedDir, 0);
+                    logger.info('find', `find_by_name "${pattern}" in ${search_directory}: ${results.length} matches`);
+                    return { pattern, search_directory, results, total: results.length };
+                } catch (err) {
+                    return { error: `Find by name failed: ${err.message}` };
+                }
+            }
+
+            // ── URL Content & Pagination ──
+
+            case 'read_url_content': {
+                const { url } = args;
+                if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+                    return { error: 'url must be a valid HTTP or HTTPS URL' };
+                }
+
+                try {
+                    const { net } = require('electron');
+                    const response = await new Promise((resolve, reject) => {
+                        const request = net.request(url);
+                        let body = '';
+                        request.on('response', (resp) => {
+                            resp.on('data', (chunk) => { body += chunk.toString(); });
+                            resp.on('end', () => resolve({ statusCode: resp.statusCode, body }));
+                        });
+                        request.on('error', reject);
+                        setTimeout(() => reject(new Error('Request timed out')), 30000);
+                        request.end();
+                    });
+
+                    if (response.statusCode >= 400) {
+                        return { error: `HTTP ${response.statusCode} fetching ${url}` };
+                    }
+
+                    // Convert HTML to text
+                    const contentType = response.body.slice(0, 100).toLowerCase();
+                    const isHtml = contentType.includes('<!doctype') || contentType.includes('<html');
+                    const text = isHtml ? htmlToText(response.body) : response.body;
+
+                    // Store in document cache
+                    const documentId = `doc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                    const chunks = chunkContent(text);
+                    _documentCache.set(documentId, {
+                        url,
+                        content: text,
+                        chunks,
+                        fetchedAt: new Date().toISOString(),
+                    });
+
+                    // Cleanup old documents (keep last 20)
+                    if (_documentCache.size > 20) {
+                        const oldest = _documentCache.keys().next().value;
+                        _documentCache.delete(oldest);
+                    }
+
+                    logger.info('url', `Fetched ${url}: ${text.length} chars, ${chunks.length} chunks`);
+
+                    return {
+                        document_id: documentId,
+                        url,
+                        total_chunks: chunks.length,
+                        total_chars: text.length,
+                        first_chunk: chunks[0] || '',
+                        hint: chunks.length > 1 ? `Use view_content_chunk with document_id="${documentId}" and position=1..${chunks.length - 1} to read remaining content.` : undefined,
+                    };
+                } catch (err) {
+                    return { error: `Failed to fetch URL: ${err.message}` };
+                }
+            }
+
+            case 'view_content_chunk': {
+                const { document_id, position } = args;
+                if (!document_id) return { error: 'document_id is required' };
+
+                const doc = _documentCache.get(document_id);
+                if (!doc) {
+                    return { error: `Document "${document_id}" not found in cache. Use read_url_content first to fetch the URL.` };
+                }
+
+                if (position < 0 || position >= doc.chunks.length) {
+                    return { error: `Position ${position} out of range. Valid range: 0-${doc.chunks.length - 1}` };
+                }
+
+                return {
+                    document_id,
+                    url: doc.url,
+                    position,
+                    total_chunks: doc.chunks.length,
+                    content: doc.chunks[position],
+                    has_next: position < doc.chunks.length - 1,
+                };
+            }
+
+            // ── Jupyter Notebook ──
+
+            case 'read_notebook': {
+                const { file_path } = args;
+                if (!fs.existsSync(file_path)) {
+                    return { error: `File not found: ${file_path}` };
+                }
+
+                try {
+                    const raw = fs.readFileSync(file_path, 'utf-8');
+                    const notebook = JSON.parse(raw);
+                    const cells = (notebook.cells || []).map((cell, idx) => {
+                        const source = Array.isArray(cell.source) ? cell.source.join('') : (cell.source || '');
+                        const outputs = (cell.outputs || []).map(out => {
+                            if (out.text) return { type: 'text', content: Array.isArray(out.text) ? out.text.join('') : out.text };
+                            if (out.data && out.data['text/plain']) return { type: 'text', content: Array.isArray(out.data['text/plain']) ? out.data['text/plain'].join('') : out.data['text/plain'] };
+                            if (out.data && out.data['image/png']) return { type: 'image', format: 'png', truncated: true };
+                            if (out.ename) return { type: 'error', name: out.ename, message: out.evalue || '' };
+                            return { type: 'unknown' };
+                        });
+                        return {
+                            cell_number: idx,
+                            cell_id: cell.id || `cell_${idx}`,
+                            cell_type: cell.cell_type || 'code',
+                            source: source.length > 5000 ? source.slice(0, 5000) + '\n... (truncated)' : source,
+                            outputs: outputs.slice(0, 5), // Cap outputs
+                            execution_count: cell.execution_count || null,
+                        };
+                    });
+
+                    const kernelSpec = notebook.metadata?.kernelspec || {};
+                    logger.info('notebook', `Read ${file_path}: ${cells.length} cells`);
+
+                    return {
+                        file_path,
+                        kernel: kernelSpec.display_name || kernelSpec.name || 'unknown',
+                        language: notebook.metadata?.language_info?.name || kernelSpec.language || 'unknown',
+                        total_cells: cells.length,
+                        cells,
+                    };
+                } catch (err) {
+                    return { error: `Failed to read notebook: ${err.message}` };
+                }
+            }
+
+            case 'edit_notebook': {
+                const { file_path, cell_number = 0, new_source, edit_mode = 'replace', cell_type } = args;
+                if (!fs.existsSync(file_path)) {
+                    return { error: `File not found: ${file_path}` };
+                }
+
+                try {
+                    const raw = fs.readFileSync(file_path, 'utf-8');
+                    const notebook = JSON.parse(raw);
+                    const cells = notebook.cells || [];
+
+                    if (edit_mode === 'insert') {
+                        if (!cell_type) return { error: 'cell_type is required for insert mode' };
+                        const newCell = {
+                            cell_type,
+                            source: new_source.split('\n').map((l, i, arr) => i < arr.length - 1 ? l + '\n' : l),
+                            metadata: {},
+                            ...(cell_type === 'code' ? { outputs: [], execution_count: null } : {}),
+                        };
+                        const insertAt = Math.min(cell_number, cells.length);
+                        cells.splice(insertAt, 0, newCell);
+                        logger.info('notebook', `Inserted ${cell_type} cell at position ${insertAt} in ${file_path}`);
+                    } else {
+                        // Replace
+                        if (cell_number < 0 || cell_number >= cells.length) {
+                            return { error: `Cell number ${cell_number} out of range (0-${cells.length - 1})` };
+                        }
+                        cells[cell_number].source = new_source.split('\n').map((l, i, arr) => i < arr.length - 1 ? l + '\n' : l);
+                        // Clear outputs for code cells on edit
+                        if (cells[cell_number].cell_type === 'code') {
+                            cells[cell_number].outputs = [];
+                            cells[cell_number].execution_count = null;
+                        }
+                        logger.info('notebook', `Replaced cell ${cell_number} in ${file_path}`);
+                    }
+
+                    notebook.cells = cells;
+                    fs.writeFileSync(file_path, JSON.stringify(notebook, null, 1));
+
+                    return {
+                        success: true,
+                        file_path,
+                        edit_mode,
+                        cell_number: edit_mode === 'insert' ? Math.min(cell_number, cells.length - 1) : cell_number,
+                        total_cells: cells.length,
+                    };
+                } catch (err) {
+                    return { error: `Failed to edit notebook: ${err.message}` };
+                }
+            }
+
+            // ── Deployment Tools ──
+
+            case 'read_deployment_config': {
+                const { project_path } = args;
+                if (!fs.existsSync(project_path)) {
+                    return { error: `Project not found: ${project_path}` };
+                }
+
+                try {
+                    const config = { project_path, ready: false, issues: [] };
+
+                    // Detect framework
+                    const pkgPath = path.join(project_path, 'package.json');
+                    if (fs.existsSync(pkgPath)) {
+                        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+                        config.name = pkg.name;
+                        config.scripts = Object.keys(pkg.scripts || {});
+                        config.has_build = !!(pkg.scripts?.build);
+
+                        // Detect framework
+                        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+                        if (deps['next']) config.framework = 'nextjs';
+                        else if (deps['@sveltejs/kit']) config.framework = 'sveltekit';
+                        else if (deps['nuxt']) config.framework = 'nuxt';
+                        else if (deps['astro']) config.framework = 'astro';
+                        else if (deps['gatsby']) config.framework = 'gatsby';
+                        else if (deps['@remix-run/dev']) config.framework = 'remix';
+                        else if (deps['@angular/core']) config.framework = 'angular';
+                        else if (deps['vue']) config.framework = 'vue';
+                        else if (deps['react']) config.framework = 'react';
+                        else config.framework = 'unknown';
+                    } else {
+                        config.issues.push('No package.json found');
+                    }
+
+                    // Check for common config files
+                    const configFiles = ['netlify.toml', 'vercel.json', '.env', '.env.local', 'next.config.js', 'next.config.mjs', 'vite.config.ts', 'vite.config.js'];
+                    config.config_files = configFiles.filter(f => fs.existsSync(path.join(project_path, f)));
+
+                    // Check for build output
+                    const buildDirs = ['dist', 'build', '.next', 'out', '.output', '.svelte-kit'];
+                    config.build_dirs = buildDirs.filter(d => fs.existsSync(path.join(project_path, d)));
+
+                    // Check node_modules
+                    config.has_node_modules = fs.existsSync(path.join(project_path, 'node_modules'));
+                    if (!config.has_node_modules) config.issues.push('node_modules not installed — run npm install first');
+
+                    config.ready = config.issues.length === 0 && config.has_build;
+                    if (!config.has_build) config.issues.push('No "build" script in package.json');
+
+                    return config;
+                } catch (err) {
+                    return { error: `Failed to read deployment config: ${err.message}` };
+                }
+            }
+
+            case 'deploy_web_app': {
+                const { project_path, framework, provider = 'netlify', subdomain, project_id } = args;
+
+                try {
+                    // Check if CLI tool is available
+                    const cli = provider === 'netlify' ? 'netlify' : 'vercel';
+                    try {
+                        execSync(`which ${cli}`, { encoding: 'utf-8', timeout: 5000 });
+                    } catch {
+                        return { error: `${cli} CLI not installed. Run: npm install -g ${cli === 'netlify' ? 'netlify-cli' : 'vercel'}` };
+                    }
+
+                    // Build first
+                    logger.info('deploy', `Building ${project_path} for ${provider}...`);
+                    sendToRenderer('ai-tool-call', { name: 'deploy_web_app', args: { status: 'building', provider } });
+
+                    try {
+                        execSync('npm run build', { cwd: project_path, encoding: 'utf-8', timeout: 120000 });
+                    } catch (buildErr) {
+                        return { error: `Build failed: ${(buildErr.stderr || buildErr.message).slice(0, 500)}` };
+                    }
+
+                    // Deploy
+                    let deployCmd;
+                    if (provider === 'netlify') {
+                        deployCmd = `netlify deploy --prod --dir=dist`;
+                        if (subdomain) deployCmd += ` --site=${subdomain}`;
+                    } else {
+                        deployCmd = `vercel --prod --yes`;
+                    }
+
+                    const deployOutput = execSync(deployCmd, {
+                        cwd: project_path,
+                        encoding: 'utf-8',
+                        timeout: 120000,
+                    });
+
+                    // Parse deployment URL from output
+                    const urlMatch = deployOutput.match(/https?:\/\/[^\s]+/);
+                    const deploymentId = `deploy_${Date.now()}`;
+
+                    logger.info('deploy', `Deployed to ${provider}: ${urlMatch ? urlMatch[0] : 'URL pending'}`);
+
+                    return {
+                        success: true,
+                        deployment_id: deploymentId,
+                        provider,
+                        url: urlMatch ? urlMatch[0] : null,
+                        output: deployOutput.slice(0, 1000),
+                    };
+                } catch (err) {
+                    return { error: `Deployment failed: ${err.message}` };
+                }
+            }
+
+            case 'check_deploy_status': {
+                const { deployment_id, provider = 'netlify' } = args;
+                // For now, return a basic status check
+                // Real implementation would query the provider API
+                return {
+                    deployment_id,
+                    provider,
+                    status: 'unknown',
+                    message: `Use the ${provider} dashboard to check deployment status. Full API integration coming soon.`,
+                };
+            }
+
             // ── Git Tools ──
 
             case 'git_status': {
@@ -4217,6 +5151,27 @@ async function executeTool(name, args) {
 //  Exports
 // ══════════════════════════════════════════
 
+/**
+ * Resolve a pending ask_user_question when the user answers.
+ * Called from index.js when the renderer sends 'ai-user-answer'.
+ */
+function resolveUserAnswer(questionId, answer) {
+    const pending = _pendingQuestions.get(questionId);
+    if (pending) {
+        clearTimeout(pending.timeout);
+        _pendingQuestions.delete(questionId);
+        pending.resolve({ answer, timed_out: false });
+        logger.info('ask-user', `User answered ${questionId}: ${typeof answer === 'string' ? answer.slice(0, 100) : JSON.stringify(answer)}`);
+    }
+}
+
+/**
+ * Reset sequential thinking chain (called at session start)
+ */
+function resetThoughtChain() {
+    _thoughtChain = null;
+}
+
 module.exports = {
     TOOL_DEFINITIONS,
     executeTool,
@@ -4246,4 +5201,8 @@ module.exports = {
     // Background process management
     killBackgroundProcesses,
     getBackgroundProcesses,
+    // Cascade-level features
+    resolveUserAnswer,
+    resetThoughtChain,
+    resolvePermissionApproval,
 };
