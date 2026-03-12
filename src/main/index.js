@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, shell, net, protocol } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, net, protocol, nativeImage } = require('electron');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -14,8 +15,8 @@ const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval, SUB_AGENT_TOOL_SETS } = require('./aiTools');
-const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
+const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval, SUB_AGENT_TOOL_SETS, getActiveToolDefinitions, loadToolCategories, resetLoadedTools, DEFERRED_TOOL_CATEGORIES, getPlanModeState, setPlanModeState, getWorktreeState } = require('./aiTools');
+const { conversationStorage, milestoneStorage, attachmentStorage, conversationPlanStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
 const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITIONS, executeOrchestratorTool } = require('./orchestrator');
@@ -25,13 +26,13 @@ const { registerKeystoreIPC } = require('./keystore');
 const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setWorkflowCreator: setSchedulerWorkflowCreator, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg, setProviderConfig: setSchedulerProviderConfig } = require('./scheduler');
 const { registerWorkflowIPC, executeWorkflow, createWorkflow, ensureSystemWorkflow, isSystemWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
 const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig, setSendAutomationMessage: setHeartbeatAutomationMsg } = require('./heartbeat');
+const { createTray, destroyTray, updateTrayMenu, hasTray } = require('./tray');
 
 let mainWindow = null;
 
 // ══════════════════════════════════════════
 //  Provider Config Persistence (disk-backed, independent of chat)
 // ══════════════════════════════════════════
-const os = require('os');
 const PROVIDER_CONFIG_PATH = path.join(os.homedir(), '.onicode', 'provider-config.json');
 
 function saveProviderConfigToDisk(config) {
@@ -126,8 +127,10 @@ function getAllToolDefinitions(options = {}) {
         return _allToolsCache;
     }
 
+    // Use deferred-aware tool definitions (excludes unloaded categories)
+    const baseTools = full ? TOOL_DEFINITIONS : getActiveToolDefinitions();
     const allTools = [
-        ...TOOL_DEFINITIONS,
+        ...baseTools,
         ...getLSPToolDefinitions(),
         ...getCodeIndexToolDefinitions(),
         ...ORCHESTRATOR_TOOL_DEFINITIONS,
@@ -251,6 +254,16 @@ function createWindow() {
     }
 
     mainWindow.once('ready-to-show', () => mainWindow.show());
+
+    // Hide to tray on close instead of quitting (macOS service behavior)
+    mainWindow.on('close', (event) => {
+        if (!app.isQuitting) {
+            event.preventDefault();
+            mainWindow.hide();
+            // Update tray menu to show "Open Onicode" instead of "Hide"
+            updateTrayMenu();
+        }
+    });
     mainWindow.on('closed', () => { mainWindow = null; });
 
     // Suppress noisy Chrome DevTools protocol errors (Autofill.enable, etc.)
@@ -493,14 +506,15 @@ ipcMain.handle('test-provider', async (_event, providerConfig) => {
     if (!providerConfig) return { error: 'No provider config' };
 
     try {
-        if (providerConfig.id === 'codex') {
+        if (providerConfig.id === 'openai') {
+            if (!providerConfig.apiKey?.trim()) return { error: 'OpenAI API key is required' };
+            return await testOpenAI(providerConfig.apiKey);
+        } else if (providerConfig.id === 'codex') {
             if (!providerConfig.apiKey?.trim()) return { error: 'API key is required' };
 
             if (isOAuthToken(providerConfig.apiKey)) {
-                // ChatGPT OAuth: test against chatgpt.com backend
                 return await testChatGPTBackend(providerConfig.apiKey);
             } else {
-                // Standard API key: test against api.openai.com
                 return await testOpenAI(providerConfig.apiKey);
             }
         } else if (providerConfig.id === 'anthropic') {
@@ -550,9 +564,11 @@ function testOpenAI(apiKey) {
                     try {
                         const json = JSON.parse(data);
                         const allModels = json.data?.map((m) => m.id).sort() || [];
+                        const excluded = ['image', 'audio', 'realtime', 'tts', 'whisper', 'dall-e', 'sora', 'embed', 'moderation', 'transcribe', 'search-preview', 'chat-latest'];
                         const relevant = allModels.filter((m) =>
-                            m.includes('gpt-5') || m.includes('gpt-4') ||
-                            m.includes('o3') || m.includes('o4') || m.includes('codex')
+                            (m.includes('gpt-5') || m.includes('gpt-4') ||
+                            m.includes('o3') || m.includes('o4') || m.includes('codex')) &&
+                            !excluded.some(ex => m.includes(ex))
                         );
                         resolve({
                             success: true,
@@ -687,6 +703,40 @@ function testGateway(baseUrl, apiKey) {
         req.end();
     });
 }
+
+// ── Fetch Models IPC ──
+// Fetches available models from any provider's API
+ipcMain.handle('fetch-models', async (_event, providerConfig) => {
+    if (!providerConfig) return { error: 'No provider config' };
+    try {
+        if (providerConfig.id === 'openai') {
+            if (!providerConfig.apiKey?.trim()) return { error: 'API key required' };
+            const result = await testOpenAI(providerConfig.apiKey);
+            if (result.models) return { models: result.models };
+            return { models: ['gpt-5.4', 'gpt-5.4-pro', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'o3', 'o3-mini', 'o4-mini'] };
+        } else if (providerConfig.id === 'codex') {
+            if (!providerConfig.apiKey?.trim()) return { error: 'API key required' };
+            if (isOAuthToken(providerConfig.apiKey)) return { models: ['gpt-5.4', 'gpt-5-codex', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max', 'codex-mini-latest', 'gpt-4o', 'o4-mini'] };
+            const result = await testOpenAI(providerConfig.apiKey);
+            if (result.models) return { models: result.models };
+            return { models: ['gpt-5.4', 'gpt-5-codex', 'codex-mini-latest', 'gpt-4o', 'o4-mini'] };
+        } else if (providerConfig.id === 'anthropic') {
+            // Anthropic doesn't have a list-models endpoint — return known models
+            return { models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku-20241022'] };
+        } else if (providerConfig.id === 'ollama') {
+            const result = await testOllama(providerConfig.baseUrl);
+            if (result.models) return { models: result.models };
+            return { error: result.error || 'No models found' };
+        } else {
+            // Gateway — try /v1/models
+            const result = await testGateway(providerConfig.baseUrl, providerConfig.apiKey);
+            if (result.models) return { models: result.models };
+            return { models: [] };
+        }
+    } catch (err) {
+        return { error: err.message };
+    }
+});
 
 // ══════════════════════════════════════════
 //  IPC: AI Chat (Streaming via main process)
@@ -1133,7 +1183,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
         return { error: 'Invalid token' };
     }
 
-    const model = selectedModel || 'gpt-4o';
+    const model = selectedModel || 'gpt-5.4';
     const MAX_ROUNDS = 75;
     const MAX_AUTO_CONTINUES = 15;
 
@@ -1605,15 +1655,16 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
  */
 function streamOpenAISingle(messages, providerConfig, includeTools = true, forceToolChoice = false) {
     let endpoint;
-    if (providerConfig.id === 'codex') {
+    if (providerConfig.id === 'codex' || providerConfig.id === 'openai') {
         endpoint = 'https://api.openai.com/v1/chat/completions';
     } else {
         const base = (providerConfig.baseUrl || '').replace(/\/$/, '');
         endpoint = `${base}/v1/chat/completions`;
     }
 
-    const model = providerConfig.selectedModel || 'gpt-4o-mini';
+    const model = providerConfig.selectedModel || 'gpt-5.4';
     const isOModel = model.startsWith('o');
+    const useCompletionTokens = isOModel || model.startsWith('gpt-5') || model.startsWith('gpt-4.1');
 
     const bodyObj = {
         model,
@@ -1621,19 +1672,20 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
         stream: true,
     };
 
-    // Apply reasoning effort for models that support it
-    const reasoningEffort = providerConfig.reasoningEffort || 'medium';
-    if (reasoningEffort && reasoningEffort !== 'medium') {
-        bodyObj.reasoning_effort = reasoningEffort;
-    }
-
     // Add tools for function calling (skip for o-models which may not support tools well)
-    if (includeTools && !isOModel) {
+    const hasTools = includeTools && !isOModel;
+    if (hasTools) {
         bodyObj.tools = getAllToolDefinitions();
         bodyObj.tool_choice = forceToolChoice ? 'required' : 'auto';
     }
 
-    if (isOModel) bodyObj.max_completion_tokens = 16384;
+    // Apply reasoning effort — but NOT when tools are present on gpt-5.x (unsupported combo on /v1/chat/completions)
+    const reasoningEffort = providerConfig.reasoningEffort || 'medium';
+    if (reasoningEffort && reasoningEffort !== 'medium' && !(hasTools && model.startsWith('gpt-5'))) {
+        bodyObj.reasoning_effort = reasoningEffort;
+    }
+
+    if (useCompletionTokens) bodyObj.max_completion_tokens = 16384;
     else bodyObj.max_tokens = 16384;
 
     const bodyStr = JSON.stringify(bodyObj);
@@ -2117,7 +2169,7 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
     const accountId = getAccountId(accessToken);
     if (!accountId) return { error: 'Cannot extract account ID from OAuth token. Re-authenticate in Settings.' };
 
-    const model = providerConfig.selectedModel || 'gpt-4o';
+    const model = providerConfig.selectedModel || 'gpt-5.4';
 
     // Extract system prompt → instructions (Responses API separates these)
     const systemMsgs = messages.filter(m => m.role === 'system');
@@ -2287,8 +2339,10 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
  * Sub-agent call via standard OpenAI Chat Completions API (for sk- keys and gateways).
  */
 function makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides) {
+    const model = providerConfig.selectedModel || 'gpt-5.4';
+    const useCompletionTokens = model.startsWith('o') || model.startsWith('gpt-5') || model.startsWith('gpt-4.1');
     const bodyObj = {
-        model: providerConfig.selectedModel || 'gpt-4o-mini',
+        model,
         messages,
         stream: false,
     };
@@ -2298,10 +2352,11 @@ function makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides) {
         bodyObj.tool_choice = 'auto';
     }
 
-    bodyObj.max_tokens = 16384;
+    if (useCompletionTokens) bodyObj.max_completion_tokens = 16384;
+    else bodyObj.max_tokens = 16384;
 
     let endpoint;
-    if (providerConfig.id === 'codex') {
+    if (providerConfig.id === 'codex' || providerConfig.id === 'openai') {
         endpoint = 'https://api.openai.com/v1/chat/completions';
     } else {
         const base = (providerConfig.baseUrl || '').replace(/\/$/, '');
@@ -3166,7 +3221,7 @@ ipcMain.handle('archive-completed-tasks', async () => {
  * Uses a lightweight AI call (non-streaming, no tools).
  */
 async function generateSessionTitle(userMessage, providerConfig) {
-    if (!providerConfig?.apiKey && providerConfig?.id !== 'codex' && providerConfig?.id !== 'ollama') return null;
+    if (!providerConfig?.apiKey && providerConfig?.id !== 'codex' && providerConfig?.id !== 'ollama' && providerConfig?.id !== 'openai') return null;
     try {
         // Anthropic uses a different API format
         if (providerConfig.id === 'anthropic') {
@@ -3212,18 +3267,22 @@ async function generateSessionTitle(userMessage, providerConfig) {
         ];
 
         let endpoint;
-        if (providerConfig.id === 'codex') {
+        if (providerConfig.id === 'codex' || providerConfig.id === 'openai') {
             endpoint = 'https://api.openai.com/v1/chat/completions';
         } else {
             const base = (providerConfig.baseUrl || '').replace(/\/$/, '');
             endpoint = `${base}/v1/chat/completions`;
         }
 
-        const bodyStr = JSON.stringify({
-            model: providerConfig.selectedModel || 'gpt-4o-mini',
+        const titleModel = providerConfig.selectedModel || 'gpt-5.4';
+        const titleUseCompletionTokens = titleModel.startsWith('o') || titleModel.startsWith('gpt-5') || titleModel.startsWith('gpt-4.1');
+        const titleBody = {
+            model: titleModel,
             messages: titleMessages,
-            max_tokens: 20,
-        });
+        };
+        if (titleUseCompletionTokens) titleBody.max_completion_tokens = 20;
+        else titleBody.max_tokens = 20;
+        const bodyStr = JSON.stringify(titleBody);
 
         const url = new URL(endpoint);
         const mod = url.protocol === 'https:' ? https : http;
@@ -3632,6 +3691,128 @@ registerSchedulerIPC(ipcMain, () => mainWindow);
 registerWorkflowIPC(ipcMain, () => mainWindow);
 registerHeartbeatIPC(ipcMain, () => mainWindow);
 
+// ── Plan Mode IPC ──
+ipcMain.handle('plan-mode-enter', async (_event, conversationId) => {
+    try {
+        const planId = `plan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const planDir = path.join(os.homedir(), '.onicode', 'plans');
+        if (!fs.existsSync(planDir)) fs.mkdirSync(planDir, { recursive: true });
+        const planPath = path.join(planDir, `${planId}.md`);
+        fs.writeFileSync(planPath, `# Plan\n\n_Created: ${new Date().toISOString()}_\n\n## Goals\n\n## Steps\n\n## Notes\n`);
+        setPlanModeState(true, planId, planPath);
+        // Save to SQLite
+        conversationPlanStorage.save({ id: planId, conversationId, content: '', status: 'drafting' });
+        // Notify renderer
+        if (mainWindow) mainWindow.webContents.send('plan-mode-changed', { active: true, planId, planPath });
+        return { success: true, planId, planPath };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('plan-mode-exit', async (_event, planId) => {
+    try {
+        const state = getPlanModeState();
+        if (!state.active) return { success: false, error: 'Not in plan mode' };
+        const content = state.planPath && fs.existsSync(state.planPath) ? fs.readFileSync(state.planPath, 'utf-8') : '';
+        setPlanModeState(false, null, null);
+        // Update SQLite
+        conversationPlanStorage.update(planId || state.planId, { content, status: 'completed' });
+        if (mainWindow) mainWindow.webContents.send('plan-mode-changed', { active: false, planId: null });
+        return { success: true, content };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('plan-mode-get', async () => {
+    const state = getPlanModeState();
+    let content = '';
+    if (state.active && state.planPath && fs.existsSync(state.planPath)) {
+        content = fs.readFileSync(state.planPath, 'utf-8');
+    }
+    return { active: state.active, planId: state.planId, planPath: state.planPath, content };
+});
+
+ipcMain.handle('plan-mode-update', async (_event, planId, content) => {
+    try {
+        const state = getPlanModeState();
+        if (!state.active) return { success: false, error: 'Not in plan mode' };
+        if (state.planPath) fs.writeFileSync(state.planPath, content);
+        conversationPlanStorage.update(planId || state.planId, { content });
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// ── Worktree IPC ──
+ipcMain.handle('worktree-create', async (_event, name) => {
+    try {
+        const branchName = name || `worktree-${Date.now()}`;
+        const worktreePath = path.join(os.tmpdir(), `onicode-worktree-${branchName}`);
+        const { execSync } = require('child_process');
+        execSync(`git worktree add -b ${branchName} "${worktreePath}"`, { cwd: _currentProjectPath || process.cwd(), encoding: 'utf-8', timeout: 30000 });
+        return { success: true, path: worktreePath, branch: branchName };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('worktree-remove', async (_event, worktreePath, force) => {
+    try {
+        const { execSync } = require('child_process');
+        const forceFlag = force ? ' --force' : '';
+        execSync(`git worktree remove "${worktreePath}"${forceFlag}`, { cwd: _currentProjectPath || process.cwd(), encoding: 'utf-8', timeout: 30000 });
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('worktree-list', async () => {
+    try {
+        const { execSync } = require('child_process');
+        const raw = execSync('git worktree list --porcelain', { cwd: _currentProjectPath || process.cwd(), encoding: 'utf-8', timeout: 10000 });
+        const worktrees = [];
+        let current = {};
+        for (const line of raw.split('\n')) {
+            if (line.startsWith('worktree ')) {
+                if (current.path) worktrees.push(current);
+                current = { path: line.slice(9) };
+            } else if (line.startsWith('HEAD ')) {
+                current.head = line.slice(5);
+            } else if (line.startsWith('branch ')) {
+                current.branch = line.slice(7).replace('refs/heads/', '');
+            } else if (line === 'bare' || line === '') {
+                if (current.path) { current.isMain = worktrees.length === 0; worktrees.push(current); current = {}; }
+            }
+        }
+        if (current.path) { current.isMain = worktrees.length === 0; worktrees.push(current); }
+        return { success: true, worktrees };
+    } catch (err) {
+        return { success: true, worktrees: [] };
+    }
+});
+
+ipcMain.handle('worktree-get-current', async () => {
+    const state = getWorktreeState();
+    return { inWorktree: state.active, path: state.path, branch: state.active ? path.basename(state.path || '') : undefined };
+});
+
+// ── Deferred Tool Loading IPC ──
+ipcMain.handle('deferred-tool-categories', async () => {
+    return { categories: DEFERRED_TOOL_CATEGORIES };
+});
+
+ipcMain.handle('load-tool-categories', async (_event, categories) => {
+    const loaded = loadToolCategories(categories);
+    // Invalidate tool cache so next AI call picks up newly loaded tools
+    _allToolsCache = null;
+    _toolsCacheKey = '';
+    return { success: true, loaded };
+});
+
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {
     return taskManager.getSummary();
@@ -3869,6 +4050,20 @@ app.whenReady().then(() => {
 
     createWindow();
 
+    // Create system tray (background service icon)
+    createTray(() => mainWindow);
+
+    // Set macOS dock icon from resources
+    if (process.platform === 'darwin') {
+        const dockIconPath = app.isPackaged
+            ? path.join(process.resourcesPath, 'resources', 'icon-256.png')
+            : path.join(__dirname, '..', '..', 'resources', 'icon-256.png');
+        try {
+            const dockIcon = nativeImage.createFromPath(dockIconPath);
+            if (!dockIcon.isEmpty()) app.dock.setIcon(dockIcon);
+        } catch (e) { /* ignore in dev */ }
+    }
+
     // Auto-connect enabled MCP servers after window is ready
     connectAllMCP().catch(err => logger.warn('mcp', `Auto-connect failed: ${err?.message}`));
 
@@ -3930,15 +4125,30 @@ app.whenReady().then(() => {
     try { startHeartbeat(); } catch (err) { logger.error('main', `startHeartbeat failed: ${err.message}`); }
 
     app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) createWindow();
+        if (BrowserWindow.getAllWindows().length === 0) {
+            createWindow();
+        } else if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+        }
+        updateTrayMenu();
     });
 });
 
+// As a service, don't quit when all windows close — stay in tray
 app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    // On non-macOS, if tray exists keep running; otherwise quit
+    if (process.platform !== 'darwin' && !hasTray()) {
+        app.quit();
+    }
+    // On macOS, app stays alive (standard behavior) — tray icon persists
 });
 
 app.on('before-quit', () => {
+    app.isQuitting = true;
+    // Destroy tray icon
+    destroyTray();
+    // Kill all background services
     killAllSessions();
     killBackgroundProcesses();
     disconnectAllMCP();
@@ -3946,4 +4156,26 @@ app.on('before-quit', () => {
     stopHeartbeat();
     stopWatching();
     try { closeDB(); } catch { }
+    logger.info('main', 'All services stopped, quitting');
 });
+
+// Dev mode: handle SIGTERM/SIGINT (when dev server stops) to cleanly quit
+if (process.env.NODE_ENV !== 'production' || !app.isPackaged) {
+    const devCleanup = () => {
+        logger.info('main', 'Dev signal received — shutting down');
+        app.isQuitting = true;
+        destroyTray();
+        killAllSessions();
+        killBackgroundProcesses();
+        disconnectAllMCP();
+        stopSchedulerLoop();
+        stopHeartbeat();
+        stopWatching();
+        try { closeDB(); } catch { }
+        app.quit();
+        // Force exit after 3s if app.quit() doesn't finish
+        setTimeout(() => process.exit(0), 3000);
+    };
+    process.on('SIGTERM', devCleanup);
+    process.on('SIGINT', devCleanup);
+}

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="og" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="100%" stop-color="#A29BFE"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="1.28" stdDeviation="2.56" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="53.76" fill="url(#og)" filter="url(#shadow)"/>
+
+  <!-- Inner ring (the "O") -->
+  <circle cx="64" cy="64" r="27.9552" fill="none" stroke="#FFFFFF" stroke-width="5.12" opacity="0.9"/>
+
+  <!-- Code cursor bar -->
+  <rect x="68.19328" y="48.62464" width="5.12" height="30.750720000000005" rx="2.56" fill="#00D4AA" opacity="0.95"/>
+
+  <!-- Left angle bracket < -->
+  <polyline points="51.420159999999996,57.71008 46.528,64 51.420159999999996,70.28992"
+    fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+
+  <!-- Right angle bracket > -->
+  <polyline points="82.17088,57.71008 87.06304,64 82.17088,70.28992"
+    fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+</svg>

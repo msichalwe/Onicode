@@ -65,7 +65,7 @@ interface OnicodeAPI {
     onAskUser: (callback: (data: {
         questionId: string;
         question: string;
-        options: Array<{ label: string; description?: string }>;
+        options: Array<{ label: string; description?: string; preview?: string }>;
         allowMultiple: boolean;
     }) => void) => () => void;
     onThinkingStep: (callback: (data: {
@@ -140,6 +140,9 @@ interface OnicodeAPI {
         models?: string[];
         modelCount?: number;
     }>;
+
+    // Fetch available models from provider API
+    fetchModels: (providerConfig: { id: string; apiKey?: string; baseUrl?: string }) => Promise<{ models?: string[]; error?: string }>;
 
     // Sync provider config to main process (for automation/workflows)
     syncProviderConfig: (config: { id: string; apiKey: string; baseUrl?: string; selectedModel?: string }) => Promise<{ success: boolean }>;
@@ -462,6 +465,22 @@ interface OnicodeAPI {
     // Chat activity (for workflow result pipeline)
     chatActivityChange: (isActive: boolean) => Promise<{ success: boolean }>;
 
+    // Plan Mode
+    planModeEnter: (conversationId?: string) => Promise<{ success: boolean; planId?: string; planPath?: string; error?: string }>;
+    planModeExit: (planId: string) => Promise<{ success: boolean; content?: string; error?: string }>;
+    planModeGet: () => Promise<{ active: boolean; planId?: string; planPath?: string; content?: string }>;
+    planModeUpdate: (planId: string, content: string) => Promise<{ success: boolean; error?: string }>;
+    onPlanModeChange: (callback: (data: { active: boolean; planId?: string }) => void) => () => void;
+
+    // Worktree Management
+    worktreeCreate: (name?: string) => Promise<{ success: boolean; path?: string; branch?: string; error?: string }>;
+    worktreeRemove: (path: string, force?: boolean) => Promise<{ success: boolean; error?: string }>;
+    worktreeList: () => Promise<{ success: boolean; worktrees?: Array<{ path: string; branch: string; head: string; isMain: boolean }>; error?: string }>;
+    worktreeGetCurrent: () => Promise<{ inWorktree: boolean; path?: string; branch?: string }>;
+
+    // System Tray events
+    onTrayNewChat: (callback: () => void) => () => void;
+
     platform: string;
 
     getEnvironment: () => Promise<{
@@ -526,6 +545,8 @@ declare global {
         createdAt: string;
         completedAt: string | null;
         milestoneId?: string | null;
+        blocks?: number[];
+        blockedBy?: number[];
     }
 
     interface MilestoneItem {
@@ -701,7 +722,8 @@ declare global {
         skip_if_false?: boolean;
         // Agentic step fields (Phase 3)
         goal?: string;
-        tool_set?: 'read-only' | 'file-ops' | 'search' | 'git' | 'browser' | 'workspace';
+        tool_set?: 'read-only' | 'file-ops' | 'search' | 'git' | 'browser' | 'workspace' | 'research';
+        complexity?: 'simple' | 'moderate' | 'complex';
         tool_priority?: string[];
         max_rounds?: number;
         context?: {

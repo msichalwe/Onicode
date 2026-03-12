@@ -136,6 +136,16 @@ function AppContent() {
         }
     }, []);
 
+    // Listen for tray "New Chat" menu item
+    useEffect(() => {
+        if (!window.onicode?.onTrayNewChat) return;
+        const cleanup = window.onicode.onTrayNewChat(() => {
+            handleViewChange('chat');
+            window.dispatchEvent(new CustomEvent('onicode-new-chat'));
+        });
+        return cleanup;
+    }, [handleViewChange]);
+
     // Listen for file open requests (from side panel file viewer)
     useEffect(() => {
         const handler = (e: Event) => {

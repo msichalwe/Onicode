@@ -16,18 +16,32 @@ interface ProviderConfig {
     testMessage?: string;
 }
 
-const CODEX_MODELS = [
-    'gpt-5.3-codex',
-    'gpt-5.3-codex-spark',
-    'gpt-5.2-codex',
-    'gpt-5.1-codex-max',
-    'gpt-5.1-codex-mini',
-    'gpt-5.1',
-    'codex-mini-latest',
+const OPENAI_MODELS = [
+    'gpt-5.4',
+    'gpt-5.4-pro',
+    'gpt-5-mini',
+    'gpt-5-nano',
+    'gpt-5',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4.1-nano',
     'gpt-4o',
     'gpt-4o-mini',
-    'o4-mini',
+    'o3',
     'o3-pro',
+    'o3-mini',
+    'o4-mini',
+];
+
+const CODEX_MODELS = [
+    'gpt-5.4',
+    'gpt-5-codex',
+    'gpt-5.3-codex',
+    'gpt-5.2-codex',
+    'gpt-5.1-codex-max',
+    'codex-mini-latest',
+    'gpt-4o',
+    'o4-mini',
 ];
 
 const ANTHROPIC_MODELS = [
@@ -40,16 +54,53 @@ const ANTHROPIC_MODELS = [
 
 const DEFAULT_PROVIDERS: ProviderConfig[] = [
     {
-        id: 'codex',
-        name: 'OpenAI Codex',
-        initials: 'Cx',
-        description: 'GPT-5 Codex, GPT-4o, o4-mini — API key or ChatGPT sign-in',
+        id: 'openai',
+        name: 'OpenAI',
+        initials: 'AI',
+        description: 'GPT-5.4, GPT-5, o3, o4-mini — standard API key from platform.openai.com',
         enabled: false,
         connected: false,
         authType: 'api-key',
         apiKey: '',
-        selectedModel: 'gpt-4o',
+        selectedModel: 'gpt-5.4',
+        models: OPENAI_MODELS,
+    },
+    {
+        id: 'codex',
+        name: 'OpenAI Codex',
+        initials: 'Cx',
+        description: 'ChatGPT sign-in (OAuth) — use your ChatGPT Plus/Pro subscription',
+        enabled: false,
+        connected: false,
+        authType: 'api-key',
+        apiKey: '',
+        selectedModel: 'gpt-5.4',
         models: CODEX_MODELS,
+    },
+    {
+        id: 'anthropic',
+        name: 'Anthropic Claude',
+        initials: 'Cl',
+        description: 'Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 — Anthropic API key',
+        enabled: false,
+        connected: false,
+        authType: 'api-key',
+        apiKey: '',
+        selectedModel: 'claude-sonnet-4-6',
+        models: ANTHROPIC_MODELS,
+    },
+    {
+        id: 'ollama',
+        name: 'Ollama (Local)',
+        initials: 'OL',
+        description: 'Run models locally via Ollama — no API key needed',
+        enabled: false,
+        connected: false,
+        authType: 'url-key',
+        baseUrl: 'http://localhost:11434',
+        apiKey: '',
+        selectedModel: '',
+        models: [],
     },
     {
         id: 'onigateway',
@@ -76,31 +127,6 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
         apiKey: '',
         selectedModel: 'default',
         models: ['default'],
-    },
-    {
-        id: 'anthropic',
-        name: 'Anthropic Claude',
-        initials: 'Cl',
-        description: 'Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 — Anthropic API key',
-        enabled: false,
-        connected: false,
-        authType: 'api-key',
-        apiKey: '',
-        selectedModel: 'claude-sonnet-4-6',
-        models: ANTHROPIC_MODELS,
-    },
-    {
-        id: 'ollama',
-        name: 'Ollama (Local)',
-        initials: 'OL',
-        description: 'Run models locally via Ollama — no API key needed',
-        enabled: false,
-        connected: false,
-        authType: 'url-key',
-        baseUrl: 'http://localhost:11434',
-        apiKey: '',
-        selectedModel: '',
-        models: [],
     },
 ];
 
@@ -626,11 +652,11 @@ export default function ProviderSettings() {
                                         />
                                     </>
                                 )}
-                                {provider.id !== 'ollama' && (
+                                {provider.id !== 'ollama' && provider.id !== 'codex' && (
                                     <>
                                         <label className="field-label">
-                                            {provider.id === 'codex' ? 'OpenAI API Key' : provider.id === 'anthropic' ? 'Anthropic API Key' : 'API Key'}
-                                            {provider.id === 'codex' && (
+                                            {provider.id === 'openai' ? 'OpenAI API Key' : provider.id === 'anthropic' ? 'Anthropic API Key' : 'API Key'}
+                                            {provider.id === 'openai' && (
                                                 <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
                                             )}
                                             {provider.id === 'anthropic' && (
@@ -640,7 +666,7 @@ export default function ProviderSettings() {
                                         <input
                                             className="field-input" type="password"
                                             placeholder={
-                                                provider.id === 'codex' ? 'sk-...' :
+                                                provider.id === 'openai' ? 'sk-...' :
                                                 provider.id === 'anthropic' ? 'sk-ant-...' :
                                                 'Enter API key (optional)'
                                             }
@@ -650,9 +676,14 @@ export default function ProviderSettings() {
                                         />
                                     </>
                                 )}
+                                {provider.id === 'openai' && (
+                                    <div className="field-hint">
+                                        Standard API key from platform.openai.com. Use "Refresh" in model picker to pull your available models.
+                                    </div>
+                                )}
                                 {provider.id === 'codex' && (
                                     <div className="field-hint">
-                                        Paste a standard API key from platform.openai.com, or use ChatGPT sign-in below.
+                                        Sign in with your ChatGPT account below. Uses your ChatGPT Plus/Pro subscription — no separate API key needed.
                                     </div>
                                 )}
                                 {provider.id === 'anthropic' && (

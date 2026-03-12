@@ -120,7 +120,7 @@ function getActiveProvider(): ProviderConfig | null {
 }
 
 function getApiEndpoint(provider: ProviderConfig): string {
-    if (provider.id === 'codex') return 'https://api.openai.com/v1/chat/completions';
+    if (provider.id === 'codex' || provider.id === 'openai') return 'https://api.openai.com/v1/chat/completions';
     const base = (provider.baseUrl || '').replace(/\/$/, '');
     return `${base}/v1/chat/completions`;
 }
@@ -961,15 +961,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         provider: ProviderConfig
     ) => {
         const endpoint = getApiEndpoint(provider);
-        const model = provider.selectedModel || 'gpt-4o';
+        const model = provider.selectedModel || 'gpt-5.4';
         const isOModel = model.startsWith('o');
+        const useCompletionTokens = isOModel || model.startsWith('gpt-5') || model.startsWith('gpt-4.1');
 
         const bodyPayload: Record<string, unknown> = {
             model,
             messages: isOModel ? apiMessages.filter((m) => m.role !== 'system') : apiMessages,
             stream: true,
         };
-        if (isOModel) bodyPayload.max_completion_tokens = 4096;
+        if (useCompletionTokens) bodyPayload.max_completion_tokens = 4096;
         else bodyPayload.max_tokens = 4096;
 
         const abortController = new AbortController();
@@ -3711,24 +3712,69 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             onClick={() => setShowModelPicker(!showModelPicker)}
                             title="Click to change model"
                         >
-                            {getActiveProvider()?.selectedModel || 'gpt-4o'}
+                            {getActiveProvider()?.selectedModel || 'gpt-5.4'}
                             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ marginLeft: 3, verticalAlign: 'middle' }}><polyline points="6 9 12 15 18 9" /></svg>
                         </button>
                         {showModelPicker && (() => {
                             const activeProvider = getActiveProvider();
                             const DEFAULT_MODELS: Record<string, string[]> = {
-                                codex: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3', 'o3-mini', 'o4-mini', 'codex-mini-latest'],
-                                oniai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini', 'claude-sonnet-4-20250514'],
-                                openclaw: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini'],
-                                anthropic: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-3-5-20241022'],
-                                ollama: ['llama3', 'codellama', 'mistral', 'deepseek-coder'],
+                                openai: ['gpt-5.4', 'gpt-5.4-pro', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini', 'o3', 'o3-pro', 'o3-mini', 'o4-mini'],
+                                codex: ['gpt-5.4', 'gpt-5-codex', 'gpt-5.3-codex', 'gpt-5.2-codex', 'codex-mini-latest', 'gpt-4o', 'o4-mini'],
+                                oniai: ['gpt-5.4', 'gpt-5-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'o3-mini', 'claude-sonnet-4-20250514'],
+                                openclaw: ['gpt-5.4', 'gpt-5-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'o3-mini'],
+                                anthropic: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku-20241022'],
+                                ollama: ['llama3.3', 'codellama', 'mistral', 'deepseek-coder-v2', 'qwen2.5-coder'],
                             };
-                            const PROVIDER_NAMES: Record<string, string> = { codex: 'OpenAI', anthropic: 'Anthropic', ollama: 'Ollama', oniai: 'OniAI', openclaw: 'OpenClaw' };
+                            const PROVIDER_NAMES: Record<string, string> = { openai: 'OpenAI', codex: 'OpenAI Codex', anthropic: 'Anthropic', ollama: 'Ollama', oniai: 'OniAI', openclaw: 'OpenClaw' };
                             let connectedProviders: ProviderConfig[] = [];
                             try {
                                 const saved = localStorage.getItem('onicode-providers');
                                 if (saved) connectedProviders = JSON.parse(saved).filter((p: ProviderConfig) => p.connected && (p.apiKey?.trim() || p.id === 'ollama'));
                             } catch {}
+
+                            const handleSelectModel = (prov: ProviderConfig, model: string) => {
+                                try {
+                                    const saved = localStorage.getItem('onicode-providers');
+                                    if (saved) {
+                                        const providers = JSON.parse(saved);
+                                        providers.forEach((pp: ProviderConfig) => { pp.enabled = pp.id === prov.id; });
+                                        const target = providers.find((pp: ProviderConfig) => pp.id === prov.id);
+                                        if (target) target.selectedModel = model;
+                                        localStorage.setItem('onicode-providers', JSON.stringify(providers));
+                                        // Sync to main process so AI uses the new model
+                                        if (window.onicode?.syncProviderConfig && target) {
+                                            window.onicode.syncProviderConfig({
+                                                id: prov.id,
+                                                apiKey: prov.apiKey || '',
+                                                baseUrl: prov.baseUrl,
+                                                selectedModel: model,
+                                            });
+                                        }
+                                    }
+                                } catch {}
+                                setShowModelPicker(false);
+                            };
+
+                            const handleRefreshModels = async (prov: ProviderConfig) => {
+                                if (!window.onicode?.fetchModels) return;
+                                try {
+                                    const result = await window.onicode.fetchModels({ id: prov.id, apiKey: prov.apiKey, baseUrl: prov.baseUrl });
+                                    if (result.models?.length) {
+                                        const saved = localStorage.getItem('onicode-providers');
+                                        if (saved) {
+                                            const providers = JSON.parse(saved);
+                                            const target = providers.find((pp: ProviderConfig) => pp.id === prov.id);
+                                            if (target) {
+                                                target.models = result.models;
+                                                localStorage.setItem('onicode-providers', JSON.stringify(providers));
+                                                setShowModelPicker(false);
+                                                setTimeout(() => setShowModelPicker(true), 50); // re-render
+                                            }
+                                        }
+                                    }
+                                } catch {}
+                            };
+
                             return (
                                 <div className="model-picker-dropdown">
                                     {connectedProviders.map((prov: ProviderConfig) => {
@@ -3736,22 +3782,26 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                         const isActive = prov.id === activeProvider?.id;
                                         return (
                                             <div key={prov.id} className="model-picker-group">
-                                                <div className="model-picker-provider">{PROVIDER_NAMES[prov.id] || prov.id}{isActive && <span className="model-picker-active">active</span>}</div>
+                                                <div className="model-picker-provider">
+                                                    {PROVIDER_NAMES[prov.id] || prov.id}
+                                                    {isActive && <span className="model-picker-active">active</span>}
+                                                    <button
+                                                        className="model-picker-refresh"
+                                                        onClick={(e) => { e.stopPropagation(); handleRefreshModels(prov); }}
+                                                        title="Refresh models from API"
+                                                    >
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                            <path d="M23 4v6h-6M1 20v-6h6" />
+                                                            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                                                        </svg>
+                                                    </button>
+                                                </div>
                                                 {models.map((m: string) => (
-                                                    <button key={`${prov.id}-${m}`} className={`model-picker-item${isActive && m === prov.selectedModel ? ' selected' : ''}`} onClick={() => {
-                                                        try {
-                                                            const saved = localStorage.getItem('onicode-providers');
-                                                            if (saved) {
-                                                                const providers = JSON.parse(saved);
-                                                                // Disable all, enable this one, set model
-                                                                providers.forEach((pp: ProviderConfig) => { pp.enabled = pp.id === prov.id; });
-                                                                const target = providers.find((pp: ProviderConfig) => pp.id === prov.id);
-                                                                if (target) target.selectedModel = m;
-                                                                localStorage.setItem('onicode-providers', JSON.stringify(providers));
-                                                            }
-                                                        } catch {}
-                                                        setShowModelPicker(false);
-                                                    }}>{m}</button>
+                                                    <button
+                                                        key={`${prov.id}-${m}`}
+                                                        className={`model-picker-item${isActive && m === prov.selectedModel ? ' selected' : ''}`}
+                                                        onClick={() => handleSelectModel(prov, m)}
+                                                    >{m}</button>
                                                 ))}
                                             </div>
                                         );

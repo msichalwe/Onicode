@@ -948,6 +948,16 @@ const activeAgents = new Map();
 let _makeAICall = null;
 function setAICallFunction(fn) { _makeAICall = fn; }
 
+// Plan mode state
+let _planModeActive = false;
+let _currentPlanId = null;
+let _currentPlanPath = null;
+
+// Worktree state
+let _worktreeActive = false;
+let _worktreePath = null;
+let _worktreeOriginalCwd = null;
+
 function createSubAgent(id, task, parentContext) {
     const agent = {
         id,
@@ -981,9 +991,78 @@ const SUB_AGENT_TOOL_SETS = {
     'research': ['websearch', 'read_url_content', 'view_content_chunk', 'browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_close', 'read_file'],
 };
 
-async function executeSubAgent(agentId, task, contextFiles, providerConfig, toolSet, constraints) {
+// Tool categories for deferred loading (load_tools)
+const DEFERRED_TOOL_CATEGORIES = {
+    deployment: ['deploy_web_app', 'read_deployment_config', 'check_deploy_status'],
+    browser: ['browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close'],
+    notebooks: ['read_notebook', 'edit_notebook'],
+    url_reading: ['read_url_content', 'view_content_chunk'],
+    orchestration: ['orchestrate', 'spawn_specialist', 'delegate_task'],
+    code_intelligence: ['find_symbol', 'find_references', 'list_symbols', 'find_implementation'],
+    context_engine: ['get_context_summary', 'explore_codebase', 'get_dependency_graph', 'get_smart_context'],
+    verification: ['verify_project'],
+};
+
+// Core tools always sent to AI (everything NOT in deferred categories)
+const DEFERRED_TOOL_NAMES = new Set(Object.values(DEFERRED_TOOL_CATEGORIES).flat());
+
+// Agent type restrictions — enforce read-only for explore/plan agents
+const AGENT_TYPE_RESTRICTIONS = {
+    'explore': {
+        denied: ['edit_file', 'create_file', 'delete_file', 'multi_edit', 'run_command', 'deploy_web_app'],
+        defaultToolSet: 'search',
+    },
+    'plan': {
+        denied: ['edit_file', 'create_file', 'delete_file', 'multi_edit', 'run_command', 'deploy_web_app'],
+        defaultToolSet: 'read-only',
+    },
+    'research': {
+        denied: ['edit_file', 'create_file', 'delete_file', 'multi_edit'],
+        defaultToolSet: 'research',
+    },
+    'general-purpose': {
+        denied: [],
+        defaultToolSet: null, // uses whatever tool_set is specified
+    },
+};
+
+// Track loaded tool categories per conversation
+const _loadedToolCategories = new Set();
+
+function getLoadedToolCategories() { return [..._loadedToolCategories]; }
+function loadToolCategories(categories) {
+    for (const cat of categories) {
+        if (DEFERRED_TOOL_CATEGORIES[cat]) {
+            _loadedToolCategories.add(cat);
+        }
+    }
+    return getLoadedToolCategories();
+}
+function resetLoadedTools() { _loadedToolCategories.clear(); }
+
+// Get tool definitions filtered for current state (core + loaded deferred)
+function getActiveToolDefinitions() {
+    return TOOL_DEFINITIONS.filter(t => {
+        const name = t.function.name;
+        if (!DEFERRED_TOOL_NAMES.has(name)) return true; // core tool
+        // Check if its category is loaded
+        for (const [cat, tools] of Object.entries(DEFERRED_TOOL_CATEGORIES)) {
+            if (tools.includes(name) && _loadedToolCategories.has(cat)) return true;
+        }
+        return false;
+    });
+}
+
+// Agent conversation storage for resume
+const _agentConversations = new Map(); // agentId -> { messages, toolSet, agentType }
+
+async function executeSubAgent(agentId, task, contextFiles, providerConfig, toolSet, constraints, resumeId, agentType, thoroughness) {
     const agent = activeAgents.get(agentId);
     if (!agent) return { error: 'Agent not found' };
+
+    // Apply agent type restrictions
+    const typeConfig = AGENT_TYPE_RESTRICTIONS[agentType || 'general-purpose'] || AGENT_TYPE_RESTRICTIONS['general-purpose'];
+    const effectiveToolSet = toolSet || typeConfig.defaultToolSet || 'read-only';
 
     // Build context from files
     let fileContext = '';
@@ -1000,15 +1079,27 @@ async function executeSubAgent(agentId, task, contextFiles, providerConfig, tool
     }
 
     // Resolve allowed tools for this sub-agent
-    const allowedToolNames = SUB_AGENT_TOOL_SETS[toolSet] || SUB_AGENT_TOOL_SETS['read-only'];
+    let allowedToolNames = SUB_AGENT_TOOL_SETS[effectiveToolSet] || SUB_AGENT_TOOL_SETS['read-only'];
+
+    // Remove denied tools based on agent type
+    if (typeConfig.denied.length > 0) {
+        const deniedSet = new Set(typeConfig.denied);
+        allowedToolNames = allowedToolNames.filter(t => !deniedSet.has(t));
+    }
+
     const allowedSet = new Set(allowedToolNames);
     const toolListStr = allowedToolNames.join(', ');
 
-    const subAgentPrompt = `You are a focused sub-agent. Your ONLY task: ${task}
+    // Thoroughness hint for explore agents
+    const thoroughnessHint = agentType === 'explore' && thoroughness
+        ? `\n**Thoroughness:** ${thoroughness} — ${thoroughness === 'quick' ? 'basic search, 2-3 queries max' : thoroughness === 'thorough' ? 'comprehensive analysis, check multiple naming conventions and locations' : 'moderate exploration across relevant directories'}`
+        : '';
+
+    const subAgentPrompt = `You are a focused sub-agent${agentType ? ` (type: ${agentType})` : ''}. Your ONLY task: ${task}
 
 **Available tools:** ${toolListStr}
 **Do NOT attempt to call any other tools.**
-${constraints ? `\n**Constraints:** ${constraints}` : ''}
+${constraints ? `\n**Constraints:** ${constraints}` : ''}${thoroughnessHint}
 
 Complete the task efficiently and return a clear, actionable summary.
 ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
@@ -1023,11 +1114,19 @@ ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
     }
 
     try {
-        const MAX_SUB_ROUNDS = 10;
-        const messages = [
-            { role: 'system', content: subAgentPrompt },
-            { role: 'user', content: task },
-        ];
+        const MAX_SUB_ROUNDS = agentType === 'explore' && thoroughness === 'quick' ? 5 : 10;
+        let messages;
+
+        // Resume: load previous conversation
+        if (resumeId && _agentConversations.has(resumeId)) {
+            const prev = _agentConversations.get(resumeId);
+            messages = [...prev.messages, { role: 'user', content: task }];
+        } else {
+            messages = [
+                { role: 'system', content: subAgentPrompt },
+                { role: 'user', content: task },
+            ];
+        }
 
         for (let round = 0; round < MAX_SUB_ROUNDS; round++) {
             const result = await _makeAICall(messages, providerConfig, allowedTools);
@@ -1040,9 +1139,13 @@ ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
 
             // No tool calls — sub-agent is done
             if (!result.hasToolCalls && !result.functionCalls?.length) {
+                messages.push({ role: 'assistant', content: result.textContent || result.content || '' });
+                // Save conversation for potential resume
+                _agentConversations.set(agentId, { messages: [...messages], toolSet: effectiveToolSet, agentType });
                 agent.status = 'done';
                 agent.result = {
                     content: result.textContent || result.content || '',
+                    agentId,
                     toolsUsed: agent.toolsUsed,
                     rounds: round + 1,
                 };
@@ -1086,8 +1189,10 @@ ${fileContext ? `\n\nContext files provided:\n${fileContext}` : ''}`;
             }
         }
 
+        // Save conversation for potential resume
+        _agentConversations.set(agentId, { messages: [...messages], toolSet: effectiveToolSet, agentType });
         agent.status = 'done';
-        agent.result = { content: 'Sub-agent reached max rounds.', toolsUsed: agent.toolsUsed, rounds: MAX_SUB_ROUNDS };
+        agent.result = { content: 'Sub-agent reached max rounds.', agentId, toolsUsed: agent.toolsUsed, rounds: MAX_SUB_ROUNDS };
         return agent.result;
     } catch (err) {
         agent.status = 'error';
@@ -1278,15 +1383,29 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'spawn_sub_agent',
-            description: 'Spawn a focused sub-agent for a specific task. Give it precise instructions, a constrained tool set, and clear boundaries. Prefer this for small, independent tasks.',
+            description: 'Spawn a focused sub-agent for a specific task. Give it precise instructions, a constrained tool set, and clear boundaries. Supports agent types for specialized behavior and resume for continuing previous agent conversations.',
             parameters: {
                 type: 'object',
                 properties: {
                     task: { type: 'string', description: 'Precise task description. Be specific: what to do, what NOT to do, expected output format.' },
                     tool_set: {
                         type: 'string',
-                        enum: ['read-only', 'git', 'browser', 'workspace', 'file-ops', 'search'],
-                        description: 'Tool set for the sub-agent. read-only (default): read/search/list. git: git tools + gh_cli. browser: puppeteer testing. workspace: gws_cli. file-ops: read/edit/create/delete. search: search + LSP + semantic.',
+                        enum: ['read-only', 'git', 'browser', 'workspace', 'file-ops', 'search', 'research'],
+                        description: 'Tool set for the sub-agent. read-only (default): read/search/list. git: git tools. browser: puppeteer. workspace: gws_cli. file-ops: full CRUD. search: LSP + semantic. research: websearch + browser + URL reading.',
+                    },
+                    agent_type: {
+                        type: 'string',
+                        enum: ['general-purpose', 'explore', 'plan', 'research'],
+                        description: 'Agent type. explore: fast codebase exploration (read-only). plan: design implementation strategy (read-only). research: web research + analysis. general-purpose (default): full capabilities.',
+                    },
+                    thoroughness: {
+                        type: 'string',
+                        enum: ['quick', 'medium', 'thorough'],
+                        description: 'For explore agents: quick (basic search), medium (moderate exploration), thorough (comprehensive analysis). Default: medium.',
+                    },
+                    resume_id: {
+                        type: 'string',
+                        description: 'Agent ID from a previous spawn_sub_agent call. Resumes the agent with its full prior conversation preserved. The task field becomes a follow-up message.',
                     },
                     context_files: {
                         type: 'array',
@@ -1348,7 +1467,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'init_project',
-            description: 'Create a BRAND NEW project from scratch. Registers in Onicode, creates directory + onidocs + git repo. Use ONLY for new projects — for existing folders/repos, use detect_project instead. If the project already exists at the given path, returns the existing project without duplicating.',
+            description: 'Create a BRAND NEW project from scratch. Creates a clean project folder with only onicode.md (project context) + git init. No template bloat. Use ONLY for new projects — for existing folders/repos, use detect_project instead.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1596,13 +1715,15 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'task_add',
-            description: 'Add a task to your work plan. Always create a task list BEFORE starting any multi-step work. This is how you track what needs to be done. Optionally assign to a milestone for agile sprint tracking.',
+            description: 'Add a task to your work plan. Always create a task list BEFORE starting any multi-step work. Supports dependency chains: use blocks/blocked_by to enforce task ordering.',
             parameters: {
                 type: 'object',
                 properties: {
                     content: { type: 'string', description: 'Task description' },
                     priority: { type: 'string', description: '"high", "medium", or "low"' },
                     milestone_id: { type: 'string', description: 'Optional milestone ID to group this task under' },
+                    blocks: { type: 'array', items: { type: 'integer' }, description: 'Task IDs that this task blocks (they cannot start until this completes)' },
+                    blocked_by: { type: 'array', items: { type: 'integer' }, description: 'Task IDs that must complete before this task can start' },
                 },
                 required: ['content'],
             },
@@ -1612,13 +1733,17 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'task_update',
-            description: 'Update a task status. Mark tasks "in_progress" when starting, "done" when finished. After completing a task, check if more tasks remain.',
+            description: 'Update a task status or dependencies. Mark tasks "in_progress" when starting, "done" when finished. Tasks with non-empty blocked_by cannot be claimed until blockers complete.',
             parameters: {
                 type: 'object',
                 properties: {
                     id: { type: 'integer', description: 'Task ID to update' },
                     status: { type: 'string', description: '"pending", "in_progress", "done", "skipped"' },
                     content: { type: 'string', description: 'Updated task description (optional)' },
+                    add_blocks: { type: 'array', items: { type: 'integer' }, description: 'Task IDs to add as blocked by this task' },
+                    add_blocked_by: { type: 'array', items: { type: 'integer' }, description: 'Task IDs to add as blocking this task' },
+                    remove_blocks: { type: 'array', items: { type: 'integer' }, description: 'Task IDs to remove from blocks' },
+                    remove_blocked_by: { type: 'array', items: { type: 'integer' }, description: 'Task IDs to remove from blocked_by' },
                 },
                 required: ['id'],
             },
@@ -2424,6 +2549,100 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    // ── Plan Mode Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'enter_plan_mode',
+            description: 'Enter plan mode for non-trivial implementation tasks. In plan mode, you are restricted to read-only tools (no edit/create/delete/run_command). Explore the codebase, understand patterns, then write a plan before coding. Use for: new features, multi-file changes, architectural decisions, unclear requirements.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    reason: { type: 'string', description: 'Brief reason for entering plan mode (e.g. "Multi-file refactor needs architecture review")' },
+                },
+                required: ['reason'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'exit_plan_mode',
+            description: 'Exit plan mode after writing your plan. The plan should already be complete. This signals readiness for implementation.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    plan_summary: { type: 'string', description: 'One-line summary of what the plan covers' },
+                },
+                required: ['plan_summary'],
+            },
+        },
+    },
+    // ── Worktree Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'enter_worktree',
+            description: 'Create an isolated git worktree for experimental or parallel work. Creates a new branch from HEAD in .onicode/worktrees/. Use when you need to make changes without affecting the main working directory.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Worktree name (used for directory and branch name). Auto-generated if omitted.' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'exit_worktree',
+            description: 'Leave the current worktree. Choose to keep it (for later review/merge) or remove it (cleanup).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    action: { type: 'string', enum: ['keep', 'remove'], description: '"keep" preserves the worktree and branch. "remove" deletes both.' },
+                    discard_changes: { type: 'boolean', description: 'Force remove even with uncommitted changes. Default false.' },
+                },
+                required: ['action'],
+            },
+        },
+    },
+    // ── Deferred Tool Loading ──
+    {
+        type: 'function',
+        function: {
+            name: 'load_tools',
+            description: 'Load extended tool definitions by category. By default, only core tools (read/edit/create/delete/search/run_command/etc) are available. Use this to activate specialized tools when needed.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    categories: {
+                        type: 'array',
+                        items: { type: 'string', enum: ['deployment', 'browser', 'notebooks', 'url_reading', 'orchestration', 'code_intelligence', 'context_engine', 'verification'] },
+                        description: 'Tool categories to load. Each category activates a group of related tools.',
+                    },
+                },
+                required: ['categories'],
+            },
+        },
+    },
+    // ── Background Task Output ──
+    {
+        type: 'function',
+        function: {
+            name: 'get_background_output',
+            description: 'Retrieve output from a background process or async sub-agent by its ID. Can optionally block until completion.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    process_id: { type: 'string', description: 'Process or agent ID to retrieve output from' },
+                    block: { type: 'boolean', description: 'If true, wait for the process to complete before returning. Default false.' },
+                    timeout_ms: { type: 'integer', description: 'Max wait time in ms when blocking. Default 30000 (30s). Max 300000 (5min).' },
+                },
+                required: ['process_id'],
+            },
+        },
+    },
 ];
 
 // ══════════════════════════════════════════
@@ -2441,6 +2660,21 @@ async function executeTool(name, args) {
     if (!permCheck.allowed) {
         logger.warn('permissions', `Denied: ${name} — ${permCheck.reason}`);
         return { error: permCheck.reason };
+    }
+
+    // ── Plan mode enforcement — block destructive tools ──
+    if (_planModeActive) {
+        const planBlockedTools = ['create_file', 'delete_file', 'multi_edit', 'deploy_web_app'];
+        // Allow edit_file ONLY on the plan file itself
+        if (name === 'edit_file' && args.file_path !== _currentPlanPath) {
+            return { error: 'PLAN MODE: edit_file is only allowed on the plan file. Call exit_plan_mode first to make code changes.' };
+        }
+        if (planBlockedTools.includes(name)) {
+            return { error: `PLAN MODE: ${name} is blocked. Explore the codebase and write your plan first. Call exit_plan_mode to resume coding.` };
+        }
+        if (name === 'run_command' && args.command && !/^(git\s|cat\s|head\s|tail\s|ls\s|find\s|grep\s|wc\s|echo\s|pwd|which|env|node\s-e|python3?\s-c)/.test(args.command.trim())) {
+            return { error: 'PLAN MODE: Only read-only commands allowed (git, ls, cat, grep, etc). Call exit_plan_mode first.' };
+        }
     }
 
     // ── Path safety check for file operations ──
@@ -3223,23 +3457,27 @@ async function executeTool(name, args) {
             }
 
             case 'spawn_sub_agent': {
-                const { task, context_files, tool_set, constraints } = args;
-                const agentId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                createSubAgent(agentId, task, { context_files, tool_set });
+                const { task, context_files, tool_set, constraints, resume_id, agent_type, thoroughness } = args;
+                const agentId = resume_id || `agent_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                if (!resume_id) {
+                    createSubAgent(agentId, task, { context_files, tool_set, agent_type });
+                }
 
                 // Notify renderer that a sub-agent is running
-                sendToRenderer('ai-agent-step', { round: 0, status: 'sub-agent', agentId, task, toolSet: tool_set || 'read-only' });
+                sendToRenderer('ai-agent-step', { round: 0, status: resume_id ? 'sub-agent-resume' : 'sub-agent', agentId, task, toolSet: tool_set || 'read-only' });
 
                 // Execute the sub-agent with constrained tool set
-                const result = await executeSubAgent(agentId, task, context_files, _lastProviderConfig, tool_set, constraints);
+                const result = await executeSubAgent(agentId, task, context_files, _lastProviderConfig, tool_set, constraints, resume_id, agent_type, thoroughness);
 
                 const agentResult = {
-                    agent_id: agentId,
+                    agent_id: result.agentId || agentId,
                     task,
+                    agent_type: agent_type || 'general-purpose',
                     tool_set: tool_set || 'read-only',
                     status: result.error ? 'error' : 'done',
                     tools_used: result.toolsUsed || [],
                     rounds: result.rounds || 0,
+                    resumable: true,
                 };
 
                 // Surface the sub-agent's actual findings/output prominently
@@ -3504,56 +3742,21 @@ async function executeTool(name, args) {
 
                 // Expand ~ to home directory — use ~/OniProjects/ by default (avoids macOS TCC permission issues with ~/Documents/)
                 let expandedPath = projectPath.replace(/^~/, os.homedir());
-                // If the path uses ~/Documents/OniProjects, redirect to ~/OniProjects to avoid macOS sandbox issues
                 const docsOniProjects = path.join(os.homedir(), 'Documents', 'OniProjects');
                 if (expandedPath.startsWith(docsOniProjects)) {
                     expandedPath = expandedPath.replace(docsOniProjects, path.join(os.homedir(), 'OniProjects'));
                 }
 
                 const result = await new Promise((resolve) => {
-
                     // Ensure project directory exists
                     if (!fs.existsSync(expandedPath)) {
                         fs.mkdirSync(expandedPath, { recursive: true });
                     }
 
-                    // Create onidocs directory (no dot prefix — matches project-get and project-init IPC)
-                    const onidocsDir = path.join(expandedPath, 'onidocs');
-                    if (!fs.existsSync(onidocsDir)) {
-                        fs.mkdirSync(onidocsDir, { recursive: true });
-                    }
-
-                    // Create src directory
-                    const srcDir = path.join(expandedPath, 'src');
-                    if (!fs.existsSync(srcDir)) {
-                        fs.mkdirSync(srcDir, { recursive: true });
-                    }
-
-                    // Create onidocs template files (same as project-init IPC uses)
-                    const docsDefaults = {
-                        'architecture.md': `# ${projName} — Architecture\n\n## Overview\nThis document describes the architecture of **${projName}**.\n\n## Tech Stack\n${techStack || '- To be defined'}\n\n## Directory Structure\n\`\`\`\n${projName}/\n├── src/\n├── onidocs/\n│   ├── architecture.md\n│   ├── changelog.md\n│   ├── scope.md\n│   └── tasks.md\n└── README.md\n\`\`\`\n\n## Key Decisions\n- *Document architectural decisions here*\n\n## Data Flow\n- *Describe how data flows through the system*\n`,
-                        'scope.md': `# ${projName} — Project Scope\n\n## Description\n${projDesc || 'A new project created with Onicode.'}\n\n## Goals\n- [ ] Define project objectives\n- [ ] Set up development environment\n- [ ] Build core features\n- [ ] Deploy\n\n## Non-Goals\n- *List what is explicitly out of scope*\n`,
-                        'changelog.md': `# ${projName} — Changelog\n\nAll notable changes to this project will be documented here.\n\n## [Unreleased]\n\n### Added\n- Initial project setup with Onicode\n- Created onidocs documentation structure\n`,
-                        'tasks.md': `# ${projName} — Tasks\n\n## In Progress\n- [ ] Set up project structure\n- [ ] Define architecture\n\n## To Do\n- [ ] Implement core features\n- [ ] Write tests\n- [ ] Set up CI/CD\n- [ ] Documentation\n\n## Done\n- [x] Project initialized with Onicode\n- [x] Created onidocs documentation\n`,
-                    };
-
-                    for (const [fname, content] of Object.entries(docsDefaults)) {
-                        const fpath = path.join(onidocsDir, fname);
-                        if (!fs.existsSync(fpath)) {
-                            fs.writeFileSync(fpath, content);
-                        }
-                    }
-
-                    // Create AGENTS.md (project context for AI — like OpenCode's /init)
-                    const agentsMdPath = path.join(expandedPath, 'AGENTS.md');
-                    if (!fs.existsSync(agentsMdPath)) {
-                        fs.writeFileSync(agentsMdPath, `# AGENTS.md — ${projName}\n\n## Project Overview\n${projDesc || 'A project created with Onicode AI.'}\n\n## Tech Stack\n${techStack || '- To be defined during setup'}\n\n## Directory Structure\nThis file helps the AI coding agent understand the project.\nUpdate this as the project evolves.\n\n## Coding Conventions\n- *Add project-specific patterns here*\n\n## Important Files\n- \`onidocs/architecture.md\` — System architecture\n- \`onidocs/scope.md\` — Project scope and goals\n- \`onidocs/tasks.md\` — Task tracking\n- \`onidocs/changelog.md\` — Version history\n\n## Testing\n- *Describe how to run tests*\n\n## Build & Deploy\n- *Describe build and deploy process*\n\n---\n*Auto-generated by Onicode AI. Commit this file to your repo.*\n`);
-                    }
-
-                    // Create README.md in project root
-                    const readmePath = path.join(expandedPath, 'README.md');
-                    if (!fs.existsSync(readmePath)) {
-                        fs.writeFileSync(readmePath, `# ${projName}\n\n${projDesc || 'A project created with Onicode AI.'}\n\n## Getting Started\n\n\`\`\`bash\ncd ${projName}\n# Add setup instructions here\n\`\`\`\n\n## Documentation\n\nSee the \`onidocs/\` folder for detailed project documentation:\n- **architecture.md** — System architecture and tech stack\n- **scope.md** — Project scope and goals\n- **changelog.md** — Version history\n- **tasks.md** — Task tracking\n\n---\n*Created with [Onicode](https://onicode.dev)*\n`);
+                    // Create a single onicode.md — clean project context file
+                    const onicodeMdPath = path.join(expandedPath, 'onicode.md');
+                    if (!fs.existsSync(onicodeMdPath)) {
+                        fs.writeFileSync(onicodeMdPath, `# ${projName}\n\n${projDesc || 'A project created with Onicode AI.'}\n\n## Tech Stack\n\n${techStack || '- To be defined'}\n\n## Architecture\n\n*Describe the system architecture, key components, and data flow here.*\n\n## Directory Structure\n\n\`\`\`\n${path.basename(expandedPath)}/\n├── onicode.md\n└── ...\n\`\`\`\n\n## Coding Conventions\n\n*Add project-specific patterns, naming conventions, and style rules here.*\n\n## Key Decisions\n\n*Document important architectural and design decisions here.*\n\n---\n*Managed by [Onicode](https://onicode.dev) — update this file as the project evolves.*\n`);
                     }
 
                     // Load and save to projects registry
@@ -3565,19 +3768,18 @@ async function executeTool(name, args) {
                         }
                     } catch { projects = []; }
 
-                    // Check if already registered (by exact path OR by name match in same parent dir)
+                    // Check if already registered
                     const existing = projects.find(p => p.path === expandedPath);
                     if (existing) {
                         resolve({ success: true, project: existing, alreadyRegistered: true });
                         return;
                     }
-                    // Also detect near-duplicates: same name or similar name in ~/OniProjects/
+                    // Detect near-duplicates in same parent directory
                     const parentDir = path.dirname(expandedPath);
                     const nameMatch = projects.find(p => {
                         const pDir = path.dirname(p.path);
                         const pBase = path.basename(p.path).toLowerCase();
                         const newBase = path.basename(expandedPath).toLowerCase();
-                        // Same parent directory and names are similar (one contains the other, or differ by suffix like -v2)
                         return pDir === parentDir && pBase !== newBase && (
                             pBase.includes(newBase) || newBase.includes(pBase) ||
                             pBase.replace(/[-_]?v?\d+$/, '') === newBase.replace(/[-_]?v?\d+$/, '')
@@ -3612,7 +3814,6 @@ async function executeTool(name, args) {
                         const gitDir = path.join(expandedPath, '.git');
                         if (!fs.existsSync(gitDir)) {
                             execSync('git init -b main', { cwd: expandedPath, timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
-                            // Create .gitignore
                             const gitignorePath = path.join(expandedPath, '.gitignore');
                             if (!fs.existsSync(gitignorePath)) {
                                 fs.writeFileSync(gitignorePath, `node_modules/\ndist/\nbuild/\n.next/\n.env\n.env.local\n.DS_Store\n*.log\ncoverage/\n.turbo/\n.cache/\n`);
@@ -3622,18 +3823,17 @@ async function executeTool(name, args) {
                                 stdio: ['pipe', 'pipe', 'pipe'],
                                 env: { ...process.env, GIT_AUTHOR_NAME: 'Onicode', GIT_AUTHOR_EMAIL: 'ai@onicode.dev', GIT_COMMITTER_NAME: 'Onicode', GIT_COMMITTER_EMAIL: 'ai@onicode.dev' },
                             });
-                            logger.info('git', `Initialized git repo and made initial commit at ${expandedPath}`);
+                            logger.info('git', `Initialized git repo at ${expandedPath}`);
                         }
                     } catch (err) {
                         logger.warn('git', `Auto git init failed (non-critical): ${err.message}`);
                     }
                 }
 
-                // Update session references for this project (safe during streaming — won't wipe tasks)
+                // Update session references
                 _currentProjectId = result.project?.id || _currentProjectId;
                 _currentProjectPath = expandedPath;
 
-                // Retroactively update project_path on session + orphaned tasks (fixes persistence across restarts)
                 try {
                     const { taskStorage, sessionStorage: sesStore } = require('./storage');
                     const sid = getSessionId();
@@ -3641,10 +3841,9 @@ async function executeTool(name, args) {
                     taskStorage.updateSessionProjectPath(sid, expandedPath, _currentProjectId);
                 } catch { /* non-fatal */ }
 
-                // Fire project activation event in the renderer (deferred to avoid race with task_add)
+                // Fire project activation event
                 if (result.project) {
                     sendToRenderer('ai-panel-open', { type: 'project' });
-                    // Defer the event dispatch so it doesn't trigger loadProjectTasks() while AI is adding tasks
                     if (_mainWindow?.webContents) {
                         setTimeout(() => {
                             _mainWindow?.webContents.executeJavaScript(`
@@ -3657,7 +3856,7 @@ async function executeTool(name, args) {
                                     }
                                 }));
                             `);
-                        }, 500); // 500ms delay — enough for task_add calls to complete first
+                        }, 500);
                     }
                 }
 
@@ -3666,13 +3865,13 @@ async function executeTool(name, args) {
                     project_name: projName,
                     project_path: expandedPath,
                     already_registered: result.alreadyRegistered || false,
-                    onidocs_created: result.alreadyRegistered ? [] : ['architecture.md', 'project.md', 'changelog.md', 'README.md'],
+                    files_created: result.alreadyRegistered ? [] : ['onicode.md', '.gitignore'],
                     message: result.alreadyRegistered
                         ? `Project "${projName}" already registered — activated.`
-                        : `Project "${projName}" registered. Directory: ${expandedPath}`,
+                        : `Project "${projName}" created. Clean folder with onicode.md for project context.`,
                     NEXT: result.alreadyRegistered
                         ? 'Project exists. Proceed with the user\'s request — call task_add or create_file.'
-                        : 'New project created. The system will guide you on whether to ask questions or start building based on the user\'s intent.',
+                        : 'New project created. Start building — use create_file for source files, update onicode.md as the architecture evolves.',
                 };
             }
 
@@ -3885,13 +4084,44 @@ async function executeTool(name, args) {
 
             case 'task_add': {
                 const task = taskManager.addTask(args.content, args.priority || 'medium', args.milestone_id || null);
+                // Set up dependencies if provided
+                if (task && task.id) {
+                    if (args.blocks && args.blocks.length > 0) {
+                        task.blocks = args.blocks;
+                        taskManager.updateTask(task.id, { blocks: JSON.stringify(args.blocks) });
+                        // Also update blocked_by on target tasks
+                        for (const blockedId of args.blocks) {
+                            const blocked = taskManager.getTask(blockedId);
+                            if (blocked) {
+                                const existing = JSON.parse(blocked.blocked_by || '[]');
+                                if (!existing.includes(task.id)) {
+                                    existing.push(task.id);
+                                    taskManager.updateTask(blockedId, { blocked_by: JSON.stringify(existing) });
+                                }
+                            }
+                        }
+                    }
+                    if (args.blocked_by && args.blocked_by.length > 0) {
+                        task.blocked_by = args.blocked_by;
+                        taskManager.updateTask(task.id, { blocked_by: JSON.stringify(args.blocked_by) });
+                        // Also update blocks on blocker tasks
+                        for (const blockerId of args.blocked_by) {
+                            const blocker = taskManager.getTask(blockerId);
+                            if (blocker) {
+                                const existing = JSON.parse(blocker.blocks || '[]');
+                                if (!existing.includes(task.id)) {
+                                    existing.push(task.id);
+                                    taskManager.updateTask(blockerId, { blocks: JSON.stringify(existing) });
+                                }
+                            }
+                        }
+                    }
+                }
                 const summary = taskManager.getSummary();
                 const result = { success: true, task, summary };
-                // Auto-open tasks panel on first task creation
                 if (summary.total === 1) {
                     sendToRenderer('ai-panel-open', { type: 'tasks' });
                 }
-                // If we have tasks but none are in-progress or done, remind AI to start executing
                 if (summary.total > 0 && summary.done === 0 && summary.inProgress === 0) {
                     result.REMINDER = 'Tasks are just a plan. You MUST now call task_update to mark a task in_progress, then call create_file and run_command to ACTUALLY build the project files. Do not respond with only text.';
                 }
@@ -3902,6 +4132,52 @@ async function executeTool(name, args) {
                 const updates = {};
                 if (args.status) updates.status = args.status;
                 if (args.content) updates.content = args.content;
+
+                // Check blocked_by constraint before allowing in_progress
+                if (args.status === 'in_progress') {
+                    const currentTask = taskManager.getTask(args.id);
+                    if (currentTask) {
+                        const blockedBy = JSON.parse(currentTask.blocked_by || '[]');
+                        if (blockedBy.length > 0) {
+                            const unfinished = blockedBy.filter(bid => {
+                                const blocker = taskManager.getTask(bid);
+                                return blocker && blocker.status !== 'done' && blocker.status !== 'skipped';
+                            });
+                            if (unfinished.length > 0) {
+                                return { error: `Task ${args.id} is blocked by tasks [${unfinished.join(', ')}] which are not yet done. Complete those first.` };
+                            }
+                        }
+                    }
+                }
+
+                // Handle dependency updates
+                if (args.add_blocks) {
+                    const current = taskManager.getTask(args.id);
+                    const existing = JSON.parse(current?.blocks || '[]');
+                    for (const bid of args.add_blocks) {
+                        if (!existing.includes(bid)) existing.push(bid);
+                    }
+                    updates.blocks = JSON.stringify(existing);
+                }
+                if (args.add_blocked_by) {
+                    const current = taskManager.getTask(args.id);
+                    const existing = JSON.parse(current?.blocked_by || '[]');
+                    for (const bid of args.add_blocked_by) {
+                        if (!existing.includes(bid)) existing.push(bid);
+                    }
+                    updates.blocked_by = JSON.stringify(existing);
+                }
+                if (args.remove_blocks) {
+                    const current = taskManager.getTask(args.id);
+                    const existing = JSON.parse(current?.blocks || '[]').filter(b => !args.remove_blocks.includes(b));
+                    updates.blocks = JSON.stringify(existing);
+                }
+                if (args.remove_blocked_by) {
+                    const current = taskManager.getTask(args.id);
+                    const existing = JSON.parse(current?.blocked_by || '[]').filter(b => !args.remove_blocked_by.includes(b));
+                    updates.blocked_by = JSON.stringify(existing);
+                }
+
                 const task = taskManager.updateTask(args.id, updates);
                 if (task.error) return task;
 
@@ -5216,14 +5492,169 @@ async function executeTool(name, args) {
 
             case 'check_deploy_status': {
                 const { deployment_id, provider = 'netlify' } = args;
-                // For now, return a basic status check
-                // Real implementation would query the provider API
                 return {
                     deployment_id,
                     provider,
                     status: 'unknown',
                     message: `Use the ${provider} dashboard to check deployment status. Full API integration coming soon.`,
                 };
+            }
+
+            // ── Plan Mode Tools ──
+
+            case 'enter_plan_mode': {
+                const { reason } = args;
+                _planModeActive = true;
+                const planId = `plan_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                const planDir = path.join(os.homedir(), '.onicode', 'plans');
+                if (!fs.existsSync(planDir)) fs.mkdirSync(planDir, { recursive: true });
+                const planPath = path.join(planDir, `${planId}.md`);
+                fs.writeFileSync(planPath, `# Plan: ${reason}\n\n_Write your implementation plan here._\n\nCreated: ${new Date().toISOString()}\n\n## Analysis\n\n## Approach\n\n## Files to Modify\n\n## Steps\n\n`);
+                _currentPlanId = planId;
+                _currentPlanPath = planPath;
+                sendToRenderer('plan-mode-change', { active: true, planId, planPath });
+                return {
+                    success: true,
+                    plan_id: planId,
+                    plan_path: planPath,
+                    message: `Plan mode ACTIVE. You are now restricted to read-only tools. Explore the codebase, then write your plan to: ${planPath}. Use edit_file on the plan file to write your plan. Call exit_plan_mode when done.`,
+                    IMPORTANT: 'You are in PLAN MODE. DO NOT use create_file, delete_file, or run_command (except read-only commands). Focus on exploration and planning.',
+                    restricted_tools: ['edit_file (only for plan file)', 'read_file', 'search_files', 'glob_files', 'list_directory', 'find_symbol', 'find_references', 'list_symbols', 'semantic_search', 'find_implementation', 'batch_search'],
+                };
+            }
+
+            case 'exit_plan_mode': {
+                const { plan_summary } = args;
+                if (!_planModeActive) {
+                    return { error: 'Not in plan mode. Call enter_plan_mode first.' };
+                }
+                let planContent = '';
+                try {
+                    if (_currentPlanPath && fs.existsSync(_currentPlanPath)) {
+                        planContent = fs.readFileSync(_currentPlanPath, 'utf-8');
+                    }
+                } catch { /* ignore */ }
+                _planModeActive = false;
+                const planId = _currentPlanId;
+                _currentPlanId = null;
+                _currentPlanPath = null;
+                sendToRenderer('plan-mode-change', { active: false, planId });
+                return {
+                    success: true,
+                    plan_id: planId,
+                    summary: plan_summary,
+                    plan_content: planContent.slice(0, 4000),
+                    message: 'Plan mode EXITED. You now have full tool access. Implement the plan.',
+                };
+            }
+
+            // ── Worktree Tools ──
+
+            case 'enter_worktree': {
+                const wtName = args.name || `wt-${Date.now().toString(36)}`;
+                const cwd = _currentProjectPath || process.cwd();
+                try {
+                    // Check if in git repo
+                    execSync('git rev-parse --git-dir', { cwd, encoding: 'utf-8', timeout: 5000 });
+                } catch {
+                    return { error: 'Not in a git repository. Worktrees require git.' };
+                }
+                const wtDir = path.join(cwd, '.onicode', 'worktrees');
+                if (!fs.existsSync(wtDir)) fs.mkdirSync(wtDir, { recursive: true });
+                const wtPath = path.join(wtDir, wtName);
+                const branchName = `worktree/${wtName}`;
+                try {
+                    execSync(`git worktree add -b "${branchName}" "${wtPath}" HEAD`, { cwd, encoding: 'utf-8', timeout: 15000 });
+                    _worktreeActive = true;
+                    _worktreeOriginalCwd = cwd;
+                    _worktreePath = wtPath;
+                    return {
+                        success: true,
+                        path: wtPath,
+                        branch: branchName,
+                        message: `Worktree created at ${wtPath} on branch ${branchName}. You are now working in the worktree. Use exit_worktree when done.`,
+                    };
+                } catch (err) {
+                    return { error: `Failed to create worktree: ${err.message}` };
+                }
+            }
+
+            case 'exit_worktree': {
+                const { action, discard_changes } = args;
+                if (!_worktreeActive || !_worktreePath) {
+                    return { error: 'Not in a worktree.' };
+                }
+                const wtPath = _worktreePath;
+                const origCwd = _worktreeOriginalCwd;
+                if (action === 'remove') {
+                    try {
+                        // Check for uncommitted changes
+                        const status = execSync('git status --porcelain', { cwd: wtPath, encoding: 'utf-8', timeout: 5000 }).trim();
+                        if (status && !discard_changes) {
+                            return { error: 'Worktree has uncommitted changes. Set discard_changes=true to force remove, or commit first.' };
+                        }
+                        const branchOutput = execSync('git branch --show-current', { cwd: wtPath, encoding: 'utf-8', timeout: 5000 }).trim();
+                        execSync(`git worktree remove "${wtPath}" ${discard_changes ? '--force' : ''}`, { cwd: origCwd, encoding: 'utf-8', timeout: 15000 });
+                        // Clean up branch
+                        try { execSync(`git branch -D "${branchOutput}"`, { cwd: origCwd, encoding: 'utf-8', timeout: 5000 }); } catch { /* ignore */ }
+                        _worktreeActive = false;
+                        _worktreePath = null;
+                        _worktreeOriginalCwd = null;
+                        return { success: true, action: 'removed', message: 'Worktree removed and branch deleted.' };
+                    } catch (err) {
+                        return { error: `Failed to remove worktree: ${err.message}` };
+                    }
+                } else {
+                    _worktreeActive = false;
+                    const keptPath = _worktreePath;
+                    _worktreePath = null;
+                    _worktreeOriginalCwd = null;
+                    return { success: true, action: 'kept', path: keptPath, message: `Worktree kept at ${keptPath}. You can return to it later or merge its branch.` };
+                }
+            }
+
+            // ── Deferred Tool Loading ──
+
+            case 'load_tools': {
+                const { categories } = args;
+                const loaded = loadToolCategories(categories);
+                const toolNames = {};
+                for (const cat of categories) {
+                    toolNames[cat] = DEFERRED_TOOL_CATEGORIES[cat] || [];
+                }
+                return {
+                    success: true,
+                    loaded_categories: loaded,
+                    tools_activated: toolNames,
+                    message: `Loaded ${categories.join(', ')} tools. These tools are now available for use.`,
+                };
+            }
+
+            // ── Background Task Output ──
+
+            case 'get_background_output': {
+                const { process_id, block, timeout_ms } = args;
+                // Check sub-agents
+                const agentInfo = getAgentStatus(process_id);
+                if (agentInfo) {
+                    if (block && agentInfo.status === 'running') {
+                        const maxWait = Math.min(timeout_ms || 30000, 300000);
+                        const startWait = Date.now();
+                        while (Date.now() - startWait < maxWait) {
+                            const current = getAgentStatus(process_id);
+                            if (!current || current.status !== 'running') {
+                                return { id: process_id, type: 'agent', status: current?.status || 'unknown', result: current?.result || null };
+                            }
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+                        return { id: process_id, type: 'agent', status: 'timeout', message: `Agent still running after ${maxWait}ms` };
+                    }
+                    return { id: process_id, type: 'agent', status: agentInfo.status, result: agentInfo.result || null };
+                }
+                // Check background processes
+                const bgOutput = getTerminalOutput(process_id, 50);
+                if (bgOutput) return { id: process_id, type: 'process', ...bgOutput };
+                return { error: `No agent or process found with ID: ${process_id}` };
             }
 
             // ── Git Tools ──
@@ -5905,4 +6336,18 @@ module.exports = {
     resolvePermissionApproval,
     // Tool sets for workflow agentic steps
     SUB_AGENT_TOOL_SETS,
+    // Deferred tool loading
+    getActiveToolDefinitions,
+    loadToolCategories,
+    resetLoadedTools,
+    DEFERRED_TOOL_CATEGORIES,
+    AGENT_TYPE_RESTRICTIONS,
+    // Plan mode
+    getPlanModeState: () => ({ active: _planModeActive, planId: _currentPlanId, planPath: _currentPlanPath }),
+    setPlanModeState: (active, planId, planPath) => { _planModeActive = active; _currentPlanId = planId || null; _currentPlanPath = planPath || null; },
+    // Worktree
+    getWorktreeState: () => ({ active: _worktreeActive, path: _worktreePath, originalCwd: _worktreeOriginalCwd }),
+    // Agent conversations (for resume)
+    getAgentConversation: (id) => _agentConversations.get(id) || null,
+    listAgentConversations: () => [..._agentConversations.keys()],
 };

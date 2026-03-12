@@ -49,7 +49,9 @@ function initSchema() {
             completed_at TEXT,
             project_id TEXT,
             project_path TEXT,
-            milestone_id TEXT
+            milestone_id TEXT,
+            blocks TEXT DEFAULT '[]',
+            blocked_by TEXT DEFAULT '[]'
         );
 
         CREATE TABLE IF NOT EXISTS milestones (
@@ -139,6 +141,32 @@ function initSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_plans_session ON plans(session_id);
         CREATE INDEX IF NOT EXISTS idx_plans_project ON plans(project_path);
+
+        -- Conversation-scoped plans (lightweight)
+        CREATE TABLE IF NOT EXISTS conversation_plans (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT,
+            content TEXT NOT NULL DEFAULT '',
+            status TEXT DEFAULT 'drafting',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_conversation_plans_conv ON conversation_plans(conversation_id);
+
+        -- Agent conversations (sub-agent history)
+        CREATE TABLE IF NOT EXISTS agent_conversations (
+            agent_id TEXT PRIMARY KEY,
+            parent_conversation_id TEXT,
+            messages TEXT NOT NULL DEFAULT '[]',
+            tool_set TEXT,
+            agent_type TEXT DEFAULT 'general-purpose',
+            status TEXT DEFAULT 'completed',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_conversations_parent ON agent_conversations(parent_conversation_id);
 
         -- Workflow definitions
         CREATE TABLE IF NOT EXISTS workflows (
@@ -291,6 +319,10 @@ function initSchema() {
             logger.warn('storage', `Conversations FTS5 setup warning: ${ftsErr.message}`);
         }
     }
+
+    // Migrations for existing databases — add new columns to tasks
+    try { db.exec("ALTER TABLE tasks ADD COLUMN blocks TEXT DEFAULT '[]'"); } catch(e) {}
+    try { db.exec("ALTER TABLE tasks ADD COLUMN blocked_by TEXT DEFAULT '[]'"); } catch(e) {}
 }
 
 /**
@@ -314,14 +346,24 @@ function createFallback() {
 //  Task Storage
 // ══════════════════════════════════════════
 
+/** Parse a raw task row, deserializing JSON fields */
+function parseTaskRow(row) {
+    if (!row) return null;
+    return {
+        ...row,
+        blocks: JSON.parse(row.blocks || '[]'),
+        blockedBy: JSON.parse(row.blocked_by || '[]'),
+    };
+}
+
 const taskStorage = {
     save(task, sessionId, projectId, projectPath) {
         const d = getDB();
         const stmt = d.prepare(`
-            INSERT OR REPLACE INTO tasks (id, session_id, content, status, priority, created_at, completed_at, project_id, project_path, milestone_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO tasks (id, session_id, content, status, priority, created_at, completed_at, project_id, project_path, milestone_id, blocks, blocked_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
-        stmt.run(task.id, sessionId, task.content, task.status, task.priority, task.createdAt, task.completedAt, projectId || null, projectPath || null, task.milestoneId || null);
+        stmt.run(task.id, sessionId, task.content, task.status, task.priority, task.createdAt, task.completedAt, projectId || null, projectPath || null, task.milestoneId || null, JSON.stringify(task.blocks || []), JSON.stringify(task.blockedBy || []));
     },
 
     update(taskId, updates, sessionId) {
@@ -333,6 +375,8 @@ const taskStorage = {
         if (updates.priority) { fields.push('priority = ?'); values.push(updates.priority); }
         if (updates.completedAt) { fields.push('completed_at = ?'); values.push(updates.completedAt); }
         if (updates.milestoneId !== undefined) { fields.push('milestone_id = ?'); values.push(updates.milestoneId); }
+        if (updates.blocks !== undefined) { fields.push('blocks = ?'); values.push(JSON.stringify(updates.blocks)); }
+        if (updates.blockedBy !== undefined) { fields.push('blocked_by = ?'); values.push(JSON.stringify(updates.blockedBy)); }
         if (fields.length === 0) return;
         values.push(taskId, sessionId);
         d.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ? AND session_id = ?`).run(...values);
@@ -340,7 +384,7 @@ const taskStorage = {
 
     loadSession(sessionId) {
         const d = getDB();
-        return d.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY id').all(sessionId);
+        return d.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY id').all(sessionId).map(parseTaskRow);
     },
 
     /** Load tasks for a project (across ALL sessions), most recent first */
@@ -348,7 +392,7 @@ const taskStorage = {
         const d = getDB();
         return d.prepare(
             'SELECT * FROM tasks WHERE project_path = ? ORDER BY created_at DESC'
-        ).all(projectPath);
+        ).all(projectPath).map(parseTaskRow);
     },
 
     /** Load the latest session's tasks for a project.
@@ -366,7 +410,7 @@ const taskStorage = {
             ).get(projectPath);
         }
         if (!row) return [];
-        return d.prepare("SELECT * FROM tasks WHERE session_id = ? AND status != 'archived' ORDER BY id").all(row.session_id);
+        return d.prepare("SELECT * FROM tasks WHERE session_id = ? AND status != 'archived' ORDER BY id").all(row.session_id).map(parseTaskRow);
     },
 
     /** Retroactively update project_path on all tasks in a session (used when init_project runs mid-session) */
@@ -400,7 +444,7 @@ const taskStorage = {
     /** Get all tasks for a project grouped by status */
     getProjectTaskSummary(projectPath) {
         const d = getDB();
-        const tasks = d.prepare('SELECT * FROM tasks WHERE project_path = ? ORDER BY created_at DESC').all(projectPath);
+        const tasks = d.prepare('SELECT * FROM tasks WHERE project_path = ? ORDER BY created_at DESC').all(projectPath).map(parseTaskRow);
         return {
             pending: tasks.filter(t => t.status === 'pending'),
             inProgress: tasks.filter(t => t.status === 'in_progress'),
@@ -408,6 +452,60 @@ const taskStorage = {
             archived: tasks.filter(t => t.status === 'archived'),
             skipped: tasks.filter(t => t.status === 'skipped'),
         };
+    },
+
+    /** Get a single task by ID */
+    getById(taskId) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+        if (!row) return null;
+        return parseTaskRow(row);
+    },
+
+    /** Get all tasks (optional limit) */
+    getAll(limit = 500) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?').all(limit).map(parseTaskRow);
+    },
+
+    /** Add a dependency: taskId blocks blocksId (blocksId is blocked by taskId) */
+    addDependency(taskId, blocksId) {
+        const d = getDB();
+        // Add blocksId to taskId's blocks list
+        const task = d.prepare('SELECT blocks FROM tasks WHERE id = ?').get(taskId);
+        if (task) {
+            const blocks = JSON.parse(task.blocks || '[]');
+            if (!blocks.includes(blocksId)) {
+                blocks.push(blocksId);
+                d.prepare('UPDATE tasks SET blocks = ? WHERE id = ?').run(JSON.stringify(blocks), taskId);
+            }
+        }
+        // Add taskId to blocksId's blocked_by list
+        const blocked = d.prepare('SELECT blocked_by FROM tasks WHERE id = ?').get(blocksId);
+        if (blocked) {
+            const blockedBy = JSON.parse(blocked.blocked_by || '[]');
+            if (!blockedBy.includes(taskId)) {
+                blockedBy.push(taskId);
+                d.prepare('UPDATE tasks SET blocked_by = ? WHERE id = ?').run(JSON.stringify(blockedBy), blocksId);
+            }
+        }
+    },
+
+    /** Remove a dependency: taskId no longer blocks blocksId */
+    removeDependency(taskId, blocksId) {
+        const d = getDB();
+        // Remove blocksId from taskId's blocks list
+        const task = d.prepare('SELECT blocks FROM tasks WHERE id = ?').get(taskId);
+        if (task) {
+            const blocks = JSON.parse(task.blocks || '[]').filter(id => id !== blocksId);
+            d.prepare('UPDATE tasks SET blocks = ? WHERE id = ?').run(JSON.stringify(blocks), taskId);
+        }
+        // Remove taskId from blocksId's blocked_by list
+        const blocked = d.prepare('SELECT blocked_by FROM tasks WHERE id = ?').get(blocksId);
+        if (blocked) {
+            const blockedBy = JSON.parse(blocked.blocked_by || '[]').filter(id => id !== taskId);
+            d.prepare('UPDATE tasks SET blocked_by = ? WHERE id = ?').run(JSON.stringify(blockedBy), blocksId);
+        }
     },
 };
 
@@ -543,6 +641,103 @@ const planStorage = {
     delete(id) {
         const d = getDB();
         d.prepare('DELETE FROM plans WHERE id = ?').run(id);
+    },
+};
+
+// ══════════════════════════════════════════
+//  Agent Conversation Storage
+// ══════════════════════════════════════════
+
+const agentConversationStorage = {
+    save(agentConv) {
+        const d = getDB();
+        d.prepare(`
+            INSERT OR REPLACE INTO agent_conversations (agent_id, parent_conversation_id, messages, tool_set, agent_type, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            agentConv.agentId, agentConv.parentConversationId || null,
+            JSON.stringify(agentConv.messages || []), agentConv.toolSet || null,
+            agentConv.agentType || 'general-purpose', agentConv.status || 'completed',
+            agentConv.createdAt || Date.now(), Date.now()
+        );
+    },
+
+    getById(agentId) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM agent_conversations WHERE agent_id = ?').get(agentId);
+        if (!row) return null;
+        return { ...row, messages: JSON.parse(row.messages || '[]') };
+    },
+
+    update(agentId, data) {
+        const d = getDB();
+        const fields = [];
+        const vals = [];
+        if (data.messages !== undefined) { fields.push('messages = ?'); vals.push(JSON.stringify(data.messages)); }
+        if (data.toolSet !== undefined) { fields.push('tool_set = ?'); vals.push(data.toolSet); }
+        if (data.agentType !== undefined) { fields.push('agent_type = ?'); vals.push(data.agentType); }
+        if (data.status !== undefined) { fields.push('status = ?'); vals.push(data.status); }
+        if (data.parentConversationId !== undefined) { fields.push('parent_conversation_id = ?'); vals.push(data.parentConversationId); }
+        if (fields.length === 0) return;
+        fields.push('updated_at = ?');
+        vals.push(Date.now());
+        vals.push(agentId);
+        d.prepare(`UPDATE agent_conversations SET ${fields.join(', ')} WHERE agent_id = ?`).run(...vals);
+    },
+
+    listByParent(parentConvId) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM agent_conversations WHERE parent_conversation_id = ? ORDER BY created_at DESC').all(parentConvId)
+            .map(row => ({ ...row, messages: JSON.parse(row.messages || '[]') }));
+    },
+
+    delete(agentId) {
+        const d = getDB();
+        d.prepare('DELETE FROM agent_conversations WHERE agent_id = ?').run(agentId);
+    },
+};
+
+// ══════════════════════════════════════════
+//  Conversation Plan Storage
+// ══════════════════════════════════════════
+
+const conversationPlanStorage = {
+    save(plan) {
+        const d = getDB();
+        const now = Date.now();
+        d.prepare(`
+            INSERT OR REPLACE INTO conversation_plans (id, conversation_id, content, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `).run(plan.id, plan.conversationId || null, plan.content || '', plan.status || 'drafting', plan.createdAt || now, now);
+    },
+
+    getById(id) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM conversation_plans WHERE id = ?').get(id) || null;
+    },
+
+    getByConversation(convId) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM conversation_plans WHERE conversation_id = ? ORDER BY updated_at DESC').all(convId);
+    },
+
+    update(id, data) {
+        const d = getDB();
+        const fields = [];
+        const vals = [];
+        if (data.content !== undefined) { fields.push('content = ?'); vals.push(data.content); }
+        if (data.status !== undefined) { fields.push('status = ?'); vals.push(data.status); }
+        if (data.conversationId !== undefined) { fields.push('conversation_id = ?'); vals.push(data.conversationId); }
+        if (fields.length === 0) return;
+        fields.push('updated_at = ?');
+        vals.push(Date.now());
+        vals.push(id);
+        d.prepare(`UPDATE conversation_plans SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
+    },
+
+    delete(id) {
+        const d = getDB();
+        d.prepare('DELETE FROM conversation_plans WHERE id = ?').run(id);
     },
 };
 
@@ -1194,6 +1389,8 @@ module.exports = {
     taskStorage,
     milestoneStorage,
     planStorage,
+    conversationPlanStorage,
+    agentConversationStorage,
     conversationStorage,
     sessionStorage,
     attachmentStorage,

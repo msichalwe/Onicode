@@ -1139,6 +1139,24 @@ body {
   border-radius: 3px;
 }
 
+.model-picker-refresh {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  opacity: 0.6;
+  transition: all 0.15s;
+}
+
+.model-picker-refresh:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+
 .model-picker-item {
   display: block;
   width: 100%;

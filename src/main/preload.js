@@ -131,6 +131,10 @@ contextBridge.exposeInMainWorld('onicode', {
     testProvider: (providerConfig) =>
         ipcRenderer.invoke('test-provider', providerConfig),
 
+    // Fetch available models from provider API
+    fetchModels: (providerConfig) =>
+        ipcRenderer.invoke('fetch-models', providerConfig),
+
     // Sync provider config to main process (for automation/workflows)
     syncProviderConfig: (config) =>
         ipcRenderer.invoke('sync-provider-config', config),
@@ -482,6 +486,30 @@ contextBridge.exposeInMainWorld('onicode', {
 
     // Chat activity (for workflow result pipeline)
     chatActivityChange: (isActive) => ipcRenderer.invoke('chat-activity-change', isActive),
+
+    // Plan Mode
+    planModeEnter: (conversationId) => ipcRenderer.invoke('plan-mode-enter', conversationId),
+    planModeExit: (planId) => ipcRenderer.invoke('plan-mode-exit', planId),
+    planModeGet: () => ipcRenderer.invoke('plan-mode-get'),
+    planModeUpdate: (planId, content) => ipcRenderer.invoke('plan-mode-update', planId, content),
+    onPlanModeChange: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('plan-mode-changed', handler);
+        return () => ipcRenderer.removeListener('plan-mode-changed', handler);
+    },
+
+    // Worktree Management
+    worktreeCreate: (name) => ipcRenderer.invoke('worktree-create', name),
+    worktreeRemove: (path, force) => ipcRenderer.invoke('worktree-remove', path, force),
+    worktreeList: () => ipcRenderer.invoke('worktree-list'),
+    worktreeGetCurrent: () => ipcRenderer.invoke('worktree-get-current'),
+
+    // System Tray events
+    onTrayNewChat: (callback) => {
+        const handler = () => callback();
+        ipcRenderer.on('tray-new-chat', handler);
+        return () => ipcRenderer.removeListener('tray-new-chat', handler);
+    },
 
     // Platform
     platform: process.platform,
