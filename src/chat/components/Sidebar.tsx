@@ -1,13 +1,52 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import { isElectron } from '../utils';
 
-type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo';
+type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
 
 interface SidebarProps {
     currentView: View;
     onViewChange: (view: View) => void;
+    unreadChatCount?: number;
 }
 
-export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
+export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0 }: SidebarProps) {
+    const [automationCount, setAutomationCount] = useState(0);
+
+    // Poll for workflow/schedule counts to show badge
+    useEffect(() => {
+        if (!isElectron || !window.onicode) return;
+
+        const refresh = async () => {
+            try {
+                let count = 0;
+                const [wfRes, schRes] = await Promise.allSettled([
+                    window.onicode!.workflowList?.() ?? { success: false },
+                    window.onicode!.schedulerList?.() ?? { success: false },
+                ]);
+                if (wfRes.status === 'fulfilled' && wfRes.value.success && wfRes.value.workflows) {
+                    count += wfRes.value.workflows.length;
+                }
+                if (schRes.status === 'fulfilled' && schRes.value.success && schRes.value.schedules) {
+                    count += schRes.value.schedules.filter((s: { enabled: boolean }) => s.enabled).length;
+                }
+                setAutomationCount(count);
+            } catch { /* ignore */ }
+        };
+
+        refresh();
+        // Refresh every 30s to stay up to date
+        const iv = setInterval(refresh, 30_000);
+
+        // Also listen for scheduler/workflow events
+        const unsubs: Array<(() => void) | undefined> = [];
+        unsubs.push(window.onicode!.onSchedulerStatus?.(() => refresh()));
+        unsubs.push(window.onicode!.onWorkflowRunCompleted?.(() => refresh()));
+
+        return () => {
+            clearInterval(iv);
+            unsubs.forEach(fn => fn?.());
+        };
+    }, []);
     return (
         <aside className="sidebar">
             <div className="sidebar-logo">
@@ -28,6 +67,7 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
                         <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
                     </svg>
                     Chat
+                    {unreadChatCount > 0 && <span className="sidebar-badge">{unreadChatCount > 99 ? '99+' : unreadChatCount}</span>}
                 </button>
 
                 <button
@@ -74,6 +114,19 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
                         <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
                     </svg>
                     Tasks
+                </button>
+
+                <button
+                    className={`sidebar-btn ${currentView === 'workflows' ? 'active' : ''}`}
+                    onClick={() => onViewChange('workflows')}
+                    title="Workflows & Schedules"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                        <circle cx="12" cy="12" r="4" />
+                    </svg>
+                    Workflows
+                    {automationCount > 0 && <span className="sidebar-badge">{automationCount}</span>}
                 </button>
             </nav>
 

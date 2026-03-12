@@ -49,6 +49,9 @@ src/
     connectors.js           # OAuth connectors (GitHub, Gmail)
     mcp.js                  # MCP client: stdio server management, JSON-RPC 2.0, tool discovery
     keystore.js             # AES-256-GCM encrypted key vault + OS Keychain
+    scheduler.js            # Cron-based task scheduler (cron parser, tick loop, concurrency manager)
+    workflows.js            # Multi-step workflow engine (7 step types, template vars, execution history)
+    heartbeat.js            # Periodic AI monitoring (checklist evaluation, quiet hours, notifications)
     logger.js               # Structured logging system
 
   chat/                    # Chat Shell (React 19, TypeScript)
@@ -68,6 +71,7 @@ src/
       AttachmentGallery.tsx   # File/attachment gallery across conversations
       QuestionDialog.tsx      # ask_user_question UI (clickable options)
       TodoApp.tsx             # Unified tasks view (SQLite-backed)
+      WorkflowsView.tsx       # Workflows, schedules, heartbeat management
       widgets/               # Extracted right panel widgets
         TerminalWidget.tsx    # Real shell terminal via IPC
         FileViewerWidget.tsx  # File tree browser
@@ -76,6 +80,7 @@ src/
         TasksWidget.tsx       # Task list with milestones
         GitWidget.tsx         # Full git UI
         AttachmentsWidget.tsx # Project attachment gallery
+        WorkflowWidget.tsx    # Workflow/scheduler/heartbeat status widget
     utils/
       index.ts                # Shared utilities (isElectron, generateId, stripAnsi)
     commands/
@@ -263,6 +268,10 @@ See `docs/ARCHITECTURE.md` for the full IPC channel reference table.
 - [x] **Deep GitHub integration** — PRs, publish, clone, auth push/pull, repo creation
 - [x] **Model picker** — Click model name in context bar to switch models inline
 - [x] **Thinking level** — /thinklevel command + Anthropic extended thinking support
+- [x] **Scheduler** — Cron-based task scheduler (inline cron parser, tick loop, concurrency, AI/workflow/command actions)
+- [x] **Workflow engine** — Multi-step workflows (7 step types, template vars, execution history, SQLite persistence)
+- [x] **Heartbeat** — Periodic AI monitoring (checklist evaluation, quiet hours, desktop notifications)
+- [x] **Automation UI** — WorkflowsView (3 tabs: Workflows, Schedules, Heartbeat), WorkflowWidget in right panel
 
 ## What's Missing
 

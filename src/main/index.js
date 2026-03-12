@@ -14,7 +14,7 @@ const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
-const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval } = require('./aiTools');
+const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval, SUB_AGENT_TOOL_SETS } = require('./aiTools');
 const { conversationStorage, milestoneStorage, attachmentStorage, closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
@@ -22,6 +22,9 @@ const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITI
 const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
 const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
 const { registerKeystoreIPC } = require('./keystore');
+const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg } = require('./scheduler');
+const { registerWorkflowIPC, executeWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
+const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow } = require('./heartbeat');
 
 let mainWindow = null;
 
@@ -34,6 +37,7 @@ const CORE_TOOL_NAMES = new Set([
     'read_file', 'edit_file', 'multi_edit', 'create_file', 'delete_file',
     'list_directory', 'search_files', 'glob_files', 'run_command', 'check_terminal',
     'task_add', 'task_update', 'task_list', 'init_project', 'detect_project',
+    'create_plan', 'update_plan', 'get_plan',
     'ask_user_question', 'read_url_content', 'view_content_chunk',
 ]);
 
@@ -50,9 +54,13 @@ const TOOL_SETS = {
     advanced: new Set(['spawn_sub_agent', 'orchestrate', 'spawn_specialist',
         'get_orchestration_status', 'sequential_thinking', 'find_by_name',
         'trajectory_search', 'index_project', 'verify_project']),
+    automation: new Set(['create_schedule', 'list_schedules', 'delete_schedule',
+        'create_workflow', 'run_workflow', 'list_workflows', 'delete_workflow',
+        'configure_heartbeat', 'set_timer']),
     notebook: new Set(['read_notebook', 'edit_notebook']),
     deploy: new Set(['read_deployment_config', 'deploy_web_app', 'check_deploy_status']),
-    memory: new Set(['memory_read', 'memory_write', 'memory_append', 'memory_search']),
+    memory: new Set(['memory_read', 'memory_write', 'memory_append', 'memory_search', 'memory_save_fact',
+        'conversation_search', 'conversation_recall']),
 };
 
 function getActiveToolSets() {
@@ -63,8 +71,8 @@ function getActiveToolSets() {
         const hasWebFiles = fs.existsSync(path.join(_currentProjectPath, 'package.json'));
         if (hasWebFiles) sets.push('browser', 'deploy');
     }
-    // Always include workspace, memory, notebook
-    sets.push('workspace', 'memory', 'notebook');
+    // Always include workspace, memory, notebook, automation
+    sets.push('workspace', 'memory', 'notebook', 'automation');
     // Include advanced for complex tasks (projects with many files)
     sets.push('advanced');
     return sets;
@@ -85,6 +93,9 @@ function getAllToolDefinitions(options = {}) {
         ...getCodeIndexToolDefinitions(),
         ...ORCHESTRATOR_TOOL_DEFINITIONS,
         ...getContextEngineToolDefinitions(),
+        ...getSchedulerToolDefinitions(),
+        ...getWorkflowToolDefinitions(),
+        ...getHeartbeatToolDefinitions(),
         ...mcpTools,
     ];
 
@@ -137,6 +148,18 @@ async function executeAnyTool(name, args) {
     // Context engine tools
     if (['find_implementation', 'impact_analysis', 'prepare_edit_context', 'smart_read', 'batch_search'].includes(name)) {
         return executeContextEngineTool(name, args, _currentProjectPath);
+    }
+    // Scheduler tools
+    if (['create_schedule', 'list_schedules', 'delete_schedule'].includes(name)) {
+        return executeSchedulerTool(name, args);
+    }
+    // Workflow tools
+    if (['create_workflow', 'run_workflow', 'list_workflows', 'delete_workflow', 'set_timer'].includes(name)) {
+        return executeWorkflowTool(name, args);
+    }
+    // Heartbeat tools
+    if (['configure_heartbeat'].includes(name)) {
+        return executeHeartbeatTool(name, args);
     }
     // Default: aiTools executor
     return executeTool(name, args);
@@ -225,6 +248,25 @@ ipcMain.handle('get-app-info', () => ({
     version: app.getVersion(),
     platform: process.platform,
 }));
+
+ipcMain.handle('get-environment', () => {
+    const os = require('os');
+    return {
+        platform: process.platform,
+        arch: process.arch,
+        osVersion: os.release(),
+        osType: os.type(),
+        hostname: os.hostname(),
+        username: os.userInfo().username,
+        homeDir: os.homedir(),
+        cpus: os.cpus().length,
+        totalMemoryGB: Math.round(os.totalmem() / (1024 ** 3)),
+        nodeVersion: process.version,
+        electronVersion: process.versions.electron,
+        shell: process.platform === 'win32' ? (process.env.COMSPEC || 'cmd.exe') : (process.env.SHELL || '/bin/zsh'),
+        cwd: process.cwd(),
+    };
+});
 
 ipcMain.handle('get-theme', async () => ({ theme: 'sand' }));
 ipcMain.handle('set-theme', async (_event, theme) => ({ success: true, theme }));
@@ -886,13 +928,40 @@ function buildContinueContext() {
         } catch { /* listing failed */ }
     }
 
-    // Task summary — show the AI what tasks exist and their status
+    // Active plan — inject so the AI references it while coding
+    try {
+        const { planStorage } = require('./storage');
+        const { getSessionId } = require('./aiTools');
+        const sid = typeof getSessionId === 'function' ? getSessionId() : null;
+        if (sid) {
+            const plan = planStorage.getActiveForSession(sid);
+            if (plan && plan.status !== 'archived') {
+                const planParts = [`Active Plan: "${plan.title}"`];
+                if (plan.overview) planParts.push(`Overview: ${plan.overview.slice(0, 300)}`);
+                if (plan.architecture) planParts.push(`Architecture: ${plan.architecture.slice(0, 500)}`);
+                const comps = plan.components || [];
+                if (comps.length > 0) planParts.push(`Components: ${comps.map(c => c.name).join(', ')}`);
+                const fm = plan.fileMap || [];
+                if (fm.length > 0) planParts.push(`File map: ${fm.map(f => f.path).join(', ')}`);
+                const dd = plan.designDecisions || [];
+                if (dd.length > 0) planParts.push(`Decisions: ${dd.slice(0, 5).join('; ')}`);
+                parts.push(planParts.join('\n'));
+            }
+        }
+    } catch { /* plan loading failed — non-fatal */ }
+
+    // Task summary — only show REMAINING tasks (pending/in_progress) to prevent "Task N done" repetition
     const taskSummary = taskManager.getSummary();
     if (taskSummary.total > 0) {
-        const taskLines = taskSummary.tasks.map(t =>
+        const remaining = taskSummary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+        const taskLines = remaining.map(t =>
             `  [${t.status.toUpperCase()}] #${t.id}: ${t.content}`
         );
-        parts.push(`Task list (${taskSummary.done}/${taskSummary.total} done):\n${taskLines.join('\n')}`);
+        if (remaining.length > 0) {
+            parts.push(`Progress: ${taskSummary.done}/${taskSummary.total} tasks done. REMAINING work:\n${taskLines.join('\n')}\n\nDo NOT re-announce tasks you already completed. Focus on the remaining tasks above.`);
+        } else {
+            parts.push(`All ${taskSummary.total} tasks are done. Wrap up: commit, verify, and give the user a summary.`);
+        }
     }
 
     // Background processes
@@ -900,6 +969,9 @@ function buildContinueContext() {
     if (bgProcs.length > 0) {
         parts.push(`Background processes running: ${bgProcs.map(p => `${p.command} (pid: ${p.pid}${p.port ? ', port: ' + p.port : ''})`).join(', ')}`);
     }
+
+    // Memory reminder — nudge the AI to save anything it learned
+    parts.push(`MEMORY REMINDER: If the user told you any preferences, personal info, or tech decisions in this conversation, save them NOW with memory_append("user.md", ...) or memory_append("MEMORY.md", ...). Don't wait.`);
 
     const result = parts.join('\n\n');
     _continueContextCache = { result, timestamp: Date.now() };
@@ -1030,6 +1102,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const provConfig = { id: 'codex', apiKey: accessToken, selectedModel: model };
     setLastProviderConfig(provConfig);
     _lastProviderConfig = provConfig;
+    setWorkflowProviderConfig(provConfig);
     setPermissions(activePermissions);
     setAgentModeRef(agentMode);
     setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks (BEFORE startSession)
@@ -1238,8 +1311,16 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                         continuePrompt = `The user chose recommended defaults — skip all questions. Call task_add to plan 4-6 tasks, then immediately call create_file to start building. Do NOT ask any questions. Start NOW.\n\n${projectContext}`;
                     } else if (!hasBuiltAnything) {
                         continuePrompt = `MANDATORY: You have ${summary.pending} pending${summary.inProgress > 0 ? ` + ${summary.inProgress} in-progress` : ''} tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
+                    } else if (roundsLeft <= 5 && (summary.pending > 0 || summary.inProgress > 0)) {
+                        // GRACEFUL WRAP-UP: very few rounds left, don't waste them
+                        const remaining = summary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+                        const doneCount = summary.done;
+                        const remainingNames = remaining.map(t => `"${t.content}"`).join(', ');
+                        continuePrompt = `⏱️ WRAP-UP MODE — only ${roundsLeft} rounds left.\n\nYou've completed ${doneCount}/${summary.total} tasks. Remaining: ${remainingNames}.\n\nYou have two options:\n1. If the remaining tasks are quick (1-2 tool calls each), finish them NOW.\n2. If they're complex, mark them "skipped", commit what you have, and give the user a summary of what's done and what's left. Offer to continue if they want.\n\nDo NOT start installing dependencies, spawning browser tests, or orchestrating agents. Just wrap up cleanly.`;
+                        logger.info('agent-loop', `Entering wrap-up mode: ${roundsLeft} rounds left, ${remaining.length} tasks remaining`);
                     } else {
-                        continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW — do NOT repeat any status updates you already gave.${nextTask ? `\nNext task: "${nextTask.content}" (${nextTask.status})` : ''}\n\n⏱️ ${roundsLeft} rounds left. Batch 3-5 file ops per round. Mark tasks done immediately.\n${roundsLeft < 15 ? '⚠️ LOW ROUNDS — finish remaining tasks NOW.\n' : ''}\n${projectContext}`;
+                        const remainingTasks = summary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+                        continuePrompt = `${taskStatusLine}. ${remainingTasks.length > 0 ? `Focus on remaining tasks — do NOT re-announce completed tasks.` : 'All tasks done — wrap up.'}${nextTask ? `\nNext: #${nextTask.id} "${nextTask.content}"` : ''}\n\n⏱️ ${roundsLeft} rounds left. Batch 3-5 file ops per round.\n${roundsLeft < 15 ? '⚠️ LOW ROUNDS — finish remaining tasks NOW. Skip non-critical verification.\n' : ''}\n${projectContext}`;
                     }
 
                     inputItems.push({ role: 'user', content: continuePrompt });
@@ -1421,9 +1502,22 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             }
         }
 
-        // Hit max rounds
+        // Hit max rounds — force wrap-up
+        const finalSummary = taskManager.getSummary();
+        if (finalSummary.pending > 0 || finalSummary.inProgress > 0) {
+            const remaining = finalSummary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+            const remainingNames = remaining.map(t => `"${t.content}"`).join(', ');
+            mainWindow?.webContents.send('ai-stream-chunk', `\n\n---\n**Session complete** — ${finalSummary.done}/${finalSummary.total} tasks done.\n${remaining.length > 0 ? `Remaining: ${remainingNames}\nSend another message to continue where I left off.` : ''}`);
+            // Auto-close in_progress tasks since we're stopping
+            for (const t of finalSummary.tasks) {
+                if (t.status === 'in_progress') {
+                    taskManager.updateTask(t.id, { status: 'done' });
+                }
+            }
+        }
         sendCompletionSummary(toolsUsed, _taskStartSnapshot);
         mainWindow?.webContents.send('ai-stream-done', null);
+        try { extractAndSaveMemory(conversationMessages, { accessToken, selectedModel }); } catch {}
         return { success: true };
 
     } catch (err) {
@@ -1431,6 +1525,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
         if (err.name === 'AbortError') {
             sendCompletionSummary(toolsUsed, _taskStartSnapshot);
             mainWindow?.webContents.send('ai-stream-done', null);
+            try { extractAndSaveMemory(conversationMessages, { accessToken, selectedModel }); } catch {}
             return { success: true };
         }
         console.error('[AI] ChatGPT backend request error:', err.message);
@@ -1442,6 +1537,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             sendCompletionSummary(toolsUsed, _taskStartSnapshot);
         }
         mainWindow?.webContents.send('ai-stream-done', err.message);
+        try { extractAndSaveMemory(conversationMessages, { accessToken, selectedModel }); } catch {}
         return { error: err.message };
     } finally {
         setAIStreamingActive(false); // Unlock: renderer can now safely reload tasks
@@ -1983,7 +2079,7 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
         model,
         instructions,
         input: inputItems,
-        stream: false, // Sub-agents don't stream to UI
+        stream: true, // ChatGPT backend requires streaming
         store: false,
     };
     if (tools && tools.length > 0) {
@@ -2019,27 +2115,72 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
             return { error: errorMsg };
         }
 
-        const json = await response.json();
-
-        // Parse non-streaming Responses API format
+        // Parse SSE stream and collect full response (sub-agents don't push chunks to UI)
         let textContent = '';
         const toolCalls = [];
+        const pendingToolCalls = new Map(); // id → { name, arguments }
 
-        const output = json.output || [];
-        for (const item of output) {
-            if (item.type === 'message' && item.content) {
-                for (const part of item.content) {
-                    if (part.type === 'output_text' && part.text) {
-                        textContent += part.text;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            // Process complete SSE lines
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+                try {
+                    const event = JSON.parse(line.slice(6));
+                    const type = event.type;
+
+                    if (type === 'response.output_text.delta' && event.delta) {
+                        textContent += event.delta;
+                    } else if (type === 'response.function_call_arguments.delta') {
+                        const id = event.item_id || event.call_id;
+                        if (id) {
+                            const tc = pendingToolCalls.get(id);
+                            if (tc) tc.arguments += (event.delta || '');
+                        }
+                    } else if (type === 'response.output_item.added' && event.item?.type === 'function_call') {
+                        const item = event.item;
+                        const id = item.id || item.call_id;
+                        pendingToolCalls.set(id, { id, call_id: item.call_id || id, name: item.name || '', arguments: '' });
+                    } else if (type === 'response.output_item.done' && event.item?.type === 'function_call') {
+                        const item = event.item;
+                        const id = item.id || item.call_id;
+                        const pending = pendingToolCalls.get(id);
+                        toolCalls.push({
+                            id: id,
+                            call_id: item.call_id || id,
+                            name: item.name || pending?.name || '',
+                            arguments: item.arguments || pending?.arguments || '{}',
+                        });
+                    } else if (type === 'response.completed' && event.response?.output) {
+                        // Final fallback: parse complete response output
+                        for (const item of event.response.output) {
+                            if (item.type === 'message' && item.content) {
+                                for (const part of item.content) {
+                                    if (part.type === 'output_text' && part.text && !textContent) {
+                                        textContent = part.text;
+                                    }
+                                }
+                            } else if (item.type === 'function_call' && !toolCalls.find(tc => tc.id === (item.id || item.call_id))) {
+                                toolCalls.push({
+                                    id: item.id || item.call_id,
+                                    call_id: item.call_id,
+                                    name: item.name,
+                                    arguments: item.arguments || '{}',
+                                });
+                            }
+                        }
                     }
-                }
-            } else if (item.type === 'function_call') {
-                toolCalls.push({
-                    id: item.id || item.call_id,
-                    call_id: item.call_id,
-                    name: item.name,
-                    arguments: item.arguments || '{}',
-                });
+                } catch { /* skip unparseable SSE lines */ }
             }
         }
 
@@ -2138,6 +2279,11 @@ setAICallFunction(makeSubAgentAICall);
 
 // Wire AI call function to compactor for semantic compaction
 setCompactorAICall(makeSubAgentAICall);
+
+// Wire AI call function to scheduler, workflows, heartbeat
+setSchedulerAICall(makeSubAgentAICall);
+setWorkflowAICall(makeSubAgentAICall);
+setHeartbeatAICall(makeSubAgentAICall);
 
 /**
  * Context compaction — summarize old messages when conversation gets too long.
@@ -2275,6 +2421,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
     // Wire provider config for sub-agent + orchestrator use
     setLastProviderConfig(providerConfig);
     _lastProviderConfig = providerConfig;
+    setWorkflowProviderConfig(providerConfig);
 
     // Start or continue agentic session (preserves tasks for same project)
     startSession(null, projectPath);
@@ -2554,9 +2701,16 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
                     continuePrompt = `The user chose recommended defaults — skip all questions. Call task_add to plan 4-6 tasks, then immediately call create_file to start building. Do NOT ask any questions. Start NOW.\n\n${projectContext}`;
                 } else if (!hasBuiltAnything) {
                     continuePrompt = `MANDATORY: You have ${summary.pending} pending${summary.inProgress > 0 ? ` + ${summary.inProgress} in-progress` : ''} tasks and have NOT created any files yet. You MUST call create_file or run_command NOW. Do not respond with text — make tool calls immediately. First task: "${nextTask?.content || 'unknown'}"\n\n⏱️ Budget: ${roundsLeft} rounds remaining. EFFICIENCY: Call create_file MULTIPLE TIMES in the same response. Batch 3-5 file creations per round.\n\n${projectContext}`;
-                } else {
-                    continuePrompt = `MANDATORY: ${taskStatusLine}. Continue with tool calls NOW — do NOT repeat any status updates you already gave.${nextTask ? `\nNext task: "${nextTask.content}" (${nextTask.status})` : ''}\n\n⏱️ ${roundsLeft} rounds left. Batch 3-5 file ops per round. Mark tasks done immediately.\n${roundsLeft < 15 ? '⚠️ LOW ROUNDS — finish remaining tasks NOW.\n' : ''}\n${projectContext}`;
-                }
+                    } else if (roundsLeft <= 5 && (summary.pending > 0 || summary.inProgress > 0)) {
+                        const remaining = summary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+                        const doneCount = summary.done;
+                        const remainingNames = remaining.map(t => `"${t.content}"`).join(', ');
+                        continuePrompt = `⏱️ WRAP-UP MODE — only ${roundsLeft} rounds left.\n\nYou've completed ${doneCount}/${summary.total} tasks. Remaining: ${remainingNames}.\n\nYou have two options:\n1. If the remaining tasks are quick (1-2 tool calls each), finish them NOW.\n2. If they're complex, mark them "skipped", commit what you have, and give the user a summary of what's done and what's left. Offer to continue if they want.\n\nDo NOT start installing dependencies, spawning browser tests, or orchestrating agents. Just wrap up cleanly.`;
+                        logger.info('agent-loop', `Entering wrap-up mode: ${roundsLeft} rounds left, ${remaining.length} tasks remaining`);
+                    } else {
+                        const remainingTasks = summary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+                        continuePrompt = `${taskStatusLine}. ${remainingTasks.length > 0 ? `Focus on remaining tasks — do NOT re-announce completed tasks.` : 'All tasks done — wrap up.'}${nextTask ? `\nNext: #${nextTask.id} "${nextTask.content}"` : ''}\n\n⏱️ ${roundsLeft} rounds left. Batch 3-5 file ops per round.\n${roundsLeft < 15 ? '⚠️ LOW ROUNDS — finish remaining tasks NOW. Skip non-critical verification.\n' : ''}\n${projectContext}`;
+                    }
 
                 conversationMessages.push({ role: 'user', content: continuePrompt });
 
@@ -2752,9 +2906,26 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
         // Loop back for next round — AI will see tool results and decide next action
     }
 
-    // Safety: max rounds reached
+    // Safety: max rounds reached — force wrap-up with status
+    const finalSummary = taskManager.getSummary();
+    if (finalSummary.total > 0) {
+        const remaining = finalSummary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
+        if (remaining.length > 0) {
+            const remainingNames = remaining.map(t => `"${t.content}"`).join(', ');
+            mainWindow?.webContents.send('ai-stream-chunk', `\n\n---\n**Session complete** — ${finalSummary.done}/${finalSummary.total} tasks done.\nRemaining: ${remainingNames}\nSend another message to continue where I left off.`);
+        } else {
+            mainWindow?.webContents.send('ai-stream-chunk', `\n\n---\n**All ${finalSummary.total} tasks complete.**`);
+        }
+        // Auto-close in_progress tasks since we're stopping
+        for (const t of finalSummary.tasks) {
+            if (t.status === 'in_progress') {
+                taskManager.updateTask(t.id, { status: 'done' });
+            }
+        }
+    } else {
+        mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum rounds. Send another message to continue.]*');
+    }
     sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-    mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum tool-calling rounds. Stopping.]*');
     mainWindow?.webContents.send('ai-stream-done', null);
     try { executeHook('Stop', { projectDir: projectPath || '' }); } catch {}
     try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
@@ -2789,6 +2960,15 @@ ipcMain.handle('ai-user-answer', (_event, { questionId, answer }) => {
 
 ipcMain.handle('ai-permission-response', (_event, { approvalId, approved }) => {
     resolvePermissionApproval(approvalId, approved);
+    return { success: true };
+});
+
+// ══════════════════════════════════════════
+//  IPC: Chat Activity (for workflow result pipeline)
+// ══════════════════════════════════════════
+
+ipcMain.handle('chat-activity-change', (_event, isActive) => {
+    setWorkflowChatActive(!!isActive);
     return { success: true };
 });
 
@@ -3000,84 +3180,169 @@ async function generateSessionTitle(userMessage, providerConfig) {
  * Runs in background — non-blocking. OpenClaw-style memory building.
  */
 function extractAndSaveMemory(messages, providerConfig) {
-    if (!providerConfig || messages.length < 4) return; // Need enough context
+    if (!providerConfig || messages.length < 2) return;
     try {
-        const { appendMemory, readMemory, appendProjectMemory, todayString } = require('./memory');
+        const { appendMemory, readMemory, appendProjectMemory, addFact, todayString } = require('./memory');
         const today = todayString();
 
-        // Extract key facts from the conversation
-        const userMsgs = messages.filter(m => m.role === 'user').map(m => m.content.slice(0, 300));
+        // Extract user messages (up to 500 chars each for better pattern matching)
+        const userMsgs = messages.filter(m => m.role === 'user').map(m => {
+            const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+            return content.slice(0, 500);
+        });
 
-        // Simple heuristic extraction (no AI call needed — fast and free)
+        // Fast heuristic extraction — no AI call needed
         const learnings = [];
         const projectLearnings = [];
+        const durableFacts = [];
 
-        // Detect user preferences
+        // ── User Preference Detection (comprehensive patterns) ──
+        const prefPatterns = [
+            /i\s+prefer\s+(.{5,80})/i,
+            /i\s+like\s+(?:to\s+)?(.{5,80})/i,
+            /i\s+hate\s+(.{5,80})/i,
+            /i\s+don'?t\s+like\s+(.{5,80})/i,
+            /always\s+use\s+(.{5,80})/i,
+            /never\s+use\s+(.{5,80})/i,
+            /don'?t\s+(?:ever\s+)?use\s+(.{5,80})/i,
+            /stop\s+(?:using|doing)\s+(.{5,80})/i,
+            /i\s+want\s+(?:you\s+to\s+)?(.{5,80})/i,
+            /please\s+(?:always|never)\s+(.{5,80})/i,
+            /(?:from\s+now\s+on|going\s+forward)\s*[,:]?\s*(.{5,80})/i,
+        ];
+
+        // ── Personal Info Detection ──
+        const personalPatterns = [
+            { re: /my\s+name\s+is\s+(\w+)/i, label: 'Name' },
+            { re: /(?:i'?m|i\s+am)\s+(\w+)\s+(?:and\s+)?i/i, label: 'Name' },
+            { re: /call\s+me\s+(\w+)/i, label: 'Name' },
+            { re: /i\s+(?:work|am)\s+(?:at|for)\s+(.{3,40})/i, label: 'Company' },
+            { re: /i'?m\s+(?:a|an)\s+((?:senior|junior|lead|staff|principal)?\s*\w+\s*(?:developer|engineer|designer|architect|manager))/i, label: 'Role' },
+            { re: /my\s+timezone\s+is\s+(.{3,20})/i, label: 'Timezone' },
+            { re: /i\s+(?:mostly|primarily)\s+(?:work\s+(?:with|in|on)|use)\s+(.{3,60})/i, label: 'Primary tech' },
+        ];
+
+        // ── Tech Decision Detection ──
+        const techPatterns = [
+            /(?:let'?s|we(?:'ll)?\s+(?:should)?)\s+use\s+(\w[\w.\-/]*(?:\s+\w+)?)/i,
+            /switch(?:ing)?\s+to\s+(\w[\w.\-/]*)/i,
+            /(?:go|going)\s+with\s+(\w[\w.\-/]*(?:\s+\w+)?)/i,
+            /use\s+(typescript|javascript|python|rust|go|java|react|vue|angular|next|svelte|tailwind|prisma|drizzle|supabase|firebase|postgres|mongodb|redis)/i,
+        ];
+
+        // ── Frustration / Correction Detection ──
+        const frustrationPatterns = [
+            /(?:this\s+is\s+(?:so\s+)?annoying|that'?s\s+annoying|stop\s+(?:doing|with)\s+)(.{5,80})/i,
+            /(?:no[,!]\s+)?(?:that'?s\s+wrong|not\s+like\s+that|i\s+said)\s*[,:]?\s*(.{5,80})/i,
+            /(?:why\s+do\s+you\s+keep|you\s+always)\s+(.{5,80})/i,
+        ];
+
         for (const msg of userMsgs) {
             const lower = msg.toLowerCase();
-            if (lower.includes('i prefer') || lower.includes('i like') || lower.includes('always use') || lower.includes('never use')) {
-                learnings.push(`User preference: ${msg.slice(0, 150)}`);
+
+            // Preference patterns
+            for (const re of prefPatterns) {
+                const m = msg.match(re);
+                if (m) {
+                    const fact = `Preference: ${m[0].slice(0, 120)}`;
+                    learnings.push(fact);
+                    durableFacts.push(fact);
+                    break; // One match per message for prefs
+                }
             }
-            if (lower.includes('my name is')) {
-                const match = msg.match(/my name is\s+(\w+)/i);
-                if (match) learnings.push(`User name: ${match[1]}`);
+
+            // Personal info
+            for (const { re, label } of personalPatterns) {
+                const m = msg.match(re);
+                if (m) {
+                    const fact = `${label}: ${m[1].trim()}`;
+                    learnings.push(fact);
+                    durableFacts.push(fact);
+                }
             }
-            if (lower.match(/use\s+(typescript|python|rust|go|java|react|vue|angular|next|svelte)/i)) {
-                const match = msg.match(/use\s+(typescript|python|rust|go|java|react|vue|angular|next|svelte)/i);
-                if (match) learnings.push(`Tech preference: ${match[1]}`);
+
+            // Tech decisions
+            for (const re of techPatterns) {
+                const m = msg.match(re);
+                if (m) {
+                    const fact = `Tech decision: ${m[0].slice(0, 100)}`;
+                    learnings.push(fact);
+                    durableFacts.push(fact);
+                    break;
+                }
+            }
+
+            // Frustrations / corrections
+            for (const re of frustrationPatterns) {
+                const m = msg.match(re);
+                if (m) {
+                    learnings.push(`User feedback: ${m[0].slice(0, 120)}`);
+                    durableFacts.push(`User feedback: ${m[0].slice(0, 120)}`);
+                    break;
+                }
             }
         }
 
-        // Detect project patterns from tool calls
+        // ── Detect project patterns from tool calls ──
         const toolSteps = messages.flatMap(m => m.toolSteps || []);
         const filesCreated = toolSteps.filter(s => s.name === 'create_file').map(s => s.args?.file_path).filter(Boolean);
         const filesEdited = toolSteps.filter(s => s.name === 'edit_file').map(s => s.args?.file_path).filter(Boolean);
         const projectsCreated = toolSteps.filter(s => s.name === 'init_project').map(s => s.args?.name).filter(Boolean);
         const commandsRun = toolSteps.filter(s => s.name === 'run_command').map(s => s.args?.command).filter(Boolean);
 
-        if (projectsCreated.length > 0) {
-            projectLearnings.push(`Created project(s): ${projectsCreated.join(', ')}`);
-        }
-        if (filesCreated.length > 0) {
-            projectLearnings.push(`Created ${filesCreated.length} files: ${filesCreated.slice(-5).join(', ')}`);
-        }
-        if (filesEdited.length > 0) {
-            projectLearnings.push(`Edited ${filesEdited.length} files: ${filesEdited.slice(-5).join(', ')}`);
-        }
-        if (commandsRun.length > 0) {
-            projectLearnings.push(`Ran ${commandsRun.length} commands`);
-        }
+        // Check if AI used memory tools (if not, we should compensate)
+        const aiUsedMemory = toolSteps.some(s =>
+            s.name === 'memory_write' || s.name === 'memory_append' || s.name === 'memory_search'
+        );
 
-        // Save to daily log
+        if (projectsCreated.length > 0) projectLearnings.push(`Created project(s): ${projectsCreated.join(', ')}`);
+        if (filesCreated.length > 0) projectLearnings.push(`Created ${filesCreated.length} files: ${filesCreated.slice(-5).join(', ')}`);
+        if (filesEdited.length > 0) projectLearnings.push(`Edited ${filesEdited.length} files: ${filesEdited.slice(-5).join(', ')}`);
+        if (commandsRun.length > 0) projectLearnings.push(`Ran ${commandsRun.length} commands`);
+
+        // ── Build conversation summary for daily log ──
+        const conversationSummary = userMsgs.slice(0, 3).map(m => m.slice(0, 100)).join(' | ');
+
+        // ── Save to daily log (always, if there's anything) ──
         const allLearnings = [...learnings, ...projectLearnings];
-        if (allLearnings.length > 0) {
-            const entry = `\n### Session ${new Date().toLocaleTimeString()}\n${allLearnings.map(l => `- ${l}`).join('\n')}\n`;
+        const logParts = [];
+        if (conversationSummary) logParts.push(`Topic: ${conversationSummary.slice(0, 200)}`);
+        logParts.push(...allLearnings);
+        if (logParts.length > 0) {
+            const entry = `\n### Session ${new Date().toLocaleTimeString()}\n${logParts.map(l => `- ${l}`).join('\n')}\n`;
             appendMemory(`${today}.md`, entry);
         }
 
-        // Build up MEMORY.md with durable facts (user preferences only)
-        const prefs = learnings.filter(l => l.startsWith('User ') || l.startsWith('Tech '));
-        if (prefs.length > 0) {
+        // ── Save durable facts to MEMORY.md (only if AI didn't already) ──
+        if (durableFacts.length > 0 && !aiUsedMemory) {
             const existing = readMemory('MEMORY.md') || '# Long-Term Memory\n';
-            const newPrefs = prefs.filter(p => !existing.includes(p));
-            if (newPrefs.length > 0) {
-                appendMemory('MEMORY.md', '\n' + newPrefs.map(p => `- ${p}`).join('\n'));
+            const newFacts = durableFacts.filter(f => !existing.toLowerCase().includes(f.toLowerCase().slice(0, 40)));
+            if (newFacts.length > 0) {
+                appendMemory('MEMORY.md', '\n' + newFacts.map(f => `- ${f}`).join('\n'));
+                logger.info('memory', `Auto-saved ${newFacts.length} facts to MEMORY.md (AI didn't use memory tools)`);
             }
         }
 
-        // Save project-specific learnings to project memory
+        // ── Save individual facts via addFact for FTS5 indexing ──
+        if (durableFacts.length > 0 && !aiUsedMemory) {
+            for (const fact of durableFacts.slice(0, 5)) { // Cap at 5 per session
+                addFact(fact);
+            }
+        }
+
+        // ── Save project-specific learnings ──
         const systemMsg = messages.find(m => m.role === 'system');
         if (systemMsg?.content && projectLearnings.length > 0) {
-            // Extract project ID from system prompt
             const projMatch = systemMsg.content.match(/## Active Project:.*?\nPath:\s*`([^`]+)`/);
             if (projMatch) {
-                // Use path hash as project ID for memory
                 const projPath = projMatch[1];
                 const projId = projPath.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
                 const entry = `\n### ${new Date().toLocaleTimeString()} — ${today}\n${projectLearnings.map(l => `- ${l}`).join('\n')}\n`;
-                try { appendProjectMemory(projId, entry); } catch { /* project memory not critical */ }
+                try { appendProjectMemory(projId, entry); } catch {}
             }
         }
+
+        logger.info('memory', `Auto-extraction: ${learnings.length} learnings, ${projectLearnings.length} project facts, AI used memory: ${aiUsedMemory}`);
     } catch (err) {
         console.log('[Memory] Auto-extraction error:', err.message);
     }
@@ -3117,10 +3382,17 @@ const DEFAULT_PERMISSIONS = {
     task_update: 'allow',
     task_list: 'allow',
     milestone_create: 'allow',
+    create_plan: 'allow',
+    update_plan: 'allow',
+    get_plan: 'allow',
     init_project: 'allow',
     memory_read: 'allow',
     memory_write: 'allow',
     memory_append: 'allow',
+    memory_search: 'allow',
+    memory_save_fact: 'allow',
+    conversation_search: 'allow',
+    conversation_recall: 'allow',
     get_context_summary: 'allow',
     spawn_sub_agent: 'allow',
     orchestrate: 'allow',
@@ -3267,6 +3539,9 @@ registerOrchestratorIPC(ipcMain);
 registerContextEngineIPC(ipcMain);
 registerMCPIPC(ipcMain, () => mainWindow);
 registerKeystoreIPC(ipcMain);
+registerSchedulerIPC(ipcMain, () => mainWindow);
+registerWorkflowIPC(ipcMain, () => mainWindow);
+registerHeartbeatIPC(ipcMain, () => mainWindow);
 
 // Task manager IPC — allows renderer to query current tasks
 ipcMain.handle('tasks-list', async () => {
@@ -3508,6 +3783,22 @@ app.whenReady().then(() => {
     // Auto-connect enabled MCP servers after window is ready
     connectAllMCP().catch(err => logger.warn('mcp', `Auto-connect failed: ${err?.message}`));
 
+    // Wire scheduler/workflow/heartbeat dependencies
+    setSchedulerWindow(mainWindow);
+    setWorkflowWindow(mainWindow);
+    setHeartbeatWindow(mainWindow);
+    setSchedulerWorkflowExecutor(executeWorkflow);
+    setSchedulerAutomationMsg(sendAutomationMessage);
+    setHeartbeatWorkflowExecutor(executeWorkflow);
+    setWorkflowToolExecutor(executeAnyTool);
+    setWorkflowToolSetResolver((name) => SUB_AGENT_TOOL_SETS[name] || SUB_AGENT_TOOL_SETS['read-only']);
+    setWorkflowToolDefsGetter(() => getAllToolDefinitions({ full: true }));
+
+    // Ensure heartbeat defaults and start automation
+    try { ensureHeartbeatDefaults(); } catch (err) { logger.error('main', `ensureHeartbeatDefaults failed: ${err.message}`); }
+    try { startSchedulerLoop(); } catch (err) { logger.error('main', `startSchedulerLoop failed: ${err.message}`); }
+    try { startHeartbeat(); } catch (err) { logger.error('main', `startHeartbeat failed: ${err.message}`); }
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -3521,6 +3812,8 @@ app.on('before-quit', () => {
     killAllSessions();
     killBackgroundProcesses();
     disconnectAllMCP();
+    stopSchedulerLoop();
+    stopHeartbeat();
     stopWatching();
     try { closeDB(); } catch { }
 });

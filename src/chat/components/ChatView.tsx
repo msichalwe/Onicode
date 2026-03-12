@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { marked } from 'marked';
 import { SLASH_COMMANDS } from '../commands/registry';
 import { executeCommand } from '../commands/executor';
-import { buildSystemPromptCached } from '../ai/systemPrompt';
+import { buildSystemPromptCached, type AIContext } from '../ai/systemPrompt';
 import QuestionDialog, { parseQuestions, isQuestionMessage } from './QuestionDialog';
 import type { ChatScope } from '../App';
 import type { ActiveProject } from './ProjectModeBar';
@@ -244,9 +244,10 @@ interface ChatViewProps {
     scope?: ChatScope;
     activeProject?: ActiveProject | null;
     onChangeScope?: (scope: ChatScope) => void;
+    onNewMessage?: () => void;
 }
 
-export default function ChatView({ scope = 'general', activeProject, onChangeScope }: ChatViewProps) {
+export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage }: ChatViewProps) {
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
     const [activeConvId, setActiveConvId] = useState<string | null>(() => {
@@ -458,6 +459,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
     }, [isTyping]);
 
+    // ── Signal chat activity to main process (for workflow result pipeline) ──
+    useEffect(() => {
+        if (isElectron && window.onicode?.chatActivityChange) {
+            window.onicode.chatActivityChange(isTyping);
+        }
+    }, [isTyping]);
+
     // ── Textarea auto-resize ──
     useEffect(() => {
         const textarea = textareaRef.current;
@@ -545,6 +553,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         });
         return removeListener;
     }, []);
+
+    // Listen for automation messages (timers, background workflows, scheduled tasks)
+    useEffect(() => {
+        if (!window.onicode?.onAutomationMessage) return;
+        const removeListener = window.onicode.onAutomationMessage((data) => {
+            setMessages(prev => [...prev, {
+                id: data.id || generateId(),
+                role: 'ai' as const,
+                content: `**${data.title || data.source || 'Automation'}:** ${data.content}`,
+                timestamp: data.timestamp || Date.now(),
+            }]);
+            onNewMessage?.();
+        });
+        return removeListener;
+    }, [onNewMessage]);
 
     const handleAnswerQuestion = React.useCallback((answer: string | string[]) => {
         if (!pendingQuestion || !window.onicode?.answerQuestion) return;
@@ -782,6 +805,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     timestamp: Date.now(),
                     toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
                 }]);
+                onNewMessage?.();
             } else if (finalContent.trim() || finalToolSteps.length > 0) {
                 setMessages((prev) => [...prev, {
                     id: generateId(), role: 'ai' as const,
@@ -789,6 +813,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     timestamp: Date.now(),
                     toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
                 }]);
+                onNewMessage?.();
             }
         });
 
@@ -1058,6 +1083,32 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             } catch { /* MCP not ready */ }
         }
 
+        // Load machine environment info (timezone, platform, OS, etc.)
+        let environment: Record<string, unknown> | undefined;
+        if (isElectron) {
+            try {
+                environment = await window.onicode!.getEnvironment();
+            } catch { /* environment info not available */ }
+        }
+
+        // Load recent conversation titles for context recall
+        let recentConversations: Array<{ title: string; date: string; project?: string }> | undefined;
+        if (isElectron) {
+            try {
+                const convRes = await window.onicode!.conversationList(10, 0);
+                if (convRes.success && convRes.conversations) {
+                    recentConversations = convRes.conversations
+                        .filter((c: { id: string; title: string }) => c.id !== activeConvId) // Exclude current
+                        .slice(0, 8)
+                        .map((c: { title: string; updated_at: number; project_name?: string }) => ({
+                            title: c.title || 'Untitled',
+                            date: c.updated_at ? new Date(c.updated_at).toISOString().slice(0, 10) : 'unknown',
+                            project: c.project_name || undefined,
+                        }));
+                }
+            } catch { /* conversation list failed */ }
+        }
+
         // Build context-aware system prompt
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
         const systemContent = buildSystemPromptCached({
@@ -1071,6 +1122,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             customCommandsSummary,
             autoCommitEnabled: localStorage.getItem('onicode-auto-commit') !== 'false',
             mcpTools,
+            recentConversations,
+            environment: environment as AIContext['environment'],
         });
 
         // Auto-compact if context is getting large
@@ -1544,7 +1597,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 spawn_sub_agent: 'Sub-agent', get_agent_status: 'Agent',
                 get_orchestration_status: 'Orchestration',
                 glob_files: 'Found', explore_codebase: 'Explored', memory_write: 'Memory',
-                memory_append: 'Memory', memory_search: 'Memory Search', webfetch: 'Fetched', websearch: 'Searched',
+                memory_append: 'Memory', memory_search: 'Memory Search', memory_save_fact: 'Remembered',
+                conversation_search: 'Recalled', conversation_recall: 'Loaded Context',
+                webfetch: 'Fetched', websearch: 'Searched',
                 get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
                 git_commit: 'Committed', git_push: 'Pushed', git_status: 'Git Status',
                 find_symbol: 'Def', find_references: 'Refs', list_symbols: 'Symbols',
@@ -1569,6 +1624,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 read_deployment_config: 'Deploy Config',
                 deploy_web_app: 'Deploying',
                 check_deploy_status: 'Deploy Status',
+                create_schedule: 'Scheduled', list_schedules: 'Schedules', delete_schedule: 'Unscheduled',
+                set_timer: 'Timer Set',
+                create_workflow: 'Workflow Created', run_workflow: 'Workflow Run', list_workflows: 'Workflows', delete_workflow: 'Workflow Deleted',
+                configure_heartbeat: 'Heartbeat',
             };
             return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         };
@@ -1614,6 +1673,14 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'task_list': {
                     if (r && typeof r === 'object' && 'total' in r) return `${r.done}/${r.total} done`;
                     return '';
+                }
+                case 'create_plan':
+                    return String(a.title || '').slice(0, 60);
+                case 'update_plan':
+                    return String(a.title || a.status || 'updated').slice(0, 40);
+                case 'get_plan': {
+                    if (r && typeof r === 'object' && 'plan' in r && r.plan) return String((r.plan as Record<string, unknown>).title || '');
+                    return 'No active plan';
                 }
                 case 'search_files': case 'websearch':
                     return `"${String(a.query || '').slice(0, 50)}"`;
@@ -1825,9 +1892,56 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 }
                 case 'memory_search': {
                     const q = String(a.query || '').slice(0, 40);
-                    const total = r?.totalMatches ?? '?';
-                    const files = r?.totalFiles ?? '?';
-                    return `"${q}" (${total} matches in ${files} files)`;
+                    const total = r?.totalResults ?? r?.totalMatches ?? '?';
+                    return `"${q}" (${total} results)`;
+                }
+                case 'memory_save_fact': {
+                    const factText = String(a.fact || '').slice(0, 60);
+                    const cat = String(a.category || 'general');
+                    return `[${cat}] ${factText}`;
+                }
+                case 'conversation_search': {
+                    const cq = String(a.query || '').slice(0, 40);
+                    const cTotal = r?.totalResults ?? '?';
+                    return `"${cq}" (${cTotal} conversations)`;
+                }
+                case 'conversation_recall': {
+                    const cConv = r?.conversation as Record<string, unknown> | undefined;
+                    const cTitle = String(cConv?.title || 'past conversation');
+                    return cTitle.slice(0, 60);
+                }
+                case 'create_schedule': {
+                    const sName = String(a.name || '');
+                    const sCron = String(a.cron || '');
+                    const sType = a.one_time ? 'one-time' : 'recurring';
+                    return `"${sName}" (${sCron}, ${sType})`;
+                }
+                case 'list_schedules': {
+                    const sCount = (r as Record<string, unknown>)?.schedules;
+                    return `${Array.isArray(sCount) ? sCount.length : '?'} schedule(s)`;
+                }
+                case 'create_workflow': {
+                    const wName = String(a.name || '');
+                    const wSteps = Array.isArray(a.steps) ? a.steps.length : '?';
+                    return `"${wName}" (${wSteps} steps)`;
+                }
+                case 'run_workflow': {
+                    const wStatus = String(r?.status || 'running');
+                    const wDur = r?.duration ? `${r.duration}ms` : '';
+                    return `${wStatus} ${wDur}`.trim();
+                }
+                case 'list_workflows': {
+                    const wCount = (r as Record<string, unknown>)?.workflows;
+                    return `${Array.isArray(wCount) ? wCount.length : '?'} workflow(s)`;
+                }
+                case 'set_timer': {
+                    const tMsg = String(a.message || '');
+                    const tSec = String(a.seconds || '');
+                    return `"${tMsg}" (${tSec}s)`;
+                }
+                case 'configure_heartbeat': {
+                    const hEnabled = (r as Record<string, unknown>)?.current_config as Record<string, unknown> | undefined;
+                    return hEnabled?.enabled ? 'Enabled' : 'Updated';
                 }
                 default:
                     return '';
@@ -1867,6 +1981,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 case 'gh_cli': return !!(r.output || r.data || r.error);
                 case 'gws_cli': return !!(r.output || r.data || r.error);
                 case 'memory_search': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
+                case 'conversation_search': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
+                case 'conversation_recall': return !!(r.context);
+                case 'create_plan': return true;
+                case 'get_plan': return !!(r.plan);
                 default: return false;
             }
         };
@@ -2454,23 +2572,102 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     );
                 }
                 case 'memory_search': {
-                    const results = r.results as Array<{ file: string; scope: string; matches: Array<{ line: number; snippet: string }>; totalMatches: number }>;
+                    const memResults = r.results as Array<{ file: string; category: string; snippet: string }>;
                     return (
                         <div className="tool-step-expanded">
                             <div className="tool-step-search-results">
-                                {results.slice(0, 5).map((res, i) => (
+                                {(memResults || []).slice(0, 8).map((res, i) => (
                                     <div key={i} style={{ marginBottom: 8 }}>
                                         <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 2 }}>
-                                            {res.file} ({res.totalMatches} matches)
+                                            {res.file} <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({res.category})</span>
                                         </div>
-                                        {res.matches.slice(0, 3).map((m, j) => (
-                                            <div key={j} className="search-result-line">
-                                                <span className="search-result-lineno">:{m.line}</span>
-                                                <span className="search-result-content">{m.snippet.slice(0, 120)}</span>
+                                        <div className="search-result-line">
+                                            <span className="search-result-content">{(res.snippet || '').slice(0, 200)}</span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'conversation_search': {
+                    const convResults = r.results as Array<{ id: string; title: string; project: string | null; date: string | null; snippet: string }>;
+                    return (
+                        <div className="tool-step-expanded">
+                            <div className="tool-step-search-results">
+                                {(convResults || []).slice(0, 5).map((res, i) => (
+                                    <div key={i} style={{ marginBottom: 8 }}>
+                                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 2 }}>
+                                            {res.title} {res.date && <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({res.date})</span>}
+                                            {res.project && <span style={{ fontSize: '0.65rem', opacity: 0.7 }}> • {res.project}</span>}
+                                        </div>
+                                        <div className="search-result-line">
+                                            <span className="search-result-content">{(res.snippet || '').slice(0, 200)}</span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                }
+                case 'conversation_recall': {
+                    const convContext = String(r.context || '');
+                    const convInfo = r.conversation as Record<string, unknown> | undefined;
+                    return (
+                        <div className="tool-step-expanded">
+                            {convInfo && (
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                                    {String(convInfo.title || '')} ({String(convInfo.messageCount || '?')} messages)
+                                    {convInfo.project ? <span> &bull; {String(convInfo.project)}</span> : null}
+                                </div>
+                            )}
+                            <pre className="tool-step-terminal" style={{ maxHeight: 200, overflow: 'auto', fontSize: '0.7rem' }}>
+                                {convContext.slice(0, 2000)}
+                            </pre>
+                        </div>
+                    );
+                }
+                case 'create_plan': case 'get_plan': {
+                    const rawPlan = step.name === 'create_plan'
+                        ? { title: a.title, overview: a.overview, architecture: a.architecture, components: a.components || [], fileMap: a.file_map || [], designDecisions: a.design_decisions || [] }
+                        : (r.plan as Record<string, unknown> | null);
+                    if (!rawPlan) return <div className="tool-step-expanded"><em>No active plan</em></div>;
+                    const planOverview = String(rawPlan.overview || '');
+                    const comps = (rawPlan.components as Array<{ name: string; purpose: string }>) || [];
+                    const files = ((rawPlan.fileMap || rawPlan.file_map) as Array<{ path: string; purpose: string }>) || [];
+                    const decisions = ((rawPlan.designDecisions || rawPlan.design_decisions) as string[]) || [];
+                    return (
+                        <div className="tool-step-expanded">
+                            <div style={{ padding: '8px 12px', fontSize: '0.78rem', lineHeight: 1.6 }}>
+                                {planOverview && <p style={{ color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>{planOverview.slice(0, 300)}</p>}
+                                {comps.length > 0 && (
+                                    <div style={{ marginBottom: 6 }}>
+                                        <strong style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>Components:</strong>
+                                        {comps.map((c, i) => (
+                                            <div key={i} style={{ paddingLeft: 8, fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                                <span style={{ color: 'var(--accent-primary)' }}>{c.name}</span> — {c.purpose}
                                             </div>
                                         ))}
                                     </div>
-                                ))}
+                                )}
+                                {files.length > 0 && (
+                                    <div style={{ marginBottom: 6 }}>
+                                        <strong style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>Files ({files.length}):</strong>
+                                        {files.slice(0, 10).map((f, i) => (
+                                            <div key={i} style={{ paddingLeft: 8, fontSize: '0.72rem', fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-secondary)' }}>
+                                                {f.path} — <span style={{ opacity: 0.7 }}>{f.purpose}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {decisions.length > 0 && (
+                                    <div>
+                                        <strong style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>Decisions:</strong>
+                                        {decisions.slice(0, 5).map((d, i) => (
+                                            <div key={i} style={{ paddingLeft: 8, fontSize: '0.72rem', color: 'var(--text-secondary)' }}>• {d}</div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     );
@@ -2483,7 +2680,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         // Group consecutive same-type tool calls into action groups
         // e.g., 5 create_file calls → "Created 5 files" with expandable list
         // But important unique actions always show individually
-        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status', 'gh_cli', 'gws_cli']);
+        const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status', 'gh_cli', 'gws_cli', 'create_plan', 'update_plan', 'get_plan']);
         // Group names for display
         const groupLabels: Record<string, { single: string; plural: string }> = {
             create_file: { single: 'Created', plural: 'Created' },
@@ -2495,6 +2692,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             task_add: { single: 'Task', plural: 'Tasks' },
             task_update: { single: 'Task', plural: 'Tasks' },
             task_list: { single: 'Tasks', plural: 'Tasks' },
+            create_plan: { single: 'Plan', plural: 'Plans' },
+            update_plan: { single: 'Plan Updated', plural: 'Plans Updated' },
+            get_plan: { single: 'Plan', plural: 'Plans' },
             delete_file: { single: 'Deleted', plural: 'Deleted' },
             list_directory: { single: 'Listed', plural: 'Listed' },
             find_references: { single: 'Refs', plural: 'Refs' },

@@ -735,13 +735,24 @@ async function orchestrate(plan, providerConfig) {
             duration: orchestration.completedAt - orchestration.startedAt,
         });
 
-        return {
+        const orchResult = {
             orchestration_id: orchestrationId,
             status: summary.failed > 0 ? 'partial' : 'done',
             summary,
             report,
             duration_ms: orchestration.completedAt - orchestration.startedAt,
         };
+
+        if (summary.failed > 0) {
+            const failedNodes = summary.nodes.filter(n => n.status === 'failed');
+            const failedDetails = failedNodes.map(n => {
+                const fullNode = graph.nodes.get(n.id);
+                return `- "${n.task}" (${n.role}): ${fullNode?.error || 'unknown error'}`;
+            }).join('\n');
+            orchResult.IMPORTANT = `Orchestration had ${summary.failed} FAILED agent(s):\n${failedDetails}\n\nYou must handle these failures — either do the work yourself, retry with a different approach, or explain to the user why it failed.`;
+        }
+
+        return orchResult;
 
     } catch (err) {
         orchestration.status = 'error';
@@ -1003,15 +1014,24 @@ async function executeOrchestratorTool(name, args, providerConfig) {
                 }
             }
 
-            return {
+            const specialistResult = {
                 agent_id: agentId,
                 task: args.task,
                 role,
                 status: result.error ? 'error' : 'done',
-                result: result.content || result.error,
                 tools_used: result.toolsUsed || [],
                 rounds: result.rounds || 0,
             };
+
+            if (result.error) {
+                specialistResult.error = result.error;
+                specialistResult.IMPORTANT = `Specialist "${role}" FAILED: ${result.error}. You must handle this — retry with different approach, do it yourself, or skip.`;
+            } else {
+                specialistResult.findings = result.content || '(no output)';
+                specialistResult.IMPORTANT = `Specialist "${role}" completed. READ the "findings" field — it contains the actual work output. Use it to inform your next steps.`;
+            }
+
+            return specialistResult;
         }
 
         case 'get_orchestration_status': {

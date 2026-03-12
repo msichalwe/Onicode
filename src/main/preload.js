@@ -379,6 +379,99 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('mcp-server-status', handler);
     },
 
+    // ── Scheduler ──
+    schedulerList: () => ipcRenderer.invoke('scheduler-list'),
+    schedulerGet: (id) => ipcRenderer.invoke('scheduler-get', id),
+    schedulerCreate: (opts) => ipcRenderer.invoke('scheduler-create', opts),
+    schedulerUpdate: (id, updates) => ipcRenderer.invoke('scheduler-update', id, updates),
+    schedulerDelete: (id) => ipcRenderer.invoke('scheduler-delete', id),
+    schedulerPause: (id) => ipcRenderer.invoke('scheduler-pause', id),
+    schedulerResume: (id) => ipcRenderer.invoke('scheduler-resume', id),
+    schedulerRunNow: (id) => ipcRenderer.invoke('scheduler-run-now', id),
+    onSchedulerTick: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('scheduler-tick', handler);
+        return () => ipcRenderer.removeListener('scheduler-tick', handler);
+    },
+    onSchedulerStatus: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('scheduler-status', handler);
+        return () => ipcRenderer.removeListener('scheduler-status', handler);
+    },
+
+    // ── Workflows ──
+    workflowList: () => ipcRenderer.invoke('workflow-list'),
+    workflowGet: (id) => ipcRenderer.invoke('workflow-get', id),
+    workflowCreate: (opts) => ipcRenderer.invoke('workflow-create', opts),
+    workflowUpdate: (id, updates) => ipcRenderer.invoke('workflow-update', id, updates),
+    workflowDelete: (id) => ipcRenderer.invoke('workflow-delete', id),
+    workflowRun: (id, params) => ipcRenderer.invoke('workflow-run', id, params),
+    workflowRuns: (workflowId, limit) => ipcRenderer.invoke('workflow-runs', workflowId, limit),
+    workflowRunDetail: (runId) => ipcRenderer.invoke('workflow-run-detail', runId),
+    workflowAllRuns: (limit) => ipcRenderer.invoke('workflow-all-runs', limit),
+    workflowQueueStatus: () => ipcRenderer.invoke('workflow-queue-status'),
+    onWorkflowQueueUpdated: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-queue-updated', handler);
+        return () => ipcRenderer.removeListener('workflow-queue-updated', handler);
+    },
+    onWorkflowRunQueued: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-run-queued', handler);
+        return () => ipcRenderer.removeListener('workflow-run-queued', handler);
+    },
+    onWorkflowRunStarted: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-run-started', handler);
+        return () => ipcRenderer.removeListener('workflow-run-started', handler);
+    },
+    onWorkflowRunCompleted: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-run-completed', handler);
+        return () => ipcRenderer.removeListener('workflow-run-completed', handler);
+    },
+    onWorkflowStepStarted: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-step-started', handler);
+        return () => ipcRenderer.removeListener('workflow-step-started', handler);
+    },
+    onWorkflowStepCompleted: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-step-completed', handler);
+        return () => ipcRenderer.removeListener('workflow-step-completed', handler);
+    },
+
+    // ── Automation Messages ──
+    onAutomationMessage: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('automation-message', handler);
+        return () => ipcRenderer.removeListener('automation-message', handler);
+    },
+
+    // ── Heartbeat ──
+    heartbeatConfig: () => ipcRenderer.invoke('heartbeat-config'),
+    heartbeatUpdate: (updates) => ipcRenderer.invoke('heartbeat-update', updates),
+    heartbeatAddCheck: (check) => ipcRenderer.invoke('heartbeat-add-check', check),
+    heartbeatRemoveCheck: (checkId) => ipcRenderer.invoke('heartbeat-remove-check', checkId),
+    heartbeatUpdateCheck: (checkId, updates) => ipcRenderer.invoke('heartbeat-update-check', checkId, updates),
+    heartbeatTrigger: () => ipcRenderer.invoke('heartbeat-trigger'),
+    onHeartbeatTick: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('heartbeat-tick', handler);
+        return () => ipcRenderer.removeListener('heartbeat-tick', handler);
+    },
+    onHeartbeatAction: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('heartbeat-action', handler);
+        return () => ipcRenderer.removeListener('heartbeat-action', handler);
+    },
+
+    // Chat activity (for workflow result pipeline)
+    chatActivityChange: (isActive) => ipcRenderer.invoke('chat-activity-change', isActive),
+
     // Platform
     platform: process.platform,
+
+    // Environment info
+    getEnvironment: () => ipcRenderer.invoke('get-environment'),
 });

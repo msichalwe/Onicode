@@ -42,15 +42,49 @@ import AttachmentGallery from './components/AttachmentGallery';
 import TasksView from './components/TodoApp';
 import MemoriesView from './components/MemoriesView';
 import OnboardingDialog from './components/OnboardingDialog';
+import WorkflowsView from './components/WorkflowsView';
 import RightPanel, { type PanelState, type WidgetType } from './components/RightPanel';
 import { type ActiveProject } from './components/ProjectModeBar';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 
 export type ChatScope = 'general' | 'project' | 'documents';
-export type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo';
+export type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
 
 import { isElectron } from './utils';
 
+// Error boundary to catch render crashes in secondary views
+class ViewErrorBoundary extends React.Component<
+    { children: React.ReactNode; onReset?: () => void },
+    { error: Error | null }
+> {
+    state: { error: Error | null } = { error: null };
+    static getDerivedStateFromError(error: Error) { return { error }; }
+    componentDidCatch(error: Error, info: React.ErrorInfo) {
+        console.error('[ViewErrorBoundary] Render error:', error, info.componentStack);
+    }
+    render() {
+        if (this.state.error) {
+            return (
+                <div style={{ padding: '32px', color: 'var(--text-primary)' }}>
+                    <h3 style={{ color: 'var(--error, #ef4444)', marginBottom: 12 }}>View crashed</h3>
+                    <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
+                        {this.state.error.message}
+                    </p>
+                    <pre style={{ fontSize: 11, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto' }}>
+                        {this.state.error.stack}
+                    </pre>
+                    <button
+                        style={{ marginTop: 16, padding: '8px 16px', cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}
+                        onClick={() => { this.setState({ error: null }); this.props.onReset?.(); }}
+                    >
+                        Retry
+                    </button>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
 
 interface FloatingFile {
     path: string;
@@ -80,9 +114,27 @@ function AppContent() {
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const [floatingFile, setFloatingFile] = useState<FloatingFile | null>(null);
     const [floatPos, setFloatPos] = useState<FloatingPosition>({ x: 100, y: 60, w: 700, h: 500, snapped: null });
+    const [unreadChatCount, setUnreadChatCount] = useState(0);
     const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; mode: 'move' | 'resize' } | null>(null);
     const codeRef = useRef<HTMLElement>(null);
+    const currentViewRef = useRef(currentView);
     const { theme } = useTheme();
+
+    // Keep ref in sync so callbacks see the latest view
+    useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+
+    // Reset unread count when switching to chat
+    const handleViewChange = useCallback((view: View) => {
+        setCurrentView(view);
+        if (view === 'chat') setUnreadChatCount(0);
+    }, []);
+
+    // Called by ChatView when a new AI/automation message arrives
+    const handleNewChatMessage = useCallback(() => {
+        if (currentViewRef.current !== 'chat') {
+            setUnreadChatCount(prev => prev + 1);
+        }
+    }, []);
 
     // Listen for file open requests (from side panel file viewer)
     useEffect(() => {
@@ -222,7 +274,7 @@ function AppContent() {
                 localStorage.setItem('onicode-active-project', JSON.stringify(detail));
                 localStorage.setItem('onicode-chat-scope', 'project');
                 // Switch to chat view when a project is activated
-                setCurrentView('chat');
+                handleViewChange('chat');
             }
         };
         window.addEventListener('onicode-project-activate', handler);
@@ -271,6 +323,8 @@ function AppContent() {
                 return <MemoriesView />;
             case 'todo':
                 return <TasksView />;
+            case 'workflows':
+                return <WorkflowsView />;
             default:
                 return null;
         }
@@ -298,7 +352,7 @@ function AppContent() {
         setChatScope('project');
         localStorage.setItem('onicode-active-project', JSON.stringify(project));
         localStorage.setItem('onicode-chat-scope', 'project');
-        setCurrentView('chat');
+        handleViewChange('chat');
         // Signal ChatView to start a new project-scoped chat
         window.dispatchEvent(new CustomEvent('onicode-new-chat'));
     }, []);
@@ -339,14 +393,14 @@ function AppContent() {
     }, [panel.widget]);
 
     const openHistory = useCallback(() => {
-        setCurrentView('chat');
+        handleViewChange('chat');
         window.dispatchEvent(new CustomEvent('onicode-show-history'));
-    }, []);
+    }, [handleViewChange]);
 
     const newChatFromHeader = useCallback(() => {
-        setCurrentView('chat');
+        handleViewChange('chat');
         window.dispatchEvent(new CustomEvent('onicode-new-chat'));
-    }, []);
+    }, [handleViewChange]);
 
     return (
         <div className="app" data-theme={theme}>
@@ -440,18 +494,28 @@ function AppContent() {
             )}
 
             <div className="app-body">
-                <Sidebar currentView={currentView} onViewChange={setCurrentView} />
+                <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} />
                 <div className={`main-content ${panel.widget ? 'with-panel' : ''}`}>
                     <div className={`view-layer ${currentView === 'chat' ? 'view-active' : 'view-hidden'}`}>
                         <ChatView
                             scope={chatScope}
                             activeProject={activeProject}
                             onChangeScope={changeChatScope}
+                            onNewMessage={handleNewChatMessage}
                         />
                     </div>
-                    {currentView !== 'chat' && (
+                    {/* Keep heavy views mounted to preserve state across tab switches */}
+                    <div className={`view-layer ${currentView === 'workflows' ? 'view-active' : 'view-hidden'}`}>
+                        <ViewErrorBoundary onReset={() => setCurrentView('chat')}>
+                            <WorkflowsView isVisible={currentView === 'workflows'} />
+                        </ViewErrorBoundary>
+                    </div>
+                    {/* Light views can remount — they reload quickly */}
+                    {currentView !== 'chat' && currentView !== 'workflows' && (
                         <div className="view-layer view-active">
-                            {renderSecondaryView()}
+                            <ViewErrorBoundary key={currentView} onReset={() => setCurrentView('chat')}>
+                                {renderSecondaryView()}
+                            </ViewErrorBoundary>
                         </div>
                     )}
                 </div>

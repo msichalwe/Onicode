@@ -219,6 +219,7 @@ function levenshtein(a, b, maxDist = Infinity) {
 let _currentSessionId = null;
 let _currentProjectId = null;
 let _currentProjectPath = null;
+let _activePlanId = null;
 let _aiStreamingActive = false; // Lock: true when AI is actively executing tool calls
 
 // ── Cascade-level state ──
@@ -1373,6 +1374,36 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    // ── Conversation Recall Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'conversation_search',
+            description: 'Search past conversations by content. Use when the user references previous work ("remember that thing we built", "yesterday we...", "that project from last week"). Returns matching conversations with snippets. FTS5-powered with ranking.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search keywords — what the user is referring to (e.g. "zombie game", "auth system", "portfolio site")' },
+                    limit: { type: 'number', description: 'Max results (default: 5)' },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'conversation_recall',
+            description: 'Load the full context of a past conversation by ID. Returns a summary with the last 20 user/AI messages. Use after conversation_search to get details about a specific past conversation the user is referencing.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    conversation_id: { type: 'string', description: 'The conversation ID from conversation_search results' },
+                },
+                required: ['conversation_id'],
+            },
+        },
+    },
     {
         type: 'function',
         function: {
@@ -1391,7 +1422,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'memory_write',
-            description: 'Write or update a memory file. Use this to save durable facts, user preferences, project decisions, or session notes to persistent memory.',
+            description: 'Write or overwrite a memory file. Use this to update user.md with structured profile data. For incremental additions, prefer memory_append. MANDATORY: call this when the user shares personal info or you need to update their profile.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1406,7 +1437,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'memory_append',
-            description: 'Append content to a memory file. Use for daily logs and incremental notes. Creates the file if it does not exist.',
+            description: 'Append content to a memory file. MANDATORY: call this when the user states a preference, makes a tech decision, or you learn something worth remembering. Append to "user.md" for preferences, "MEMORY.md" for durable facts, or "<YYYY-MM-DD>.md" for session logs.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1421,7 +1452,7 @@ const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'memory_search',
-            description: 'Search across all memory files for relevant context. Returns matching snippets from soul, user profile, long-term memory, daily logs, and project memories. Use this to recall past decisions, user preferences, or project patterns.',
+            description: 'Semantic search across all memories using FTS5 + TF-IDF similarity. Returns ranked results with snippets from soul, user profile, long-term memory, daily logs, and project memories. Use this PROACTIVELY to recall user preferences, past decisions, project patterns, or any relevant context before starting work.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1429,6 +1460,21 @@ const TOOL_DEFINITIONS = [
                     scope: { type: 'string', enum: ['all', 'global', 'project'], description: 'Search scope: all (default), global (soul/user/MEMORY/daily), or project memories only' },
                 },
                 required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_save_fact',
+            description: 'Quick-save a single learned fact to persistent memory. Use this whenever you learn something about the user, their preferences, a decision, or a pattern. Facts are individually indexed for fast semantic search. Much simpler than memory_append — just pass the fact string.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    fact: { type: 'string', description: 'The fact to remember (e.g. "User prefers dark mode", "Project uses Prisma with PostgreSQL", "User\'s name is Alex")' },
+                    category: { type: 'string', enum: ['preference', 'personal', 'technical', 'decision', 'correction', 'general'], description: 'Category for the fact (default: general)' },
+                },
+                required: ['fact'],
             },
         },
     },
@@ -1602,6 +1648,106 @@ const TOOL_DEFINITIONS = [
                     description: { type: 'string', description: 'What this milestone covers' },
                 },
                 required: ['title'],
+            },
+        },
+    },
+    // ── Plan Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'create_plan',
+            description: 'Create an architecture/design plan BEFORE writing any code. Plans define the system design, components, file structure, and key decisions. The AI references plans while coding to stay aligned. Always create a plan for any non-trivial project or feature.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Plan title (e.g. "Zombie Survival Game Architecture")' },
+                    overview: { type: 'string', description: 'High-level summary of what is being built and why (1-3 paragraphs)' },
+                    architecture: { type: 'string', description: 'Technical architecture: patterns, data flow, state management, APIs, rendering approach, etc. Use markdown.' },
+                    components: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                name: { type: 'string', description: 'Component/module name' },
+                                purpose: { type: 'string', description: 'What this component does' },
+                                dependencies: { type: 'array', items: { type: 'string' }, description: 'Other components it depends on' },
+                            },
+                        },
+                        description: 'List of components/modules in the system',
+                    },
+                    file_map: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                path: { type: 'string', description: 'File path relative to project root' },
+                                purpose: { type: 'string', description: 'What this file contains' },
+                            },
+                        },
+                        description: 'Planned file structure',
+                    },
+                    design_decisions: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Key design decisions and trade-offs (e.g. "Using Canvas2D over WebGL for simplicity")',
+                    },
+                },
+                required: ['title', 'overview'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'update_plan',
+            description: 'Update the active plan as scope evolves. Use this when the user changes requirements, you discover new needs, or architecture decisions change. Keep the plan as the living source of truth.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Updated title (optional)' },
+                    overview: { type: 'string', description: 'Updated overview (optional)' },
+                    architecture: { type: 'string', description: 'Updated architecture (optional)' },
+                    components: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                name: { type: 'string' },
+                                purpose: { type: 'string' },
+                                dependencies: { type: 'array', items: { type: 'string' } },
+                            },
+                        },
+                        description: 'Updated component list (replaces existing)',
+                    },
+                    file_map: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                path: { type: 'string' },
+                                purpose: { type: 'string' },
+                            },
+                        },
+                        description: 'Updated file map (replaces existing)',
+                    },
+                    design_decisions: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Updated design decisions (replaces existing)',
+                    },
+                    status: { type: 'string', description: '"active", "completed", "archived"' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'get_plan',
+            description: 'Retrieve the current active plan. Use this to refresh your understanding of the architecture before coding, after compaction, or when starting a new task. Returns the full plan with components, file map, and design decisions.',
+            parameters: {
+                type: 'object',
+                properties: {},
             },
         },
     },
@@ -3086,15 +3232,25 @@ async function executeTool(name, args) {
                 // Execute the sub-agent with constrained tool set
                 const result = await executeSubAgent(agentId, task, context_files, _lastProviderConfig, tool_set, constraints);
 
-                return {
+                const agentResult = {
                     agent_id: agentId,
                     task,
                     tool_set: tool_set || 'read-only',
                     status: result.error ? 'error' : 'done',
-                    result: result.content || result.error,
                     tools_used: result.toolsUsed || [],
                     rounds: result.rounds || 0,
                 };
+
+                // Surface the sub-agent's actual findings/output prominently
+                if (result.error) {
+                    agentResult.error = result.error;
+                    agentResult.IMPORTANT = `Sub-agent FAILED: ${result.error}. You must handle this — either retry with different approach, do it yourself, or skip if non-critical.`;
+                } else {
+                    agentResult.findings = result.content || '(no output)';
+                    agentResult.IMPORTANT = `Sub-agent completed. READ the "findings" field above — it contains the sub-agent's actual work output. Use these findings to inform your next steps. Do NOT ignore them.`;
+                }
+
+                return agentResult;
             }
 
             case 'get_agent_status': {
@@ -3519,6 +3675,57 @@ async function executeTool(name, args) {
                 };
             }
 
+            // ── Conversation Recall Executors ──
+
+            case 'conversation_search': {
+                const { conversationStorage } = require('./storage');
+                const query = (args.query || '').trim();
+                if (!query) return { error: 'query is required' };
+                const limit = args.limit || 5;
+                const results = conversationStorage.searchWithSnippets(query, limit);
+                if (!results || results.length === 0) {
+                    return {
+                        query,
+                        results: [],
+                        totalResults: 0,
+                        message: `No past conversations found matching "${query}". Try different keywords.`,
+                    };
+                }
+                return {
+                    query,
+                    results: results.map(r => ({
+                        id: r.id,
+                        title: r.title,
+                        project: r.project_name || null,
+                        date: r.updated_at ? new Date(r.updated_at).toISOString().slice(0, 10) : null,
+                        snippet: r.snippet,
+                    })),
+                    totalResults: results.length,
+                    IMPORTANT: `Found ${results.length} past conversation(s). If the user is referencing one of these, call conversation_recall(id) to load its full context before proceeding.`,
+                };
+            }
+
+            case 'conversation_recall': {
+                const { conversationStorage } = require('./storage');
+                const id = (args.conversation_id || '').trim();
+                if (!id) return { error: 'conversation_id is required' };
+                const summary = conversationStorage.getSummary(id);
+                if (!summary) {
+                    return { error: `Conversation "${id}" not found.` };
+                }
+                return {
+                    conversation: {
+                        id: summary.id,
+                        title: summary.title,
+                        project: summary.projectName || null,
+                        messageCount: summary.messageCount,
+                        date: summary.updatedAt ? new Date(summary.updatedAt).toISOString().slice(0, 10) : null,
+                    },
+                    context: summary.summary,
+                    IMPORTANT: `This is the past conversation the user is referencing. Use this context to understand what was built/discussed, then proceed with their current request.`,
+                };
+            }
+
             case 'memory_read': {
                 const { readMemory, listMemories, loadCoreMemories } = require('./memory');
                 if (args.filename) {
@@ -3565,8 +3772,31 @@ async function executeTool(name, args) {
                         category: r.category,
                         snippet: r.snippet,
                         updated_at: r.updated_at,
+                        score: r.score,
                     })),
                     totalResults: results.length,
+                    searchMethod: 'FTS5 + TF-IDF semantic',
+                };
+            }
+
+            case 'memory_save_fact': {
+                const { addFact, appendMemory } = require('./memory');
+                const fact = (args.fact || '').trim();
+                if (!fact) return { error: 'fact is required' };
+                const category = args.category || 'general';
+
+                // Save as individual indexed fact
+                const factKey = addFact(`[${category}] ${fact}`);
+
+                // Also append to MEMORY.md for durability
+                appendMemory('MEMORY.md', `\n- [${category}] ${fact}`);
+
+                sendToRenderer('memory-changed', { filename: 'MEMORY.md', action: 'append' });
+                return {
+                    success: true,
+                    factKey,
+                    category,
+                    message: `Saved: "${fact}" — indexed for semantic search.`,
                 };
             }
 
@@ -3733,6 +3963,93 @@ async function executeTool(name, args) {
                     milestoneStorage.save(milestone, _currentProjectId, _currentProjectPath);
                 } catch { /* storage not available */ }
                 return { success: true, milestone, message: `Created milestone "${args.title}" (id: ${msId}). Use this ID in task_add(milestone_id) to assign tasks.` };
+            }
+
+            // ── Plan Executors ──
+
+            case 'create_plan': {
+                const { planStorage } = require('./storage');
+                const planId = `plan_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
+                const plan = {
+                    id: planId,
+                    title: args.title,
+                    overview: args.overview || '',
+                    architecture: args.architecture || '',
+                    components: args.components || [],
+                    fileMap: args.file_map || [],
+                    designDecisions: args.design_decisions || [],
+                    status: 'active',
+                    createdAt: new Date().toISOString(),
+                };
+                planStorage.save(plan, getSessionId(), _currentProjectId, _currentProjectPath);
+                _activePlanId = planId;
+                sendToRenderer('ai-plan-updated', { planId, title: plan.title, status: 'active' });
+                return {
+                    success: true,
+                    planId,
+                    title: plan.title,
+                    componentCount: plan.components.length,
+                    fileCount: plan.fileMap.length,
+                    decisionCount: plan.designDecisions.length,
+                    message: `Plan "${plan.title}" created. Now create tasks based on this plan, then execute them.`,
+                };
+            }
+
+            case 'update_plan': {
+                const { planStorage: ps } = require('./storage');
+                const currentPlanId = _activePlanId || (() => {
+                    const active = ps.getActiveForSession(getSessionId());
+                    return active?.id || null;
+                })();
+                if (!currentPlanId) return { error: 'No active plan found. Use create_plan first.' };
+
+                const updates = {};
+                if (args.title !== undefined) updates.title = args.title;
+                if (args.overview !== undefined) updates.overview = args.overview;
+                if (args.architecture !== undefined) updates.architecture = args.architecture;
+                if (args.components !== undefined) updates.components = args.components;
+                if (args.file_map !== undefined) updates.fileMap = args.file_map;
+                if (args.design_decisions !== undefined) updates.designDecisions = args.design_decisions;
+                if (args.status !== undefined) updates.status = args.status;
+
+                const updated = ps.update(currentPlanId, updates);
+                if (!updated) return { error: `Plan ${currentPlanId} not found.` };
+
+                sendToRenderer('ai-plan-updated', { planId: currentPlanId, title: updated.title, status: updated.status });
+                return {
+                    success: true,
+                    planId: currentPlanId,
+                    title: updated.title,
+                    status: updated.status,
+                    message: `Plan updated.`,
+                };
+            }
+
+            case 'get_plan': {
+                const { planStorage: pg } = require('./storage');
+                const pid = _activePlanId || (() => {
+                    const active = pg.getActiveForSession(getSessionId());
+                    return active?.id || null;
+                })();
+                if (!pid) return { success: true, plan: null, message: 'No active plan. Use create_plan to create one.' };
+
+                const plan = pg.get(pid);
+                if (!plan) return { success: true, plan: null, message: 'Plan not found.' };
+
+                return {
+                    success: true,
+                    plan: {
+                        id: plan.id,
+                        title: plan.title,
+                        overview: plan.overview,
+                        architecture: plan.architecture,
+                        components: plan.components,
+                        fileMap: plan.fileMap,
+                        designDecisions: plan.designDecisions,
+                        status: plan.status,
+                        updatedAt: plan.updated_at,
+                    },
+                };
             }
 
             // ── Logging / Context Executors ──
@@ -5585,4 +5902,6 @@ module.exports = {
     resolveUserAnswer,
     resetThoughtChain,
     resolvePermissionApproval,
+    // Tool sets for workflow agentic steps
+    SUB_AGENT_TOOL_SETS,
 };

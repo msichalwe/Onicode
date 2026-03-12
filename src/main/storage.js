@@ -120,6 +120,116 @@ function initSchema() {
         CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments(project_id);
         CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
         CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id);
+
+        CREATE TABLE IF NOT EXISTS plans (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            overview TEXT DEFAULT '',
+            architecture TEXT DEFAULT '',
+            components TEXT DEFAULT '[]',
+            design_decisions TEXT DEFAULT '[]',
+            file_map TEXT DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'draft',
+            project_id TEXT,
+            project_path TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_plans_session ON plans(session_id);
+        CREATE INDEX IF NOT EXISTS idx_plans_project ON plans(project_path);
+
+        -- Workflow definitions
+        CREATE TABLE IF NOT EXISTS workflows (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            steps TEXT NOT NULL DEFAULT '[]',
+            trigger_config TEXT NOT NULL DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            project_id TEXT,
+            project_path TEXT,
+            tags TEXT DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        -- Scheduler entries (cron jobs)
+        CREATE TABLE IF NOT EXISTS schedules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            cron_expression TEXT NOT NULL,
+            workflow_id TEXT,
+            action TEXT NOT NULL DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            timezone TEXT DEFAULT 'local',
+            last_run_at INTEGER,
+            next_run_at INTEGER,
+            max_concurrent INTEGER DEFAULT 1,
+            rate_limit_seconds INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE SET NULL
+        );
+
+        -- Workflow execution history
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            schedule_id TEXT,
+            trigger_type TEXT NOT NULL,
+            trigger_data TEXT DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            current_step INTEGER DEFAULT 0,
+            steps_completed INTEGER DEFAULT 0,
+            steps_total INTEGER DEFAULT 0,
+            result TEXT DEFAULT '{}',
+            error TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
+            duration_ms INTEGER,
+            FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+            FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE SET NULL
+        );
+
+        -- Step-level execution logs
+        CREATE TABLE IF NOT EXISTS workflow_step_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            step_index INTEGER NOT NULL,
+            step_name TEXT NOT NULL,
+            step_type TEXT NOT NULL,
+            input TEXT DEFAULT '{}',
+            output TEXT DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            error TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
+            duration_ms INTEGER,
+            FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+        );
+
+        -- Heartbeat configuration
+        CREATE TABLE IF NOT EXISTS heartbeat_config (
+            id TEXT PRIMARY KEY DEFAULT 'default',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            interval_minutes INTEGER NOT NULL DEFAULT 30,
+            checklist TEXT NOT NULL DEFAULT '[]',
+            last_beat_at INTEGER,
+            next_beat_at INTEGER,
+            quiet_hours_start TEXT DEFAULT '22:00',
+            quiet_hours_end TEXT DEFAULT '08:00',
+            max_actions_per_beat INTEGER DEFAULT 3,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(next_run_at);
+        CREATE INDEX IF NOT EXISTS idx_schedules_workflow ON schedules(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_started ON workflow_runs(started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_step_runs_run ON workflow_step_runs(run_id);
     `);
 
     // FTS5 virtual table for memory search (created separately — can't be in IF NOT EXISTS block with other tables)
@@ -147,6 +257,38 @@ function initSchema() {
         // FTS5 triggers may already exist — that's fine
         if (!ftsErr.message.includes('already exists')) {
             logger.warn('storage', `FTS5 setup warning: ${ftsErr.message}`);
+        }
+    }
+
+    // FTS5 for conversation search (searches across titles and message content)
+    try {
+        db.exec(`
+            CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
+                title, messages_text,
+                content='conversations', content_rowid='rowid'
+            );
+        `);
+        // Add a helper column for plain text extraction from JSON messages
+        // We'll populate this on save via the conversationStorage.save method
+        try {
+            db.exec(`ALTER TABLE conversations ADD COLUMN messages_text TEXT DEFAULT ''`);
+        } catch { /* column may already exist */ }
+
+        db.exec(`
+            CREATE TRIGGER IF NOT EXISTS conversations_ai AFTER INSERT ON conversations BEGIN
+                INSERT INTO conversations_fts(rowid, title, messages_text) VALUES (new.rowid, new.title, new.messages_text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS conversations_ad AFTER DELETE ON conversations BEGIN
+                INSERT INTO conversations_fts(conversations_fts, rowid, title, messages_text) VALUES ('delete', old.rowid, old.title, old.messages_text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS conversations_au AFTER UPDATE ON conversations BEGIN
+                INSERT INTO conversations_fts(conversations_fts, rowid, title, messages_text) VALUES ('delete', old.rowid, old.title, old.messages_text);
+                INSERT INTO conversations_fts(rowid, title, messages_text) VALUES (new.rowid, new.title, new.messages_text);
+            END;
+        `);
+    } catch (ftsErr) {
+        if (!ftsErr.message.includes('already exists')) {
+            logger.warn('storage', `Conversations FTS5 setup warning: ${ftsErr.message}`);
         }
     }
 }
@@ -330,17 +472,129 @@ const milestoneStorage = {
 };
 
 // ══════════════════════════════════════════
+//  Plan Storage
+// ══════════════════════════════════════════
+
+const planStorage = {
+    save(plan, sessionId, projectId, projectPath) {
+        const d = getDB();
+        const now = new Date().toISOString();
+        d.prepare(`
+            INSERT OR REPLACE INTO plans (id, session_id, title, overview, architecture, components, design_decisions, file_map, status, project_id, project_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            plan.id, sessionId, plan.title, plan.overview || '', plan.architecture || '',
+            JSON.stringify(plan.components || []), JSON.stringify(plan.designDecisions || []),
+            JSON.stringify(plan.fileMap || []), plan.status || 'draft',
+            projectId || null, projectPath || null,
+            plan.createdAt || now, now,
+        );
+    },
+
+    update(id, updates) {
+        const d = getDB();
+        const fields = [];
+        const values = [];
+        if (updates.title !== undefined) { fields.push('title = ?'); values.push(updates.title); }
+        if (updates.overview !== undefined) { fields.push('overview = ?'); values.push(updates.overview); }
+        if (updates.architecture !== undefined) { fields.push('architecture = ?'); values.push(updates.architecture); }
+        if (updates.components !== undefined) { fields.push('components = ?'); values.push(JSON.stringify(updates.components)); }
+        if (updates.designDecisions !== undefined) { fields.push('design_decisions = ?'); values.push(JSON.stringify(updates.designDecisions)); }
+        if (updates.fileMap !== undefined) { fields.push('file_map = ?'); values.push(JSON.stringify(updates.fileMap)); }
+        if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
+        if (fields.length === 0) return null;
+        fields.push('updated_at = ?');
+        values.push(new Date().toISOString());
+        values.push(id);
+        d.prepare(`UPDATE plans SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+        return planStorage.get(id);
+    },
+
+    get(id) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM plans WHERE id = ?').get(id);
+        if (!row) return null;
+        return {
+            ...row,
+            components: JSON.parse(row.components || '[]'),
+            designDecisions: JSON.parse(row.design_decisions || '[]'),
+            fileMap: JSON.parse(row.file_map || '[]'),
+        };
+    },
+
+    getActiveForSession(sessionId) {
+        const d = getDB();
+        const row = d.prepare("SELECT * FROM plans WHERE session_id = ? AND status != 'archived' ORDER BY updated_at DESC LIMIT 1").get(sessionId);
+        if (!row) return null;
+        return {
+            ...row,
+            components: JSON.parse(row.components || '[]'),
+            designDecisions: JSON.parse(row.design_decisions || '[]'),
+            fileMap: JSON.parse(row.file_map || '[]'),
+        };
+    },
+
+    listForProject(projectPath) {
+        const d = getDB();
+        const rows = d.prepare('SELECT id, title, status, overview, created_at, updated_at FROM plans WHERE project_path = ? ORDER BY updated_at DESC').all(projectPath);
+        return rows;
+    },
+
+    delete(id) {
+        const d = getDB();
+        d.prepare('DELETE FROM plans WHERE id = ?').run(id);
+    },
+};
+
+// ══════════════════════════════════════════
 //  Conversation Storage
 // ══════════════════════════════════════════
+
+/**
+ * Extract plain text from a messages array for FTS5 indexing.
+ * Pulls out user and assistant text content, strips tool call noise.
+ */
+function extractConversationText(messages) {
+    if (!Array.isArray(messages)) return '';
+    return messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => {
+            const content = typeof m.content === 'string' ? m.content : '';
+            return content.slice(0, 500); // Cap per message to keep index lean
+        })
+        .filter(Boolean)
+        .join(' ')
+        .slice(0, 10000); // Max 10K per conversation
+}
+
+/**
+ * Extract a snippet from conversation text around the matching query terms.
+ */
+function extractConversationSnippet(text, query) {
+    if (!text || !query) return text?.slice(0, 200) || '';
+    const lower = text.toLowerCase();
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const term of terms) {
+        const idx = lower.indexOf(term);
+        if (idx >= 0) {
+            const start = Math.max(0, idx - 100);
+            const end = Math.min(text.length, idx + term.length + 100);
+            return (start > 0 ? '...' : '') + text.slice(start, end).trim() + (end < text.length ? '...' : '');
+        }
+    }
+    return text.slice(0, 200) + (text.length > 200 ? '...' : '');
+}
 
 const conversationStorage = {
     save(conv) {
         const d = getDB();
+        // Extract plain text from messages for FTS indexing
+        const messagesText = extractConversationText(conv.messages);
         const stmt = d.prepare(`
-            INSERT OR REPLACE INTO conversations (id, title, messages, scope, project_id, project_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO conversations (id, title, messages, messages_text, scope, project_id, project_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
-        stmt.run(conv.id, conv.title, JSON.stringify(conv.messages), conv.scope || 'general', conv.projectId || null, conv.projectName || null, conv.createdAt, conv.updatedAt);
+        stmt.run(conv.id, conv.title, JSON.stringify(conv.messages), messagesText, conv.scope || 'general', conv.projectId || null, conv.projectName || null, conv.createdAt, conv.updatedAt);
     },
 
     get(id) {
@@ -377,8 +631,65 @@ const conversationStorage = {
 
     search(query, limit = 20) {
         const d = getDB();
-        return d.prepare('SELECT id, title, scope, project_id, updated_at FROM conversations WHERE title LIKE ? OR messages LIKE ? ORDER BY updated_at DESC LIMIT ?')
-            .all(`%${query}%`, `%${query}%`, limit);
+        // Try FTS5 first for ranked results
+        try {
+            const ftsQuery = query.replace(/['"]/g, '').split(/\s+/).filter(Boolean).map(t => `"${t}"*`).join(' OR ');
+            if (ftsQuery) {
+                const rows = d.prepare(`
+                    SELECT c.id, c.title, c.scope, c.project_id, c.project_name, c.updated_at, rank
+                    FROM conversations_fts fts
+                    JOIN conversations c ON c.rowid = fts.rowid
+                    WHERE conversations_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                `).all(ftsQuery, limit);
+                if (rows.length > 0) return rows;
+            }
+        } catch { /* FTS not available, fall through */ }
+        // Fallback to LIKE
+        return d.prepare('SELECT id, title, scope, project_id, project_name, updated_at FROM conversations WHERE title LIKE ? OR messages_text LIKE ? OR messages LIKE ? ORDER BY updated_at DESC LIMIT ?')
+            .all(`%${query}%`, `%${query}%`, `%${query}%`, limit);
+    },
+
+    /** Full search returning conversation snippets (for AI tool use) */
+    searchWithSnippets(query, limit = 10) {
+        const d = getDB();
+        const results = this.search(query, limit);
+        return results.map(r => {
+            const full = d.prepare('SELECT messages_text, messages FROM conversations WHERE id = ?').get(r.id);
+            const text = full?.messages_text || '';
+            const snippet = extractConversationSnippet(text, query);
+            return { ...r, snippet };
+        });
+    },
+
+    /** Get conversation summary (user messages only, for context recall) */
+    getSummary(id) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM conversations WHERE id = ?').get(id);
+        if (!row) return null;
+        const messages = JSON.parse(row.messages);
+        // Extract user + assistant text messages (skip system, skip long tool results)
+        const summary = messages
+            .filter(m => m.role === 'user' || m.role === 'assistant')
+            .map(m => {
+                const content = typeof m.content === 'string' ? m.content : '';
+                const prefix = m.role === 'user' ? 'User' : 'AI';
+                return `${prefix}: ${content.slice(0, 300)}`;
+            })
+            .slice(-20) // Last 20 messages
+            .join('\n');
+        return {
+            id: row.id,
+            title: row.title,
+            scope: row.scope,
+            projectId: row.project_id,
+            projectName: row.project_name,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            messageCount: messages.length,
+            summary: summary.slice(0, 3000),
+        };
     },
 
     count() {
@@ -687,6 +998,188 @@ const memoryStorage = {
 // ══════════════════════════════════════════
 //  Close / Cleanup
 // ══════════════════════════════════════════
+//  Workflow Storage
+// ══════════════════════════════════════════
+
+const workflowStorage = {
+    save(wf) {
+        const d = getDB();
+        d.prepare(`INSERT OR REPLACE INTO workflows (id, name, description, steps, trigger_config, enabled, project_id, project_path, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            wf.id, wf.name, wf.description || '', JSON.stringify(wf.steps || []), JSON.stringify(wf.trigger_config || {}),
+            wf.enabled ? 1 : 0, wf.project_id || null, wf.project_path || null, JSON.stringify(wf.tags || []), wf.created_at || Date.now(), Date.now()
+        );
+    },
+    get(id) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+        if (!row) return null;
+        return { ...row, steps: JSON.parse(row.steps), trigger_config: JSON.parse(row.trigger_config), tags: JSON.parse(row.tags), enabled: !!row.enabled };
+    },
+    list(limit = 50) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM workflows ORDER BY updated_at DESC LIMIT ?').all(limit).map(r => ({
+            ...r, steps: JSON.parse(r.steps), trigger_config: JSON.parse(r.trigger_config), tags: JSON.parse(r.tags), enabled: !!r.enabled,
+        }));
+    },
+    update(id, updates) {
+        const d = getDB();
+        const fields = [];
+        const vals = [];
+        for (const [k, v] of Object.entries(updates)) {
+            if (['name', 'description', 'project_id', 'project_path'].includes(k)) { fields.push(`${k} = ?`); vals.push(v); }
+            else if (k === 'steps' || k === 'trigger_config' || k === 'tags') { fields.push(`${k} = ?`); vals.push(JSON.stringify(v)); }
+            else if (k === 'enabled') { fields.push('enabled = ?'); vals.push(v ? 1 : 0); }
+        }
+        if (fields.length === 0) return;
+        fields.push('updated_at = ?'); vals.push(Date.now());
+        vals.push(id);
+        d.prepare(`UPDATE workflows SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
+    },
+    delete(id) { getDB().prepare('DELETE FROM workflows WHERE id = ?').run(id); },
+};
+
+// ══════════════════════════════════════════
+//  Schedule Storage
+// ══════════════════════════════════════════
+
+const scheduleStorage = {
+    save(s) {
+        const d = getDB();
+        d.prepare(`INSERT OR REPLACE INTO schedules (id, name, cron_expression, workflow_id, action, enabled, timezone, last_run_at, next_run_at, max_concurrent, rate_limit_seconds, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            s.id, s.name, s.cron_expression, s.workflow_id || null, JSON.stringify(s.action || {}),
+            s.enabled ? 1 : 0, s.timezone || 'local', s.last_run_at || null, s.next_run_at || null,
+            s.max_concurrent || 1, s.rate_limit_seconds || 0, s.created_at || Date.now(), Date.now()
+        );
+    },
+    get(id) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
+        if (!row) return null;
+        return { ...row, action: JSON.parse(row.action), enabled: !!row.enabled };
+    },
+    list(limit = 100) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM schedules ORDER BY next_run_at ASC LIMIT ?').all(limit).map(r => ({
+            ...r, action: JSON.parse(r.action), enabled: !!r.enabled,
+        }));
+    },
+    update(id, updates) {
+        const d = getDB();
+        const fields = [];
+        const vals = [];
+        for (const [k, v] of Object.entries(updates)) {
+            if (['name', 'cron_expression', 'workflow_id', 'timezone'].includes(k)) { fields.push(`${k} = ?`); vals.push(v); }
+            else if (k === 'action') { fields.push('action = ?'); vals.push(JSON.stringify(v)); }
+            else if (k === 'enabled') { fields.push('enabled = ?'); vals.push(v ? 1 : 0); }
+            else if (['last_run_at', 'next_run_at', 'max_concurrent', 'rate_limit_seconds'].includes(k)) { fields.push(`${k} = ?`); vals.push(v); }
+        }
+        if (fields.length === 0) return;
+        fields.push('updated_at = ?'); vals.push(Date.now());
+        vals.push(id);
+        d.prepare(`UPDATE schedules SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
+    },
+    delete(id) { getDB().prepare('DELETE FROM schedules WHERE id = ?').run(id); },
+    getEnabled() {
+        const d = getDB();
+        return d.prepare('SELECT * FROM schedules WHERE enabled = 1 ORDER BY next_run_at ASC').all().map(r => ({
+            ...r, action: JSON.parse(r.action), enabled: true,
+        }));
+    },
+};
+
+// ══════════════════════════════════════════
+//  Workflow Run Storage
+// ══════════════════════════════════════════
+
+const workflowRunStorage = {
+    save(run) {
+        const d = getDB();
+        d.prepare(`INSERT OR REPLACE INTO workflow_runs (id, workflow_id, schedule_id, trigger_type, trigger_data, status, current_step, steps_completed, steps_total, result, error, started_at, completed_at, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            run.id, run.workflow_id || null, run.schedule_id || null, run.trigger_type, JSON.stringify(run.trigger_data || {}),
+            run.status, run.current_step || 0, run.steps_completed || 0, run.steps_total || 0,
+            JSON.stringify(run.result || {}), run.error || null, run.started_at || null, run.completed_at || null, run.duration_ms || null
+        );
+    },
+    get(id) {
+        const d = getDB();
+        const row = d.prepare('SELECT * FROM workflow_runs WHERE id = ?').get(id);
+        if (!row) return null;
+        return { ...row, trigger_data: JSON.parse(row.trigger_data || '{}'), result: JSON.parse(row.result || '{}') };
+    },
+    list(filters = {}) {
+        const d = getDB();
+        let sql = 'SELECT * FROM workflow_runs WHERE 1=1';
+        const params = [];
+        if (filters.workflow_id) { sql += ' AND workflow_id = ?'; params.push(filters.workflow_id); }
+        if (filters.status) { sql += ' AND status = ?'; params.push(filters.status); }
+        sql += ' ORDER BY started_at DESC LIMIT ?';
+        params.push(filters.limit || 50);
+        return d.prepare(sql).all(...params).map(r => ({ ...r, trigger_data: JSON.parse(r.trigger_data || '{}'), result: JSON.parse(r.result || '{}') }));
+    },
+    update(id, updates) {
+        const d = getDB();
+        const fields = []; const vals = [];
+        for (const [k, v] of Object.entries(updates)) {
+            if (['status', 'error', 'current_step', 'steps_completed', 'steps_total', 'started_at', 'completed_at', 'duration_ms'].includes(k)) {
+                fields.push(`${k} = ?`); vals.push(v);
+            } else if (k === 'result' || k === 'trigger_data') { fields.push(`${k} = ?`); vals.push(JSON.stringify(v)); }
+        }
+        if (fields.length === 0) return;
+        vals.push(id);
+        d.prepare(`UPDATE workflow_runs SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
+    },
+    saveStepRun(stepRun) {
+        const d = getDB();
+        d.prepare(`INSERT INTO workflow_step_runs (run_id, step_index, step_name, step_type, input, output, status, error, started_at, completed_at, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            stepRun.run_id, stepRun.step_index, stepRun.step_name, stepRun.step_type,
+            JSON.stringify(stepRun.input || {}), JSON.stringify(stepRun.output || {}),
+            stepRun.status, stepRun.error || null, stepRun.started_at || null, stepRun.completed_at || null, stepRun.duration_ms || null
+        );
+    },
+    getStepRuns(runId) {
+        const d = getDB();
+        return d.prepare('SELECT * FROM workflow_step_runs WHERE run_id = ? ORDER BY step_index ASC').all(runId).map(r => ({
+            ...r, input: JSON.parse(r.input || '{}'), output: JSON.parse(r.output || '{}'),
+        }));
+    },
+};
+
+// ══════════════════════════════════════════
+//  Heartbeat Storage
+// ══════════════════════════════════════════
+
+const heartbeatStorage = {
+    get() {
+        const d = getDB();
+        const row = d.prepare("SELECT * FROM heartbeat_config WHERE id = 'default'").get();
+        if (!row) return null;
+        return { ...row, checklist: JSON.parse(row.checklist || '[]'), enabled: !!row.enabled };
+    },
+    save(config) {
+        const d = getDB();
+        d.prepare(`INSERT OR REPLACE INTO heartbeat_config (id, enabled, interval_minutes, checklist, last_beat_at, next_beat_at, quiet_hours_start, quiet_hours_end, max_actions_per_beat, updated_at)
+            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            config.enabled ? 1 : 0, config.interval_minutes || 30, JSON.stringify(config.checklist || []),
+            config.last_beat_at || null, config.next_beat_at || null,
+            config.quiet_hours_start || '22:00', config.quiet_hours_end || '08:00',
+            config.max_actions_per_beat || 3, Date.now()
+        );
+    },
+    update(updates) {
+        const d = getDB();
+        const existing = this.get();
+        if (!existing) { this.save({ ...updates }); return; }
+        const merged = { ...existing, ...updates };
+        if (updates.checklist) merged.checklist = updates.checklist;
+        this.save(merged);
+    },
+};
+
+// ══════════════════════════════════════════
 
 function closeDB() {
     if (db && !db._fallback) {
@@ -700,8 +1193,13 @@ module.exports = {
     closeDB,
     taskStorage,
     milestoneStorage,
+    planStorage,
     conversationStorage,
     sessionStorage,
     attachmentStorage,
     memoryStorage,
+    workflowStorage,
+    scheduleStorage,
+    workflowRunStorage,
+    heartbeatStorage,
 };

@@ -411,7 +411,69 @@ interface OnicodeAPI {
     mcpGetToolsForPrompt: () => Promise<{ tools: MCPToolInfo[] }>;
     onMcpServerStatus: (callback: (data: { name: string; status: string; toolCount?: number; error?: string }) => void) => () => void;
 
+    // Scheduler
+    schedulerList: () => Promise<{ success: boolean; schedules?: ScheduleDef[]; error?: string }>;
+    schedulerGet: (id: string) => Promise<{ success: boolean; schedule?: ScheduleDef; error?: string }>;
+    schedulerCreate: (opts: { name: string; cron_expression: string; action: Record<string, unknown>; workflow_id?: string; max_concurrent?: number; rate_limit_seconds?: number }) => Promise<{ success: boolean; schedule?: ScheduleDef; error?: string }>;
+    schedulerUpdate: (id: string, updates: Partial<ScheduleDef>) => Promise<{ success: boolean; schedule?: ScheduleDef; error?: string }>;
+    schedulerDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+    schedulerPause: (id: string) => Promise<{ success: boolean; schedule?: ScheduleDef; error?: string }>;
+    schedulerResume: (id: string) => Promise<{ success: boolean; schedule?: ScheduleDef; error?: string }>;
+    schedulerRunNow: (id: string) => Promise<{ success: boolean; output?: string; error?: string }>;
+    onSchedulerTick: (callback: (data: { timestamp: string; checked: number; fired: number }) => void) => () => void;
+    onSchedulerStatus: (callback: (data: { scheduleId: string; runId: string; status: string; output?: string; error?: string; timestamp: string; manual?: boolean }) => void) => () => void;
+
+    // Workflows
+    workflowList: () => Promise<{ success: boolean; workflows?: WorkflowDef[]; error?: string }>;
+    workflowGet: (id: string) => Promise<{ success: boolean; workflow?: WorkflowDef; error?: string }>;
+    workflowCreate: (opts: { name: string; description?: string; steps: WorkflowStep[]; tags?: string[] }) => Promise<{ success: boolean; workflow?: WorkflowDef; error?: string }>;
+    workflowUpdate: (id: string, updates: Partial<WorkflowDef>) => Promise<{ success: boolean; workflow?: WorkflowDef; error?: string }>;
+    workflowDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+    workflowRun: (id: string, params?: Record<string, unknown>) => Promise<{ success: boolean; runId?: string; status?: string; duration?: number; error?: string }>;
+    workflowRuns: (workflowId: string, limit?: number) => Promise<{ success: boolean; runs?: WorkflowRunSummary[]; error?: string }>;
+    workflowRunDetail: (runId: string) => Promise<{ success: boolean; run?: WorkflowRunDetail; error?: string }>;
+    workflowAllRuns: (limit?: number) => Promise<{ success: boolean; runs?: WorkflowRunSummary[]; error?: string }>;
+    workflowQueueStatus: () => Promise<{ success: boolean; running: number; queued: number; maxConcurrent: number; runningIds: string[]; queuedIds: string[] }>;
+    onWorkflowQueueUpdated: (callback: (data: { running: number; queued: number; maxConcurrent: number; runningIds: string[]; queuedIds: string[] }) => void) => () => void;
+    onWorkflowRunQueued: (callback: (data: { runId: string; workflowId: string; workflowName: string }) => void) => () => void;
+    onWorkflowRunStarted: (callback: (data: { runId: string; workflowId: string; workflowName: string }) => void) => () => void;
+    onWorkflowRunCompleted: (callback: (data: { runId: string; workflowId: string; workflowName: string; status: string; duration: number; error?: string }) => void) => () => void;
+    onWorkflowStepStarted: (callback: (data: { runId: string; stepIndex: number; stepName: string; stepType: string; total: number }) => void) => () => void;
+    onWorkflowStepCompleted: (callback: (data: { runId: string; stepIndex: number; stepName: string; success: boolean; duration: number; total: number }) => void) => () => void;
+
+    // Automation Messages
+    onAutomationMessage: (callback: (data: { id: string; content: string; source: string; title?: string; timestamp: number }) => void) => () => void;
+
+    // Heartbeat
+    heartbeatConfig: () => Promise<{ success: boolean; config?: HeartbeatConfig; error?: string }>;
+    heartbeatUpdate: (updates: Partial<HeartbeatConfig>) => Promise<{ success: boolean; config?: HeartbeatConfig; error?: string }>;
+    heartbeatAddCheck: (check: Partial<HeartbeatCheck>) => Promise<{ success: boolean; check?: HeartbeatCheck; error?: string }>;
+    heartbeatRemoveCheck: (checkId: string) => Promise<{ success: boolean; removed?: string; error?: string }>;
+    heartbeatUpdateCheck: (checkId: string, updates: Partial<HeartbeatCheck>) => Promise<{ success: boolean; check?: HeartbeatCheck; error?: string }>;
+    heartbeatTrigger: () => Promise<{ success: boolean; result?: { checks_run: number; actions_needed: number; errors: number; results: unknown[] }; error?: string }>;
+    onHeartbeatTick: (callback: (data: { timestamp: number; checks_run: number; actions_needed: number; errors: number }) => void) => () => void;
+    onHeartbeatAction: (callback: (data: { check_id: string; check_name: string; type: string; reason: string; urgency: string; timestamp: number }) => void) => () => void;
+
+    // Chat activity (for workflow result pipeline)
+    chatActivityChange: (isActive: boolean) => Promise<{ success: boolean }>;
+
     platform: string;
+
+    getEnvironment: () => Promise<{
+        platform: string;
+        arch: string;
+        osVersion: string;
+        osType: string;
+        hostname: string;
+        username: string;
+        homeDir: string;
+        cpus: number;
+        totalMemoryGB: number;
+        nodeVersion: string;
+        electronVersion: string;
+        shell: string;
+        cwd: string;
+    }>;
 }
 
 declare global {
@@ -613,6 +675,126 @@ declare global {
             error: string | null;
             rounds: number;
         }>;
+    }
+
+    interface WorkflowStep {
+        name?: string;
+        type: 'ai_prompt' | 'command' | 'tool_call' | 'condition' | 'notify' | 'wait' | 'webhook';
+        prompt?: string;
+        command?: string;
+        tool?: string;
+        args?: Record<string, unknown>;
+        condition?: string;
+        title?: string;
+        body?: string;
+        message?: string;
+        seconds?: number;
+        url?: string;
+        on_failure?: 'abort' | 'continue' | 'skip_rest';
+        timeout?: number;
+        cwd?: string;
+        skip_if_false?: boolean;
+        // Agentic step fields (Phase 3)
+        goal?: string;
+        tool_set?: 'read-only' | 'file-ops' | 'search' | 'git' | 'browser' | 'workspace';
+        tool_priority?: string[];
+        max_rounds?: number;
+        context?: {
+            files?: string[];
+            previous_steps?: boolean;
+            project_docs?: boolean;
+        };
+    }
+
+    interface WorkflowDef {
+        id: string;
+        name: string;
+        description: string;
+        steps: WorkflowStep[];
+        trigger_config: Record<string, unknown>;
+        enabled: boolean;
+        project_id: string | null;
+        project_path: string | null;
+        tags: string[];
+        created_at: number;
+        updated_at: number;
+    }
+
+    interface ScheduleDef {
+        id: string;
+        name: string;
+        cron_expression: string;
+        workflow_id: string | null;
+        action: Record<string, unknown>;
+        enabled: boolean;
+        timezone: string;
+        last_run_at: number | null;
+        next_run_at: number | null;
+        max_concurrent: number;
+        rate_limit_seconds: number;
+        created_at: number;
+        updated_at: number;
+    }
+
+    interface WorkflowRunSummary {
+        id: string;
+        workflow_id: string | null;
+        schedule_id: string | null;
+        trigger_type: string;
+        trigger_data: Record<string, unknown>;
+        status: 'pending' | 'running' | 'completed' | 'failed';
+        current_step: number;
+        steps_completed: number;
+        steps_total: number;
+        result: Record<string, unknown>;
+        error: string | null;
+        started_at: number | null;
+        completed_at: number | null;
+        duration_ms: number | null;
+    }
+
+    interface WorkflowRunDetail extends WorkflowRunSummary {
+        stepRuns: WorkflowStepRun[];
+    }
+
+    interface WorkflowStepRun {
+        id: number;
+        run_id: string;
+        step_index: number;
+        step_name: string;
+        step_type: string;
+        input: Record<string, unknown>;
+        output: Record<string, unknown>;
+        status: 'pending' | 'running' | 'completed' | 'failed';
+        error: string | null;
+        started_at: number | null;
+        completed_at: number | null;
+        duration_ms: number | null;
+    }
+
+    interface HeartbeatCheck {
+        id: string;
+        name: string;
+        type: 'ai_eval' | 'command_check' | 'workflow_trigger';
+        prompt?: string | null;
+        command?: string | null;
+        trigger_workflow_id?: string | null;
+        priority: number;
+        enabled: boolean;
+        last_checked_at: number | null;
+        created_at: number;
+    }
+
+    interface HeartbeatConfig {
+        id: string;
+        enabled: boolean;
+        interval_minutes: number;
+        checklist: HeartbeatCheck[];
+        quiet_hours_start: string;
+        quiet_hours_end: string;
+        max_actions_per_beat: number;
+        last_beat_at: number | null;
+        updated_at: number;
     }
 
     interface Window {

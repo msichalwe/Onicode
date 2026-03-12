@@ -208,13 +208,33 @@ function listProjectMemories() {
 }
 
 // ══════════════════════════════════════════
-//  Search (FTS5-backed)
+//  Search (FTS5 + TF-IDF semantic fallback)
 // ══════════════════════════════════════════
 
+/**
+ * Search memory using FTS5 first, then TF-IDF similarity for semantic matching.
+ * Returns combined results ranked by relevance.
+ */
 function searchMemory(query, scope) {
     const category = scope === 'global' ? null : scope === 'project' ? 'project' : null;
-    const results = getStorage().search(query, category, null, 20);
-    return results.map(r => ({
+
+    // Phase 1: FTS5 exact/prefix matching
+    const ftsResults = getStorage().search(query, category, null, 15);
+
+    // Phase 2: TF-IDF similarity search (catches semantic matches FTS5 misses)
+    const tfidfResults = tfidfSearch(query, category, 10);
+
+    // Merge and deduplicate (FTS results first, then TF-IDF additions)
+    const seen = new Set(ftsResults.map(r => r.id));
+    const merged = [...ftsResults];
+    for (const r of tfidfResults) {
+        if (!seen.has(r.id)) {
+            seen.add(r.id);
+            merged.push(r);
+        }
+    }
+
+    return merged.slice(0, 20).map(r => ({
         id: r.id,
         category: r.category,
         key: r.key,
@@ -222,7 +242,98 @@ function searchMemory(query, scope) {
         content: r.content,
         snippet: extractSnippet(r.content, query),
         updated_at: r.updated_at,
+        score: r._score || 0,
     }));
+}
+
+/**
+ * TF-IDF based similarity search across memory entries.
+ * Tokenizes query and all memories, computes cosine similarity.
+ * Lightweight — no external dependencies, runs in <50ms for typical memory sizes.
+ */
+function tfidfSearch(query, category, limit = 10) {
+    if (!query || !query.trim()) return [];
+
+    try {
+        const storage = getStorage();
+        // Get all memories (or filtered by category)
+        let rows;
+        if (category) {
+            rows = storage.list(category, null, 500);
+        } else {
+            rows = storage.list(null, null, 500);
+        }
+        if (!rows || rows.length === 0) return [];
+
+        // Tokenize
+        const queryTokens = tokenize(query);
+        if (queryTokens.length === 0) return [];
+
+        // Build document frequency map
+        const docFreq = {};
+        const docTokens = rows.map(row => {
+            const tokens = tokenize(row.content || '');
+            for (const t of new Set(tokens)) {
+                docFreq[t] = (docFreq[t] || 0) + 1;
+            }
+            return tokens;
+        });
+
+        const N = rows.length;
+
+        // Compute TF-IDF vectors and score each document against query
+        const scored = rows.map((row, i) => {
+            const tokens = docTokens[i];
+            if (tokens.length === 0) return { ...row, _score: 0 };
+
+            // Term frequency in document
+            const tf = {};
+            for (const t of tokens) tf[t] = (tf[t] || 0) + 1;
+
+            // Cosine similarity between query and document TF-IDF vectors
+            let dotProduct = 0;
+            let docMag = 0;
+            let queryMag = 0;
+
+            const queryTf = {};
+            for (const t of queryTokens) queryTf[t] = (queryTf[t] || 0) + 1;
+
+            const allTerms = new Set([...queryTokens, ...Object.keys(tf)]);
+            for (const term of allTerms) {
+                const idf = Math.log(1 + N / (1 + (docFreq[term] || 0)));
+                const qTfidf = (queryTf[term] || 0) * idf;
+                const dTfidf = (tf[term] || 0) / tokens.length * idf;
+                dotProduct += qTfidf * dTfidf;
+                queryMag += qTfidf * qTfidf;
+                docMag += dTfidf * dTfidf;
+            }
+
+            const magnitude = Math.sqrt(queryMag) * Math.sqrt(docMag);
+            const score = magnitude > 0 ? dotProduct / magnitude : 0;
+            return { ...row, _score: score };
+        });
+
+        // Return top results with meaningful scores
+        return scored
+            .filter(r => r._score > 0.05)
+            .sort((a, b) => b._score - a._score)
+            .slice(0, limit);
+    } catch (err) {
+        logger.warn('memory', `TF-IDF search error: ${err.message}`);
+        return [];
+    }
+}
+
+/** Tokenize text into lowercase words, removing stop words and short tokens. */
+const STOP_WORDS = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'and', 'but', 'or', 'nor', 'not', 'so', 'yet', 'both', 'either', 'neither', 'each', 'every', 'all', 'any', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'only', 'own', 'same', 'than', 'too', 'very', 'just', 'because', 'if', 'when', 'where', 'how', 'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those', 'it', 'its']);
+
+function tokenize(text) {
+    if (!text) return [];
+    return text
+        .toLowerCase()
+        .replace(/[^a-z0-9_\-]/g, ' ')
+        .split(/\s+/)
+        .filter(t => t.length > 2 && !STOP_WORDS.has(t));
 }
 
 function extractSnippet(content, query) {
