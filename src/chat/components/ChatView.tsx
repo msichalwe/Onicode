@@ -596,12 +596,61 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }).catch(() => {});
     }, [activeProject?.id, messages.length]); // Reload after each message send
 
-    // Collect all available mention items (project-scoped + session + pending)
+    // ── Mention data sources (projects, workflows, memories) ──
+    const [mentionProjects, setMentionProjects] = useState<Array<{ name: string; path: string }>>([]);
+    const [mentionWorkflows, setMentionWorkflows] = useState<Array<{ id: string; name: string; description?: string }>>([]);
+    const [mentionMemories, setMentionMemories] = useState<Array<{ filename: string }>>([]);
+
+    useEffect(() => {
+        if (!isElectron) return;
+        // Load projects
+        window.onicode?.listProjects?.().then((r: any) => {
+            if (r?.success && r.projects) setMentionProjects(r.projects.filter((p: any) => p?.name).map((p: any) => ({ name: String(p.name), path: String(p.path || '') })));
+        }).catch(() => {});
+        // Load workflows
+        window.onicode?.workflowList?.().then((r: any) => {
+            if (r?.success && r.workflows) setMentionWorkflows(r.workflows.filter((w: any) => w?.name).map((w: any) => ({ id: String(w.id), name: String(w.name), description: w.description ? String(w.description) : undefined })));
+        }).catch(() => {});
+        // Load memory files
+        window.onicode?.memoryList?.().then((r: any) => {
+            if (r?.success && r.files) setMentionMemories(r.files.map((f: any) => ({ filename: typeof f === 'string' ? f : (f.name || String(f)) })));
+        }).catch(() => {});
+    }, [messages.length]); // Refresh after interactions
+
+    // Collect all available mention items
+    type MentionItem = { type: 'attachment' | 'file' | 'project' | 'workflow' | 'memory'; label: string; detail: string; category: string; attachment?: Attachment; meta?: any };
     const mentionItems = React.useMemo(() => {
-        const items: Array<{ type: 'attachment' | 'file'; label: string; detail: string; attachment?: Attachment }> = [];
+        const items: MentionItem[] = [];
         const seen = new Set<string>();
 
-        // Project-scoped attachments from SQLite (primary source)
+        // ── Projects ──
+        for (const p of mentionProjects) {
+            const key = `project:${p.name}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                items.push({ type: 'project', label: p.name, detail: p.path, category: 'Projects', meta: p });
+            }
+        }
+
+        // ── Workflows ──
+        for (const w of mentionWorkflows) {
+            const key = `workflow:${w.name}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                items.push({ type: 'workflow', label: w.name, detail: w.description || 'workflow', category: 'Workflows', meta: w });
+            }
+        }
+
+        // ── Memory files ──
+        for (const m of mentionMemories) {
+            const key = `memory:${m.filename}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                items.push({ type: 'memory', label: m.filename, detail: 'memory', category: 'Memories', meta: m });
+            }
+        }
+
+        // ── Attachments (project-scoped from SQLite) ──
         for (const att of projectAttachments) {
             if (!seen.has(att.name)) {
                 seen.add(att.name);
@@ -609,12 +658,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     type: 'attachment',
                     label: att.name,
                     detail: att.type === 'link' ? (att.url || 'link') : `${att.type}${att.size ? ` · ${Math.round(att.size / 1024)}KB` : ''}`,
+                    category: 'Attachments',
                     attachment: att,
                 });
             }
         }
 
-        // Attachments from current conversation messages
+        // ── Attachments from conversation messages ──
         for (const m of messages) {
             if (m.attachments) {
                 for (const att of m.attachments) {
@@ -624,13 +674,15 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             type: 'attachment',
                             label: att.name,
                             detail: att.type === 'link' ? (att.url || 'link') : `${att.type}${att.size ? ` · ${Math.round(att.size / 1024)}KB` : ''}`,
+                            category: 'Attachments',
                             attachment: att,
                         });
                     }
                 }
             }
         }
-        // Current pending attachments
+
+        // ── Pending attachments ──
         for (const att of attachments) {
             if (!seen.has(att.name)) {
                 seen.add(att.name);
@@ -638,15 +690,17 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     type: 'attachment',
                     label: att.name,
                     detail: att.type === 'link' ? (att.url || 'link') : `${att.type}${att.size ? ` · ${Math.round(att.size / 1024)}KB` : ''}`,
+                    category: 'Attachments',
                     attachment: att,
                 });
             }
         }
+
         return items;
-    }, [messages, attachments, projectAttachments]);
+    }, [messages, attachments, projectAttachments, mentionProjects, mentionWorkflows, mentionMemories]);
 
     const filteredMentions = mentionItems.filter(item =>
-        item.label.toLowerCase().includes(mentionFilter)
+        typeof item.label === 'string' && item.label.toLowerCase().includes(mentionFilter)
     );
 
     // Scroll active mention item into view
@@ -1483,12 +1537,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             if (e.key === 'Tab' || (e.key === 'Enter' && filteredMentions[mentionIndex])) {
                 e.preventDefault();
                 const item = filteredMentions[mentionIndex];
-                // Replace @filter with @name
                 const atIndex = input.lastIndexOf('@');
-                const newInput = input.slice(0, atIndex) + '@' + item.label + ' ';
+                const prefix = item.type === 'project' ? '@project:' : item.type === 'workflow' ? '@workflow:' : item.type === 'memory' ? '@memory:' : '@';
+                const newInput = input.slice(0, atIndex) + prefix + item.label + ' ';
                 setInput(newInput);
                 // Re-attach the referenced attachment
-                if (item.attachment && !attachments.some(a => a.name === item.attachment!.name)) {
+                if (item.type === 'attachment' && item.attachment && !attachments.some(a => a.name === item.attachment!.name)) {
                     setAttachments(prev => [...prev, item.attachment!]);
                 }
                 setShowMentionMenu(false);
@@ -3122,34 +3176,49 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 {/* @ mention menu */}
                 {showMentionMenu && filteredMentions.length > 0 && (
                     <div className="mention-menu" ref={mentionMenuRef}>
-                        <div className="mention-menu-header">Attachments</div>
-                        {filteredMentions.map((item, i) => (
-                            <div
-                                key={item.label}
-                                className={`mention-menu-item ${i === mentionIndex ? 'active' : ''}`}
-                                onClick={() => {
-                                    const atIndex = input.lastIndexOf('@');
-                                    setInput(input.slice(0, atIndex) + '@' + item.label + ' ');
-                                    if (item.attachment && !attachments.some(a => a.name === item.attachment!.name)) {
-                                        setAttachments(prev => [...prev, item.attachment!]);
-                                    }
-                                    setShowMentionMenu(false);
-                                    textareaRef.current?.focus();
-                                }}
-                            >
-                                <span className="mention-item-icon">
-                                    {item.type === 'attachment' && item.attachment?.type === 'link' ? (
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
-                                    ) : item.type === 'attachment' && item.attachment?.type === 'image' ? (
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
-                                    ) : (
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-                                    )}
-                                </span>
-                                <span className="mention-item-name">{item.label}</span>
-                                <span className="mention-item-detail">{item.detail}</span>
-                            </div>
-                        ))}
+                        {(() => {
+                            let lastCategory = '';
+                            return filteredMentions.map((item, i) => {
+                                const showHeader = item.category !== lastCategory;
+                                lastCategory = item.category;
+                                return (
+                                    <React.Fragment key={`${item.type}:${item.label}`}>
+                                        {showHeader && <div className="mention-menu-header">{item.category}</div>}
+                                        <div
+                                            className={`mention-menu-item ${i === mentionIndex ? 'active' : ''}`}
+                                            onClick={() => {
+                                                const atIndex = input.lastIndexOf('@');
+                                                const prefix = item.type === 'project' ? '@project:' : item.type === 'workflow' ? '@workflow:' : item.type === 'memory' ? '@memory:' : '@';
+                                                setInput(input.slice(0, atIndex) + prefix + item.label + ' ');
+                                                if (item.type === 'attachment' && item.attachment && !attachments.some(a => a.name === item.attachment!.name)) {
+                                                    setAttachments(prev => [...prev, item.attachment!]);
+                                                }
+                                                setShowMentionMenu(false);
+                                                textareaRef.current?.focus();
+                                            }}
+                                        >
+                                            <span className="mention-item-icon">
+                                                {item.type === 'project' ? (
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
+                                                ) : item.type === 'workflow' ? (
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 3 21 3 21 8" /><line x1="4" y1="20" x2="21" y2="3" /><polyline points="21 16 21 21 16 21" /><line x1="15" y1="15" x2="21" y2="21" /><line x1="4" y1="4" x2="9" y2="9" /></svg>
+                                                ) : item.type === 'memory' ? (
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a7 7 0 017 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 01-2 2h-4a2 2 0 01-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 017-7z" /><line x1="9" y1="21" x2="15" y2="21" /></svg>
+                                                ) : item.attachment?.type === 'link' ? (
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
+                                                ) : item.attachment?.type === 'image' ? (
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                                                ) : (
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                                )}
+                                            </span>
+                                            <span className="mention-item-name">{item.label}</span>
+                                            <span className="mention-item-detail">{item.detail}</span>
+                                        </div>
+                                    </React.Fragment>
+                                );
+                            });
+                        })()}
                     </div>
                 )}
 

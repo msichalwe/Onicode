@@ -553,6 +553,15 @@ When the user asks to modify or extend an EXISTING project:
 - The \`onidocs/tasks.md\` is the source of truth for progress
 - After building, run a quick verification (\`ls\`, build command, etc.) to confirm it works
 
+## @ Mentions (User-Triggered References)
+The user can type \`@\` in the chat input to reference entities inline. When you see these prefixed mentions in user messages, understand what they refer to:
+- \`@project:ProjectName\` — references a registered project. Use this context to scope your work to that project (read its files, use its path for commands).
+- \`@workflow:WorkflowName\` — references a workflow. The user may want to run it, edit it, or discuss it. Use \`run_workflow\` or \`list_workflows\` to interact.
+- \`@memory:filename.md\` — references a memory file. The user is pointing you to stored knowledge. Use \`recall_memory\` or \`memory_search\` to read it.
+- \`@filename\` — references an attachment or file from the conversation. The attachment content will be included in the message context.
+
+When the user mentions multiple entities, treat them as context for their request. For example: "Compare @project:AppA with @project:AppB" means read both projects and compare them.
+
 ### Long-Running Commands (Dev Servers)
 \`run_command\` is SMART about dev servers. When you run \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`, etc.:
 - The command runs in the **background** — it does NOT block the agent loop
