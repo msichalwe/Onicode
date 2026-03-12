@@ -1,19 +1,17 @@
 import React, { useState, useEffect } from 'react';
 
 import TerminalWidget from './widgets/TerminalWidget';
-import FileViewerWidget from './widgets/FileViewerWidget';
 import AgentsWidget from './widgets/AgentsWidget';
 import ProjectWidget from './widgets/ProjectWidget';
 import TasksWidget from './widgets/TasksWidget';
 import GitWidget from './widgets/GitWidget';
-import AttachmentsWidget from './widgets/AttachmentsWidget';
-import WorkflowWidget from './widgets/WorkflowWidget';
+import DocumentViewerWidget from './widgets/DocumentViewerWidget';
 
 // ══════════════════════════════════════════
 //  Widget Types (kernel layer)
 // ══════════════════════════════════════════
 
-export type WidgetType = 'terminal' | 'files' | 'agents' | 'project' | 'tasks' | 'git' | 'attachments' | 'workflows';
+export type WidgetType = 'terminal' | 'agents' | 'project' | 'tasks' | 'git' | 'viewer';
 
 export interface PanelState {
     widget: WidgetType | null;
@@ -29,12 +27,10 @@ interface WidgetDef {
 const WIDGETS: WidgetDef[] = [
     { id: 'terminal', label: 'Terminal', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg> },
     { id: 'project', label: 'Project', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" /></svg> },
-    { id: 'files', label: 'Files', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg> },
+    { id: 'viewer', label: 'Viewer', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg> },
     { id: 'agents', label: 'Agents', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg> },
     { id: 'tasks', label: 'Tasks', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg> },
     { id: 'git', label: 'Git', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg> },
-    { id: 'attachments', label: 'Attachments', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg> },
-    { id: 'workflows', label: 'Workflows', icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" /><circle cx="12" cy="12" r="4" /></svg> },
 ];
 
 // ══════════════════════════════════════════
@@ -71,12 +67,10 @@ export default function RightPanel({ panel, onClose, onChangeWidget }: RightPane
     const renderNonPersistentWidget = (type: WidgetType) => {
         switch (type) {
             case 'project': return <ProjectWidget />;
-            case 'files': return <FileViewerWidget data={panel.data} />;
+            case 'viewer': return <DocumentViewerWidget data={panel.data} />;
             case 'agents': return <AgentsWidget />;
             case 'tasks': return <TasksWidget />;
             case 'git': return <GitWidget />;
-            case 'attachments': return <AttachmentsWidget />;
-            case 'workflows': return <WorkflowWidget />;
             default: return null;
         }
     };

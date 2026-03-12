@@ -636,7 +636,7 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
         }
 
         case '/workflows':
-            window.dispatchEvent(new CustomEvent('onicode-panel', { detail: { type: 'workflows' } }));
+            window.dispatchEvent(new CustomEvent('onicode-navigate', { detail: 'workflows' }));
             return { handled: true };
 
         case '/gitpanel':

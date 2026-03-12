@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('ai-orchestration-done', handler);
     },
     readFileContent: (filePath) => ipcRenderer.invoke('read-file-content', filePath),
+    readFileBinary: (filePath) => ipcRenderer.invoke('read-file-binary', filePath),
     readScreenshotBase64: (filePath) => ipcRenderer.invoke('read-screenshot-base64', filePath),
 
     // Task management (extends existing tasksList + onTasksUpdated)
@@ -284,6 +285,7 @@ contextBridge.exposeInMainWorld('onicode', {
     agentGetMode: () => ipcRenderer.invoke('agent-get-mode'),
     setSetting: (key, value) => ipcRenderer.invoke('set-setting', key, value),
     getSetting: (key) => ipcRenderer.invoke('get-setting', key),
+    getAllSettings: () => ipcRenderer.invoke('get-all-settings'),
     onAgentMode: (callback) => {
         const handler = (_event, mode) => callback(mode);
         ipcRenderer.on('ai-agent-mode', handler);

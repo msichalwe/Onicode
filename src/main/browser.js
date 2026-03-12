@@ -57,6 +57,8 @@ async function launchBrowser(opts = {}) {
     try {
         browser = await pptr.launch({
             headless: opts.headless !== false ? 'new' : false,
+            timeout: 60000,
+            protocolTimeout: 120000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -137,9 +139,9 @@ async function navigate(url, opts = {}) {
     if (check.error) return check;
 
     try {
-        const timeout = opts.timeout || 30000;
+        const timeout = opts.timeout || 60000;
         const response = await activePage.goto(url, {
-            waitUntil: opts.waitUntil || 'networkidle2',
+            waitUntil: opts.waitUntil || 'load',
             timeout,
         });
 

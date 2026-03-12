@@ -7672,6 +7672,90 @@ body {
   margin-top: 6px;
 }
 
+/* ── Setting Select ── */
+.setting-select {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  min-width: 160px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.setting-select:focus {
+  border-color: var(--accent);
+}
+.setting-select option {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* ── Setting Input ── */
+.setting-input {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  min-width: 200px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.setting-input:focus {
+  border-color: var(--accent);
+}
+
+/* ── Setting Stepper (font size +/-) ── */
+.setting-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.setting-stepper-btn {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: none;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+.setting-stepper-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+.setting-stepper-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.setting-stepper-value {
+  padding: 0 12px;
+  font-size: 12px;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  color: var(--text-primary);
+  min-width: 44px;
+  text-align: center;
+  background: var(--bg-primary);
+  height: 28px;
+  line-height: 28px;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
 /* ══════════════════════════════════════════
    Question Dialog — AI Discovery Questions
    ══════════════════════════════════════════ */
@@ -8582,6 +8666,266 @@ body {
 
 .project-file-item:hover {
   background: var(--bg-hover);
+}
+
+.project-file-clickable {
+  cursor: pointer;
+}
+
+.project-file-clickable:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+/* ── Document Viewer Widget ── */
+
+.docviewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.docviewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-height: 36px;
+  gap: 8px;
+}
+
+.docviewer-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.docviewer-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.docviewer-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.docviewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.docviewer-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.docviewer-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.docviewer-save {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.docviewer-save:hover {
+  opacity: 0.9;
+}
+
+.docviewer-body {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+.docviewer-code {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: "JetBrains Mono", monospace;
+  white-space: pre;
+  overflow-x: auto;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.docviewer-code code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.docviewer-textarea {
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: "JetBrains Mono", monospace;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: none;
+  outline: none;
+  resize: none;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.docviewer-textarea::selection {
+  background: var(--accent);
+  color: #fff;
+}
+
+.docviewer-markdown {
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+
+.docviewer-markdown h1, .docviewer-markdown h2, .docviewer-markdown h3 {
+  margin: 16px 0 8px 0;
+  color: var(--text-primary);
+}
+
+.docviewer-markdown p {
+  margin: 8px 0;
+}
+
+.docviewer-markdown code {
+  background: var(--bg-secondary);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.docviewer-markdown pre {
+  background: var(--bg-secondary);
+  padding: 12px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.docviewer-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.docviewer-markdown a {
+  color: var(--accent);
+}
+
+.docviewer-markdown img {
+  max-width: 100%;
+  border-radius: var(--radius);
+}
+
+.docviewer-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  height: 100%;
+}
+
+.docviewer-image img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+}
+
+.docviewer-image svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.docviewer-pdf {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.docviewer-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-secondary);
+}
+
+.docviewer-binary p {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.docviewer-binary-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.docviewer-open-btn {
+  margin-top: 8px;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.docviewer-open-btn:hover {
+  opacity: 0.9;
+}
+
+.docviewer-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.docviewer-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--error, #ef4444);
+  font-size: 13px;
 }
 
 /* ── Task Display in Project Widget ── */

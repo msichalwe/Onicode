@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { isElectron } from '../../utils';
+import { isElectron, requestPanel } from '../../utils';
 
 function ProjectWidget() {
     const [project, setProject] = useState<{
@@ -120,7 +120,15 @@ function ProjectWidget() {
                     {showFiles && (
                         <div className="project-widget-files">
                             {fileTree.map((item) => (
-                                <div key={item.path} className={`project-file-item ${item.type}`}>
+                                <div
+                                    key={item.path}
+                                    className={`project-file-item ${item.type}${item.type === 'file' ? ' project-file-clickable' : ''}`}
+                                    onClick={() => {
+                                        if (item.type === 'file') {
+                                            requestPanel('viewer', { path: item.path, name: item.name });
+                                        }
+                                    }}
+                                >
                                     {item.type === 'directory' ? (
                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
                                     ) : (

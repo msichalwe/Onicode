@@ -1,39 +1,4 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import hljs from 'highlight.js/lib/core';
-import 'highlight.js/styles/github-dark.css';
-// Register common languages for syntax highlighting
-import javascript from 'highlight.js/lib/languages/javascript';
-import typescript from 'highlight.js/lib/languages/typescript';
-import python from 'highlight.js/lib/languages/python';
-import css from 'highlight.js/lib/languages/css';
-import xml from 'highlight.js/lib/languages/xml';
-import json from 'highlight.js/lib/languages/json';
-import markdown from 'highlight.js/lib/languages/markdown';
-import bash from 'highlight.js/lib/languages/bash';
-import yaml from 'highlight.js/lib/languages/yaml';
-import rust from 'highlight.js/lib/languages/rust';
-import go from 'highlight.js/lib/languages/go';
-import java from 'highlight.js/lib/languages/java';
-import sql from 'highlight.js/lib/languages/sql';
-import diff from 'highlight.js/lib/languages/diff';
-hljs.registerLanguage('javascript', javascript);
-hljs.registerLanguage('typescript', typescript);
-hljs.registerLanguage('python', python);
-hljs.registerLanguage('css', css);
-hljs.registerLanguage('html', xml);
-hljs.registerLanguage('xml', xml);
-hljs.registerLanguage('json', json);
-hljs.registerLanguage('markdown', markdown);
-hljs.registerLanguage('bash', bash);
-hljs.registerLanguage('shell', bash);
-hljs.registerLanguage('yaml', yaml);
-hljs.registerLanguage('rust', rust);
-hljs.registerLanguage('go', go);
-hljs.registerLanguage('java', java);
-hljs.registerLanguage('sql', sql);
-hljs.registerLanguage('diff', diff);
-hljs.registerLanguage('tsx', typescript);
-hljs.registerLanguage('jsx', javascript);
 import Sidebar from './components/Sidebar';
 import ChatView from './components/ChatView';
 import SettingsPanel from './components/SettingsPanel';
@@ -86,23 +51,6 @@ class ViewErrorBoundary extends React.Component<
     }
 }
 
-interface FloatingFile {
-    path: string;
-    name: string;
-    content: string;
-    language: string;
-    dirty: boolean;
-    editing: boolean;
-}
-
-interface FloatingPosition {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    snapped: 'left' | 'right' | null;
-}
-
 function AppContent() {
     const [currentView, setCurrentView] = useState<View>('chat');
     const [panel, setPanel] = useState<PanelState>({ widget: null });
@@ -112,11 +60,7 @@ function AppContent() {
     const [showExitWarning, setShowExitWarning] = useState(false);
     const [projectDropdown, setProjectDropdown] = useState(false);
     const [projects, setProjects] = useState<ActiveProject[]>([]);
-    const [floatingFile, setFloatingFile] = useState<FloatingFile | null>(null);
-    const [floatPos, setFloatPos] = useState<FloatingPosition>({ x: 100, y: 60, w: 700, h: 500, snapped: null });
     const [unreadChatCount, setUnreadChatCount] = useState(0);
-    const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; mode: 'move' | 'resize' } | null>(null);
-    const codeRef = useRef<HTMLElement>(null);
     const currentViewRef = useRef(currentView);
     const { theme } = useTheme();
 
@@ -146,121 +90,27 @@ function AppContent() {
         return cleanup;
     }, [handleViewChange]);
 
-    // Listen for file open requests (from side panel file viewer)
+    // Listen for file open requests — open in Document Viewer panel
     useEffect(() => {
         const handler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
             if (detail?.path && detail?.name) {
-                // Load file content
-                if (window.onicode?.readFileContent) {
-                    window.onicode.readFileContent(detail.path).then(result => {
-                        if (result.content !== undefined) {
-                            const ext = detail.name.split('.').pop()?.toLowerCase() || '';
-                            const langs: Record<string, string> = { ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx', py: 'python', css: 'css', html: 'html', json: 'json', md: 'markdown', yml: 'yaml', yaml: 'yaml', sh: 'shell' };
-                            setFloatingFile({
-                                path: detail.path,
-                                name: detail.name,
-                                content: result.content,
-                                language: langs[ext] || ext,
-                                dirty: false,
-                                editing: false,
-                            });
-                            // Center the editor in viewport
-                            setFloatPos(p => ({
-                                ...p,
-                                x: Math.max(80, (window.innerWidth - p.w) / 2),
-                                y: Math.max(40, (window.innerHeight - p.h) / 2 - 20),
-                                snapped: null,
-                            }));
-                        }
-                    });
-                }
+                setPanel({ widget: 'viewer' as WidgetType, data: { path: detail.path, name: detail.name } });
             }
         };
         window.addEventListener('onicode-open-file', handler);
         return () => window.removeEventListener('onicode-open-file', handler);
     }, []);
 
-    // Keyboard shortcuts for floating editor (Cmd+S to save, Esc to close)
+    // Listen for view navigation from slash commands (e.g. /workflows)
     useEffect(() => {
-        if (!floatingFile) return;
-        const handler = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') { setFloatingFile(null); e.preventDefault(); }
-            if ((e.metaKey || e.ctrlKey) && e.key === 's' && floatingFile.dirty) {
-                e.preventDefault();
-                if (window.onicode?.writeFile) {
-                    window.onicode.writeFile(floatingFile.path, floatingFile.content).then(() => {
-                        setFloatingFile(f => f ? { ...f, dirty: false } : null);
-                    });
-                }
-            }
+        const handler = (e: Event) => {
+            const view = (e as CustomEvent).detail as View;
+            if (view) handleViewChange(view);
         };
-        window.addEventListener('keydown', handler);
-        return () => window.removeEventListener('keydown', handler);
-    }, [floatingFile]);
-
-    // Syntax highlight when file content changes
-    useEffect(() => {
-        if (!floatingFile || floatingFile.editing || !codeRef.current) return;
-        try {
-            const lang = floatingFile.language;
-            const highlighted = hljs.getLanguage(lang)
-                ? hljs.highlight(floatingFile.content, { language: lang }).value
-                : hljs.highlightAuto(floatingFile.content).value;
-            codeRef.current.innerHTML = highlighted;
-        } catch {
-            if (codeRef.current) codeRef.current.textContent = floatingFile.content;
-        }
-    }, [floatingFile?.content, floatingFile?.language, floatingFile?.editing]);
-
-    // Drag and resize handlers for floating editor
-    useEffect(() => {
-        if (!dragRef.current) return;
-        const handleMouseMove = (e: MouseEvent) => {
-            if (!dragRef.current) return;
-            const dx = e.clientX - dragRef.current.startX;
-            const dy = e.clientY - dragRef.current.startY;
-            if (dragRef.current.mode === 'move') {
-                const newX = dragRef.current.origX + dx;
-                const newY = Math.max(0, dragRef.current.origY + dy);
-                // Snap detection: snap to left/right when dragged to edge
-                const snapThreshold = 20;
-                if (newX < snapThreshold) {
-                    setFloatPos(p => ({ ...p, x: 0, y: 0, w: window.innerWidth / 2, h: window.innerHeight - 40, snapped: 'left' }));
-                } else if (newX + floatPos.w > window.innerWidth - snapThreshold) {
-                    setFloatPos(p => ({ ...p, x: window.innerWidth / 2, y: 0, w: window.innerWidth / 2, h: window.innerHeight - 40, snapped: 'right' }));
-                } else {
-                    setFloatPos(p => ({ ...p, x: newX, y: newY, snapped: null }));
-                }
-            } else {
-                setFloatPos(p => ({
-                    ...p,
-                    w: Math.max(400, dragRef.current!.origX + dx),
-                    h: Math.max(300, dragRef.current!.origY + dy),
-                    snapped: null,
-                }));
-            }
-        };
-        const handleMouseUp = () => { dragRef.current = null; document.body.style.cursor = ''; document.body.style.userSelect = ''; };
-        document.addEventListener('mousemove', handleMouseMove);
-        document.addEventListener('mouseup', handleMouseUp);
-        return () => { document.removeEventListener('mousemove', handleMouseMove); document.removeEventListener('mouseup', handleMouseUp); };
-    });
-
-    const startDrag = useCallback((e: React.MouseEvent) => {
-        e.preventDefault();
-        dragRef.current = { startX: e.clientX, startY: e.clientY, origX: floatPos.x, origY: floatPos.y, mode: 'move' };
-        document.body.style.cursor = 'grabbing';
-        document.body.style.userSelect = 'none';
-    }, [floatPos.x, floatPos.y]);
-
-    const startResize = useCallback((e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dragRef.current = { startX: e.clientX, startY: e.clientY, origX: floatPos.w, origY: floatPos.h, mode: 'resize' };
-        document.body.style.cursor = 'nwse-resize';
-        document.body.style.userSelect = 'none';
-    }, [floatPos.w, floatPos.h]);
+        window.addEventListener('onicode-navigate', handler);
+        return () => window.removeEventListener('onicode-navigate', handler);
+    }, [handleViewChange]);
 
     // Listen for panel requests from ChatView (slash commands, AI actions, icon clicks)
     useEffect(() => {
@@ -272,6 +122,19 @@ function AppContent() {
         };
         window.addEventListener('onicode-panel', handler);
         return () => window.removeEventListener('onicode-panel', handler);
+    }, []);
+
+    // Listen for panel mode changes from Settings
+    const [panelHidden, setPanelHidden] = useState(() => localStorage.getItem('onicode-panel-mode') === 'hidden');
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const mode = (e as CustomEvent).detail;
+            setPanelHidden(mode === 'hidden');
+            localStorage.setItem('onicode-panel-mode', mode);
+            if (mode === 'hidden') setPanel({ widget: null });
+        };
+        window.addEventListener('onicode-panel-mode', handler);
+        return () => window.removeEventListener('onicode-panel-mode', handler);
     }, []);
 
     // Listen for project activation (from /openproject, /init, or AI project creation)
@@ -529,84 +392,15 @@ function AppContent() {
                         </div>
                     )}
                 </div>
-                <RightPanel
-                    panel={panel}
-                    onClose={closePanel}
-                    onChangeWidget={changeWidget}
-                />
+                {!panelHidden && (
+                    <RightPanel
+                        panel={panel}
+                        onClose={closePanel}
+                        onChangeWidget={changeWidget}
+                    />
+                )}
             </div>
 
-            {/* Floating file editor — draggable, resizable, snappable */}
-            {floatingFile && (
-                <div
-                    className={`floating-editor${floatPos.snapped ? ' floating-editor-snapped' : ''}`}
-                    style={{
-                        left: floatPos.x,
-                        top: floatPos.y,
-                        width: floatPos.w,
-                        height: floatPos.h,
-                    }}
-                >
-                    <div className="floating-editor-header" onMouseDown={startDrag}>
-                        <div className="floating-editor-tabs">
-                            <div className="floating-editor-tab active">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-                                <span>{floatingFile.name}</span>
-                                {floatingFile.dirty && <span className="floating-editor-dot" />}
-                            </div>
-                        </div>
-                        <div className="floating-editor-actions">
-                            <span className="floating-editor-lang">{floatingFile.language}</span>
-                            <span className="floating-editor-path" title={floatingFile.path}>{floatingFile.path.split('/').slice(-3).join('/')}</span>
-                            {!floatingFile.editing ? (
-                                <button
-                                    className="floating-editor-edit-btn"
-                                    onClick={() => setFloatingFile(f => f ? { ...f, editing: true } : null)}
-                                    title="Edit file"
-                                >
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                                    Edit
-                                </button>
-                            ) : (
-                                <button
-                                    className="floating-editor-edit-btn"
-                                    onClick={() => setFloatingFile(f => f ? { ...f, editing: false } : null)}
-                                    title="View with highlighting"
-                                >View</button>
-                            )}
-                            {floatingFile.dirty && (
-                                <button
-                                    className="floating-editor-save"
-                                    onClick={async () => {
-                                        if (window.onicode?.writeFile) {
-                                            await window.onicode.writeFile(floatingFile.path, floatingFile.content);
-                                            setFloatingFile(f => f ? { ...f, dirty: false } : null);
-                                        }
-                                    }}
-                                >Save</button>
-                            )}
-                            <button className="floating-editor-close" onClick={() => setFloatingFile(null)}>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                            </button>
-                        </div>
-                    </div>
-                    <div className="floating-editor-body">
-                        {floatingFile.editing ? (
-                            <textarea
-                                className="floating-editor-textarea"
-                                value={floatingFile.content}
-                                onChange={(e) => setFloatingFile(f => f ? { ...f, content: e.target.value, dirty: true } : null)}
-                                spellCheck={false}
-                                autoFocus
-                            />
-                        ) : (
-                            <pre className="floating-editor-code"><code ref={codeRef} className={`hljs language-${floatingFile.language}`} /></pre>
-                        )}
-                    </div>
-                    {/* Resize handle */}
-                    <div className="floating-editor-resize" onMouseDown={startResize} />
-                </div>
-            )}
         </div>
     );
 }

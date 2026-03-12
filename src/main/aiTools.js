@@ -4148,6 +4148,14 @@ async function executeTool(name, args) {
                             }
                         }
                     }
+                    // Enforce: only ONE task in_progress at a time — auto-pause any other in_progress tasks
+                    const allTasks = taskManager.list();
+                    for (const t of allTasks) {
+                        if (t.id !== args.id && t.status === 'in_progress') {
+                            taskManager.update(t.id, { status: 'pending' });
+                            logger.info('task-mgr', `Auto-paused task #${t.id} (only one task can be in_progress)`);
+                        }
+                    }
                 }
 
                 // Handle dependency updates

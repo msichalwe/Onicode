@@ -95,6 +95,7 @@ interface OnicodeAPI {
     onOrchestrationProgress: (callback: (data: { id: string; graph: WorkGraphSummary; completedBatch: Array<{ nodeId: string; agentId: string; success: boolean }> }) => void) => () => void;
     onOrchestrationDone: (callback: (data: { id: string; summary: WorkGraphSummary; report: string; duration: number }) => void) => () => void;
     readFileContent: (filePath: string) => Promise<{ content?: string; size?: number; modified?: string; error?: string }>;
+    readFileBinary: (filePath: string) => Promise<{ dataUri?: string; size?: number; error?: string }>;
     readScreenshotBase64: (filePath: string) => Promise<{ dataUri?: string; error?: string }>;
 
     // Task Management (extended)
@@ -330,6 +331,7 @@ interface OnicodeAPI {
     agentGetMode: () => Promise<{ mode: string; permissions: Record<string, string> }>;
     setSetting: (key: string, value: unknown) => Promise<{ success: boolean }>;
     getSetting: (key: string) => Promise<unknown>;
+    getAllSettings: () => Promise<Record<string, unknown>>;
     onAgentMode: (callback: (mode: string) => void) => () => void;
 
     // Session Title

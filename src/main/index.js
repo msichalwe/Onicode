@@ -2150,7 +2150,7 @@ async function makeSubAgentAnthropicCall(messages, providerConfig, toolOverrides
                 });
             });
             req.on('error', (err) => resolve({ error: err.message }));
-            const timeout = setTimeout(() => { req.destroy(); resolve({ error: 'Anthropic sub-agent call timed out (90s)' }); }, 90000);
+            const timeout = setTimeout(() => { req.destroy(); resolve({ error: 'Anthropic sub-agent call timed out (180s)' }); }, 180000);
             req.on('close', () => clearTimeout(timeout));
             req.write(bodyStr);
             req.end();
@@ -2229,7 +2229,7 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout
+        const timeoutId = setTimeout(() => controller.abort(), 180000); // 180s timeout
 
         const response = await net.fetch('https://chatgpt.com/backend-api/codex/responses', {
             method: 'POST',
@@ -2330,7 +2330,7 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
             hasToolCalls: toolCalls.length > 0,
         };
     } catch (err) {
-        if (err.name === 'AbortError') return { error: 'Sub-agent AI call timed out (90s)' };
+        if (err.name === 'AbortError') return { error: 'Sub-agent AI call timed out (180s)' };
         return { error: err.message };
     }
 }
@@ -2411,7 +2411,7 @@ function makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides) {
             });
         });
         req.on('error', (err) => resolve({ error: err.message }));
-        req.setTimeout(90000, () => { req.destroy(); resolve({ error: 'Sub-agent AI call timed out (90s)' }); });
+        req.setTimeout(180000, () => { req.destroy(); resolve({ error: 'Sub-agent AI call timed out (180s)' }); });
         req.write(bodyStr);
         req.end();
     });
@@ -3163,6 +3163,26 @@ ipcMain.handle('read-file-content', async (_event, filePath) => {
     }
 });
 
+// Read any file as base64 data URI (for Document Viewer — images, PDFs, etc.)
+ipcMain.handle('read-file-binary', async (_event, filePath) => {
+    try {
+        const data = fs.readFileSync(filePath);
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeMap = {
+            '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+            '.ico': 'image/x-icon', '.svg': 'image/svg+xml',
+            '.pdf': 'application/pdf',
+            '.mp4': 'video/mp4', '.webm': 'video/webm',
+        };
+        const mime = mimeMap[ext] || 'application/octet-stream';
+        const stats = fs.statSync(filePath);
+        return { dataUri: `data:${mime};base64,${data.toString('base64')}`, size: stats.size };
+    } catch (err) {
+        return { error: err.message };
+    }
+});
+
 ipcMain.handle('read-screenshot-base64', async (_event, filePath) => {
     try {
         const home = require('os').homedir();
@@ -3641,31 +3661,80 @@ ipcMain.handle('agent-get-mode', () => {
     return { mode: agentMode, permissions: activePermissions };
 });
 
-// ── Settings flags (synced from renderer localStorage) ──
+// ── Settings (persisted to ~/.onicode/settings.json) ──
 
-let dangerousCommandProtection = true;
-let autoCommitEnabled = true;
+const SETTINGS_PATH = path.join(os.homedir(), '.onicode', 'settings.json');
+
+// Default settings
+const _settings = {
+    'dangerous-cmd-protection': true,
+    'auto-commit': true,
+    'permission-mode': 'auto-allow',
+    'panel-mode': 'always',
+    'font-size': 13,
+    'chat-history-limit': 50,
+    'default-project-path': path.join(os.homedir(), 'OniProjects'),
+    'show-tool-details': true,
+    'auto-title': true,
+    'send-on-enter': true,
+    'notifications': true,
+    'compact-threshold': 60000,
+    'max-auto-continues': 15,
+};
+
+// Load persisted settings on startup
+try {
+    if (fs.existsSync(SETTINGS_PATH)) {
+        const saved = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+        Object.assign(_settings, saved);
+        logger.info('settings', `Loaded settings from ${SETTINGS_PATH}`);
+    }
+} catch (err) {
+    logger.warn('settings', `Failed to load settings: ${err.message}`);
+}
+
+function persistSettings() {
+    try {
+        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(_settings, null, 2));
+    } catch (err) {
+        logger.warn('settings', `Failed to save settings: ${err.message}`);
+    }
+}
+
+// Backward-compat aliases
+let dangerousCommandProtection = _settings['dangerous-cmd-protection'];
+let autoCommitEnabled = _settings['auto-commit'];
+
+// Restore permission mode on startup
+if (_settings['permission-mode'] && _settings['permission-mode'] !== 'auto-allow') {
+    setAgentMode(_settings['permission-mode'] === 'plan-only' ? 'plan' : _settings['permission-mode']);
+}
 
 ipcMain.handle('set-setting', (_, key, value) => {
-    if (key === 'dangerous-cmd-protection') {
-        dangerousCommandProtection = !!value;
-        logger.info('settings', `Dangerous command protection: ${dangerousCommandProtection}`);
-    } else if (key === 'auto-commit') {
-        autoCommitEnabled = !!value;
-        logger.info('settings', `Auto-commit: ${autoCommitEnabled}`);
+    _settings[key] = value;
+    persistSettings();
+    // Keep backward-compat vars in sync
+    if (key === 'dangerous-cmd-protection') dangerousCommandProtection = !!value;
+    if (key === 'auto-commit') autoCommitEnabled = !!value;
+    if (key === 'permission-mode') {
+        const modeMap = { 'auto-allow': 'build', 'ask-destructive': 'ask-destructive', 'plan-only': 'plan' };
+        setAgentMode(modeMap[value] || 'build');
     }
+    logger.info('settings', `Setting "${key}" = ${JSON.stringify(value)}`);
     return { success: true };
 });
 
 ipcMain.handle('get-setting', (_, key) => {
-    if (key === 'dangerous-cmd-protection') return dangerousCommandProtection;
-    if (key === 'auto-commit') return autoCommitEnabled;
-    return null;
+    return key ? _settings[key] : { ..._settings };
+});
+
+ipcMain.handle('get-all-settings', () => {
+    return { ..._settings };
 });
 
 // Expose to aiTools
-function isDangerousProtectionEnabled() { return dangerousCommandProtection; }
-function isAutoCommitEnabled() { return autoCommitEnabled; }
+function isDangerousProtectionEnabled() { return _settings['dangerous-cmd-protection']; }
+function isAutoCommitEnabled() { return _settings['auto-commit']; }
 
 // ══════════════════════════════════════════
 //  Register Terminal & Project IPC
