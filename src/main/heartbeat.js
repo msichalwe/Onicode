@@ -64,7 +64,7 @@ function setSendAutomationMessage(fn) {
  */
 async function _callAI(prompt) {
     if (!_makeAICall) throw new Error('AI call function not configured');
-    if (!_lastProviderConfig) throw new Error('No provider configured — send at least one chat message first');
+    if (!_lastProviderConfig) throw new Error('No provider configured — connect a provider in Settings');
     const messages = [
         { role: 'system', content: 'You are an AI monitoring agent running a heartbeat check. Respond concisely.' },
         { role: 'user', content: prompt },
@@ -447,13 +447,6 @@ async function _triageHeartbeatResults(summary) {
         const status = r.error ? 'ERROR' : r.action_needed ? 'ISSUE' : 'OK';
         return `- ${r.check_name} [${status}]${r.reason ? ': ' + r.reason : ''}${r.error ? ' (Error: ' + r.error + ')' : ''}`;
     }).join('\n');
-
-    // Need provider config for AI triage — if not set yet, fall back to raw report
-    if (!_lastProviderConfig) {
-        logger.info('heartbeat', 'No provider configured yet — sending raw report');
-        _fallbackNotify(summary);
-        return;
-    }
 
     // Run through the system triage workflow (by ID — real DB record)
     if (_executeWorkflow) {

@@ -28,6 +28,45 @@ const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefa
 
 let mainWindow = null;
 
+// ══════════════════════════════════════════
+//  Provider Config Persistence (disk-backed, independent of chat)
+// ══════════════════════════════════════════
+const os = require('os');
+const PROVIDER_CONFIG_PATH = path.join(os.homedir(), '.onicode', 'provider-config.json');
+
+function saveProviderConfigToDisk(config) {
+    try {
+        const dir = path.dirname(PROVIDER_CONFIG_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(PROVIDER_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+    } catch (err) {
+        logger.warn('main', `Failed to persist provider config: ${err.message}`);
+    }
+}
+
+function loadProviderConfigFromDisk() {
+    try {
+        if (fs.existsSync(PROVIDER_CONFIG_PATH)) {
+            const data = JSON.parse(fs.readFileSync(PROVIDER_CONFIG_PATH, 'utf-8'));
+            if (data?.id) return data;
+        }
+    } catch (err) {
+        logger.warn('main', `Failed to load provider config from disk: ${err.message}`);
+    }
+    return null;
+}
+
+/**
+ * Propagate provider config to all automation modules.
+ */
+function seedAllProviderConfigs(config) {
+    if (!config) return;
+    setLastProviderConfig(config);
+    setWorkflowProviderConfig(config);
+    setSchedulerProviderConfig(config);
+    setHeartbeatProviderConfig(config);
+}
+
 // ── Tool definition caching + smart filtering ──
 let _allToolsCache = null;
 let _toolsCacheKey = '';
@@ -1100,11 +1139,9 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
     // Wire provider config for sub-agent + orchestrator + automation use
     const provConfig = { id: 'codex', apiKey: accessToken, selectedModel: model };
-    setLastProviderConfig(provConfig);
     _lastProviderConfig = provConfig;
-    setWorkflowProviderConfig(provConfig);
-    setSchedulerProviderConfig(provConfig);
-    setHeartbeatProviderConfig(provConfig);
+    seedAllProviderConfigs(provConfig);
+    saveProviderConfigToDisk(provConfig);
     setPermissions(activePermissions);
     setAgentModeRef(agentMode);
     setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks (BEFORE startSession)
@@ -2470,11 +2507,9 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
     const _taskStartSnapshot = { ...taskManager.getSummary() };
 
     // Wire provider config for sub-agent + orchestrator + automation use
-    setLastProviderConfig(providerConfig);
     _lastProviderConfig = providerConfig;
-    setWorkflowProviderConfig(providerConfig);
-    setSchedulerProviderConfig(providerConfig);
-    setHeartbeatProviderConfig(providerConfig);
+    seedAllProviderConfigs(providerConfig);
+    saveProviderConfigToDisk(providerConfig);
 
     // Start or continue agentic session (preserves tasks for same project)
     startSession(null, projectPath);
@@ -3872,6 +3907,24 @@ app.whenReady().then(() => {
     } catch (err) {
         logger.error('main', `Failed to create system_heartbeat_triage workflow: ${err.message}`);
     }
+
+    // Seed provider config from disk so automation works before first chat message
+    const savedProvConfig = loadProviderConfigFromDisk();
+    if (savedProvConfig) {
+        _lastProviderConfig = savedProvConfig;
+        seedAllProviderConfigs(savedProvConfig);
+        logger.info('main', `Loaded provider config from disk: ${savedProvConfig.id} / ${savedProvConfig.selectedModel || 'default'}`);
+    }
+
+    // IPC: renderer syncs provider config on load + on provider changes
+    ipcMain.handle('sync-provider-config', (_event, config) => {
+        if (!config?.id) return { success: false, error: 'Invalid config' };
+        _lastProviderConfig = config;
+        seedAllProviderConfigs(config);
+        saveProviderConfigToDisk(config);
+        logger.info('main', `Provider config synced: ${config.id} / ${config.selectedModel || 'default'}`);
+        return { success: true };
+    });
 
     try { startSchedulerLoop(); } catch (err) { logger.error('main', `startSchedulerLoop failed: ${err.message}`); }
     try { startHeartbeat(); } catch (err) { logger.error('main', `startHeartbeat failed: ${err.message}`); }

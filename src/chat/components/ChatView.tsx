@@ -310,6 +310,23 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const attachMenuRef = useRef<HTMLDivElement>(null);
     const sessionStartRef = useRef<number | null>(null);
 
+    // ── Message Queue ──
+    interface QueueItem {
+        id: string;
+        type: 'user' | 'automation';
+        content: string;
+        attachments?: Attachment[];
+        source?: string;
+        title?: string;
+        timestamp: number;
+        editable: boolean;
+    }
+    const [messageQueue, setMessageQueue] = useState<QueueItem[]>([]);
+    const [showQueuePanel, setShowQueuePanel] = useState(false);
+    const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+    const [editingQueueText, setEditingQueueText] = useState('');
+    const messageQueueRef = useRef<QueueItem[]>([]);
+
     // ── Refs ──
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -325,6 +342,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // Keep ref in sync with prop so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
+    useEffect(() => { messageQueueRef.current = messageQueue; }, [messageQueue]);
 
     // Close attach menu on outside click
     useEffect(() => {
@@ -350,6 +368,19 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 if (conv) setMessages(conv.messages);
             }
         });
+    }, []);
+
+    // ── Sync active provider to main process so automation/workflows work independently ──
+    useEffect(() => {
+        const provider = getActiveProvider();
+        if (provider && isElectron) {
+            window.onicode?.syncProviderConfig({
+                id: provider.id,
+                apiKey: provider.apiKey || '',
+                baseUrl: provider.baseUrl,
+                selectedModel: provider.selectedModel,
+            });
+        }
     }, []);
 
     // ── Persistence (SQLite primary, localStorage cache) ──
@@ -568,15 +599,18 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         return removeListener;
     }, []);
 
-    // Listen for automation messages (timers, background workflows, scheduled tasks)
+    // Listen for automation messages — queue them for AI processing
     useEffect(() => {
         if (!window.onicode?.onAutomationMessage) return;
         const removeListener = window.onicode.onAutomationMessage((data) => {
-            setMessages(prev => [...prev, {
+            setMessageQueue(prev => [...prev, {
                 id: data.id || generateId(),
-                role: 'ai' as const,
-                content: `**${data.title || data.source || 'Automation'}:** ${data.content}`,
+                type: 'automation' as const,
+                content: data.content,
+                source: data.source || 'automation',
+                title: data.title,
                 timestamp: data.timestamp || Date.now(),
+                editable: false,
             }]);
             onNewMessage?.();
         });
@@ -1264,6 +1298,51 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
     }, [sendViaIPC, sendViaFetch]);
 
+    // ── Auto-dequeue: when AI finishes, send next queued message ──
+    useEffect(() => {
+        if (isTyping || sendingRef.current) return;
+        if (messageQueueRef.current.length === 0) return;
+
+        const timer = setTimeout(() => {
+            const queue = messageQueueRef.current;
+            if (queue.length === 0 || sendingRef.current) return;
+
+            const next = queue[0];
+            setMessageQueue(prev => prev.slice(1));
+
+            if (next.type === 'user') {
+                const userMsg: Message = {
+                    id: generateId(),
+                    role: 'user',
+                    content: next.content,
+                    timestamp: Date.now(),
+                    attachments: next.attachments,
+                };
+                setMessages(prev => {
+                    const updated = [...prev, userMsg];
+                    sendToAI(next.content, prev, next.attachments);
+                    return updated;
+                });
+            } else {
+                // Automation result — send to AI for processing
+                const prompt = `[Automation Result — ${next.title || next.source || 'System'}]\n${next.content}\n\nReview this result and summarize findings or take appropriate action.`;
+                const autoMsg: Message = {
+                    id: generateId(),
+                    role: 'user',
+                    content: prompt,
+                    timestamp: Date.now(),
+                };
+                setMessages(prev => {
+                    const updated = [...prev, autoMsg];
+                    sendToAI(prompt, prev);
+                    return updated;
+                });
+            }
+        }, 500);
+
+        return () => clearTimeout(timer);
+    }, [isTyping, messageQueue.length, sendToAI]);
+
     // ── Persist messages when they change ──
     useEffect(() => {
         if (messages.length > 0) {
@@ -1410,6 +1489,33 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         setAttachments((prev) => prev.filter((_, i) => i !== index));
     }, []);
 
+    // ── Queue management ──
+    const removeFromQueue = useCallback((id: string) => {
+        setMessageQueue(prev => prev.filter(item => item.id !== id));
+    }, []);
+
+    const editQueueItem = useCallback((id: string, newContent: string) => {
+        setMessageQueue(prev => prev.map(item =>
+            item.id === id && item.editable ? { ...item, content: newContent } : item
+        ));
+    }, []);
+
+    const moveQueueItem = useCallback((id: string, direction: 'up' | 'down') => {
+        setMessageQueue(prev => {
+            const idx = prev.findIndex(item => item.id === id);
+            if (idx < 0) return prev;
+            const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+            if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+            const next = [...prev];
+            [next[idx], next[targetIdx]] = [next[targetIdx], next[idx]];
+            return next;
+        });
+    }, []);
+
+    const clearUserQueue = useCallback(() => {
+        setMessageQueue(prev => prev.filter(item => !item.editable));
+    }, []);
+
     // ── New chat ──
     const newChat = useCallback(() => {
         if (isElectron) window.onicode!.abortAI();
@@ -1422,6 +1528,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         streamContentRef.current = '';
         sendingRef.current = false;
         setActiveConvId(null);
+        setMessageQueue([]);
         localStorage.removeItem(ACTIVE_CONV_KEY);
         setAttachments([]);
     }, []);
@@ -1478,7 +1585,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         const text = input.trim();
         if (!text) return;
 
-        // Handle slash commands
+        // Handle slash commands (always immediate)
         if (text.startsWith('/')) {
             const handled = await handleCommand(text);
             if (handled) {
@@ -1486,6 +1593,27 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 setShowSlashMenu(false);
                 return;
             }
+        }
+
+        // If AI is busy, queue the message instead of sending
+        if (isTyping) {
+            if (messageQueueRef.current.length >= 20) {
+                // Show brief flash on queue button to indicate cap reached
+                setMessages(prev => [...prev]); // Force re-render
+                return;
+            }
+            setMessageQueue(prev => [...prev, {
+                id: generateId(),
+                type: 'user' as const,
+                content: text,
+                attachments: attachments.length > 0 ? [...attachments] : undefined,
+                timestamp: Date.now(),
+                editable: true,
+            }]);
+            setInput('');
+            setAttachments([]);
+            setShowQueuePanel(true); // Auto-expand queue so user sees their message was added
+            return;
         }
 
         // Auto-detect and switch to project if user mentions one
@@ -1527,7 +1655,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             sendToAI(text, prev, userMessage.attachments);
             return updated;
         });
-    }, [input, attachments, activeProject?.id, activeConvId, handleCommand, sendToAI, autoDetectProject]);
+    }, [input, attachments, activeProject?.id, activeConvId, handleCommand, sendToAI, autoDetectProject, isTyping]);
 
     // ── Keyboard handler ──
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -3152,6 +3280,87 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     </div>
                 )}
 
+                {/* Message Queue Panel */}
+                {messageQueue.length > 0 && (
+                    <div className="mq-bar">
+                        <button className="mq-header" onClick={() => setShowQueuePanel(!showQueuePanel)}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <rect x="3" y="3" width="18" height="6" rx="1" /><rect x="3" y="15" width="18" height="6" rx="1" /><line x1="3" y1="12" x2="21" y2="12" />
+                            </svg>
+                            <span>{messageQueue.length} queued</span>
+                            <svg className={`mq-chevron${showQueuePanel ? ' mq-chevron-open' : ''}`} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                            {messageQueue.some(q => !q.editable) && <span className="mq-auto-label">auto</span>}
+                        </button>
+                        {messageQueue.filter(q => q.editable).length > 0 && (
+                            <button className="mq-clear-btn" onClick={clearUserQueue} title="Clear user messages">Clear</button>
+                        )}
+                        {showQueuePanel && (
+                            <div className="mq-list">
+                                {messageQueue.map((item, idx) => (
+                                    <div key={item.id} className={`mq-item${item.type === 'automation' ? ' mq-item-auto' : ''}`}>
+                                        <div className="mq-item-badge">
+                                            {item.type === 'automation' ? (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
+                                            ) : (
+                                                <span className="mq-item-num">{idx + 1}</span>
+                                            )}
+                                        </div>
+                                        <div className="mq-item-content">
+                                            {editingQueueId === item.id ? (
+                                                <textarea
+                                                    className="mq-edit-input"
+                                                    value={editingQueueText}
+                                                    onChange={e => setEditingQueueText(e.target.value)}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                                            e.preventDefault();
+                                                            editQueueItem(item.id, editingQueueText);
+                                                            setEditingQueueId(null);
+                                                        }
+                                                        if (e.key === 'Escape') setEditingQueueId(null);
+                                                    }}
+                                                    autoFocus
+                                                    rows={2}
+                                                />
+                                            ) : (
+                                                <span className="mq-item-text">{item.title ? `[${item.title}] ` : ''}{item.content.length > 120 ? item.content.slice(0, 120) + '...' : item.content}</span>
+                                            )}
+                                            {item.attachments && item.attachments.length > 0 && (
+                                                <span className="mq-item-attach">+{item.attachments.length} file{item.attachments.length > 1 ? 's' : ''}</span>
+                                            )}
+                                        </div>
+                                        {item.editable && editingQueueId !== item.id && (
+                                            <div className="mq-item-actions">
+                                                {idx > 0 && (
+                                                    <button className="mq-action-btn" onClick={() => moveQueueItem(item.id, 'up')} title="Move up">
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15" /></svg>
+                                                    </button>
+                                                )}
+                                                {idx < messageQueue.length - 1 && (
+                                                    <button className="mq-action-btn" onClick={() => moveQueueItem(item.id, 'down')} title="Move down">
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                                                    </button>
+                                                )}
+                                                <button className="mq-action-btn" onClick={() => { setEditingQueueId(item.id); setEditingQueueText(item.content); }} title="Edit">
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                                                </button>
+                                                <button className="mq-action-btn mq-action-delete" onClick={() => removeFromQueue(item.id)} title="Remove">
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                                                </button>
+                                            </div>
+                                        )}
+                                        {!item.editable && (
+                                            <div className="mq-item-lock" title="Automation result — cannot edit">
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {/* Attachment previews */}
                 {attachments.length > 0 && (
                     <div className="attachment-bar">
@@ -3386,7 +3595,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         onChange={handleFileChange}
                     />
                     <div className="attach-menu-anchor" ref={attachMenuRef}>
-                        <button className="attach-btn" onClick={() => setShowAttachMenu(prev => !prev)} title="Attach" disabled={isTyping}>
+                        <button className="attach-btn" onClick={() => setShowAttachMenu(prev => !prev)} title="Attach">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                             </svg>
@@ -3466,14 +3675,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         onPaste={handlePaste}
                         placeholder={scope === 'project' ? `Ask about ${activeProject?.name || 'this project'}... (/ commands, @ attachments)` : 'Ask Onicode anything... (/ commands, @ attachments)'}
                         rows={1}
-                        disabled={isTyping}
                     />
                     {isTyping ? (
-                        <button className="send-btn stop-btn" onClick={stopGeneration}>
-                            <svg viewBox="0 0 24 24" fill="currentColor">
-                                <rect x="6" y="6" width="12" height="12" rx="2" />
-                            </svg>
-                        </button>
+                        <>
+                            <button className="send-btn queue-btn" onClick={handleSend} disabled={!input.trim()} title="Queue message">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <rect x="3" y="3" width="18" height="6" rx="1" /><rect x="3" y="15" width="18" height="6" rx="1" /><line x1="3" y1="12" x2="21" y2="12" />
+                                </svg>
+                                {messageQueue.length > 0 && <span className="mq-count-badge">{messageQueue.length}</span>}
+                            </button>
+                            <button className="send-btn stop-btn" onClick={stopGeneration} title="Stop generation">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                                </svg>
+                            </button>
+                        </>
                     ) : (
                         <button className="send-btn" onClick={handleSend} disabled={!input.trim()}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

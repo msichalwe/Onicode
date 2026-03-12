@@ -141,6 +141,9 @@ interface OnicodeAPI {
         modelCount?: number;
     }>;
 
+    // Sync provider config to main process (for automation/workflows)
+    syncProviderConfig: (config: { id: string; apiKey: string; baseUrl?: string; selectedModel?: string }) => Promise<{ success: boolean }>;
+
     // Terminal
     createTerminal: (cwd?: string) => Promise<{ success?: boolean; sessionId?: string; error?: string }>;
     writeTerminal: (sessionId: string, data: string) => Promise<{ success?: boolean; error?: string }>;

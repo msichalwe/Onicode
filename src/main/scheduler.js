@@ -54,7 +54,7 @@ function setWorkflowCreator(fn) { _createWorkflow = fn; }
  */
 async function _callAI(prompt) {
     if (!_makeAICall) throw new Error('AI call function not configured');
-    if (!_lastProviderConfig) throw new Error('No provider configured — send at least one chat message first so the scheduler knows which AI to use');
+    if (!_lastProviderConfig) throw new Error('No provider configured — connect a provider in Settings');
     const messages = [
         { role: 'system', content: 'You are a helpful AI assistant running a scheduled task. Be concise and informative.' },
         { role: 'user', content: prompt },

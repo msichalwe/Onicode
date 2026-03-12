@@ -131,6 +131,10 @@ contextBridge.exposeInMainWorld('onicode', {
     testProvider: (providerConfig) =>
         ipcRenderer.invoke('test-provider', providerConfig),
 
+    // Sync provider config to main process (for automation/workflows)
+    syncProviderConfig: (config) =>
+        ipcRenderer.invoke('sync-provider-config', config),
+
     // ── Terminal ──
     createTerminal: (cwd) => ipcRenderer.invoke('terminal-create', cwd),
     writeTerminal: (sessionId, data) => ipcRenderer.invoke('terminal-write', sessionId, data),

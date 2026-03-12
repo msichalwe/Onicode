@@ -56,7 +56,7 @@ function setProviderConfig(config) { _lastProviderConfig = config; }
  */
 async function _callAI(prompt) {
     if (!_makeAICall) throw new Error('AI call function not configured');
-    if (!_lastProviderConfig) throw new Error('No provider configured — send at least one chat message first');
+    if (!_lastProviderConfig) throw new Error('No provider configured — connect a provider in Settings');
     const messages = [
         { role: 'system', content: 'You are a helpful AI assistant running an automated workflow step. Be concise and informative.' },
         { role: 'user', content: prompt },
@@ -573,7 +573,7 @@ async function executeAgenticStep(step, context) {
         return { success: false, error: 'AI call function not configured' };
     }
     if (!_lastProviderConfig) {
-        return { success: false, error: 'No provider configured — send at least one chat message first' };
+        return { success: false, error: 'No provider configured — connect a provider in Settings' };
     }
 
     const goal = substituteVars(step.goal || step.prompt || '', context);

@@ -578,6 +578,18 @@ export default function WorkflowsView({ isVisible = true }: { isVisible?: boolea
                                 <option value="git">Git</option>
                                 <option value="browser">Browser</option>
                                 <option value="workspace">Workspace</option>
+                                <option value="research">Research</option>
+                            </select>
+                            <label className="wv-label-sm">Complexity</label>
+                            <select
+                                className="wv-select-sm"
+                                value={(step as WorkflowStep & { complexity?: string }).complexity || ''}
+                                onChange={e => updateStep(index, { complexity: e.target.value || undefined } as Partial<WorkflowStep>)}
+                            >
+                                <option value="">Default</option>
+                                <option value="simple">Simple (10 rounds)</option>
+                                <option value="moderate">Moderate (25 rounds)</option>
+                                <option value="complex">Complex (40 rounds)</option>
                             </select>
                             <label className="wv-label-sm">Max Rounds</label>
                             <input
