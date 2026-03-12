@@ -12,6 +12,11 @@ interface ActiveRun {
     currentStep: number;
     totalSteps: number;
     currentStepName: string;
+    agentRound?: number;
+    agentMaxRounds?: number;
+    agentStatus?: string;
+    lastToolName?: string;
+    lastToolStatus?: string;
 }
 
 interface RecentRun {
@@ -211,6 +216,26 @@ function WorkflowWidget() {
             });
         }));
 
+        // Agent round updates (agentic workflow steps)
+        unsubs.push(window.onicode.onWorkflowAgentRound?.((data) => {
+            setActiveRuns(prev => prev.map(r => ({
+                ...r,
+                currentStepName: data.stepName || r.currentStepName,
+                agentRound: data.round,
+                agentMaxRounds: data.maxRounds,
+                agentStatus: data.status,
+            })));
+        }));
+
+        // Agent tool calls (agentic workflow steps)
+        unsubs.push(window.onicode.onWorkflowAgentTool?.((data) => {
+            setActiveRuns(prev => prev.map(r => ({
+                ...r,
+                lastToolName: data.toolName,
+                lastToolStatus: data.status,
+            })));
+        }));
+
         // Heartbeat tick
         unsubs.push(window.onicode.onHeartbeatTick?.((data) => {
             tickRef.current++;
@@ -287,6 +312,17 @@ function WorkflowWidget() {
                             )}
                             {run.currentStepName && (
                                 <div className="ww-step-name">{run.currentStepName}</div>
+                            )}
+                            {run.agentRound != null && (
+                                <div className="ww-agent-info">
+                                    <span className="ww-agent-round">Round {run.agentRound}/{run.agentMaxRounds || '?'}</span>
+                                    {run.lastToolName && (
+                                        <span className="ww-agent-tool">
+                                            {run.lastToolStatus === 'running' && <span className="ww-mini-spinner" />}
+                                            {run.lastToolName}
+                                        </span>
+                                    )}
+                                </div>
                             )}
                         </div>
                     ))}

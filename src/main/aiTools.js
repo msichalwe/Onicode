@@ -978,6 +978,7 @@ const SUB_AGENT_TOOL_SETS = {
     'workspace': ['gws_cli', 'read_file', 'search_files', 'list_directory'],
     'file-ops': ['read_file', 'edit_file', 'multi_edit', 'create_file', 'delete_file', 'search_files', 'list_directory', 'glob_files'],
     'search': ['read_file', 'search_files', 'glob_files', 'list_directory', 'find_symbol', 'find_references', 'list_symbols', 'semantic_search', 'find_implementation', 'batch_search'],
+    'research': ['websearch', 'read_url_content', 'view_content_chunk', 'browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_close', 'read_file'],
 };
 
 async function executeSubAgent(agentId, task, contextFiles, providerConfig, toolSet, constraints) {

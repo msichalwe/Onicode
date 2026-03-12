@@ -35,6 +35,9 @@ let _mainWindow = null;
 let _makeAICall = null;
 let _executeWorkflow = null;
 let _lastProviderConfig = null;
+let _sendAutomationMessage = null;
+
+const HEARTBEAT_TRIAGE_WORKFLOW_ID = 'system_heartbeat_triage';
 
 function setMainWindow(win) {
     _mainWindow = win;
@@ -50,6 +53,10 @@ function setWorkflowExecutor(fn) {
 
 function setProviderConfig(config) {
     _lastProviderConfig = config;
+}
+
+function setSendAutomationMessage(fn) {
+    _sendAutomationMessage = fn;
 }
 
 /**
@@ -113,11 +120,47 @@ function ensureHeartbeatDefaults() {
 
         const row = db.prepare('SELECT id FROM heartbeat_config WHERE id = ?').get('default');
         if (!row) {
+            const defaultChecks = [
+                { id: 'disk_space', name: 'Disk Space', type: 'command_check', command: 'df -h / | awk \'NR==2{gsub(/%/,"",$5); if($5 > 90) exit 1}\'', enabled: true, priority: 1 },
+                { id: 'memory_usage', name: 'Memory Usage', type: 'command_check', command: 'vm_stat | awk \'/Pages free/{free=$3} /Pages active/{active=$3} END{if(active/(active+free) > 0.9) exit 1}\'', enabled: true, priority: 2 },
+                { id: 'git_uncommitted', name: 'Uncommitted Changes', type: 'command_check', command: 'cd ~ && find Documents/Code -maxdepth 2 -name .git -exec sh -c \'cd "$(dirname "{}")" && git diff --quiet 2>/dev/null || echo "dirty: $(dirname "{}")";\' \\; | head -5 | grep -q dirty && exit 1 || exit 0', enabled: true, priority: 3 },
+                { id: 'node_outdated', name: 'Node Packages Outdated', type: 'command_check', command: 'npm outdated --depth=0 2>/dev/null | wc -l | awk \'{if($1 > 10) exit 1}\'', enabled: false, priority: 5 },
+                { id: 'port_check', name: 'Dev Server (3000)', type: 'command_check', command: 'lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1 || exit 0', enabled: false, priority: 4 },
+                { id: 'system_load', name: 'System Load', type: 'command_check', command: 'uptime | awk -F\'load averages:\' \'{split($2,a,\" \"); if(a[1]+0 > 8.0) exit 1}\'', enabled: true, priority: 2 },
+                { id: 'docker_status', name: 'Docker Running', type: 'command_check', command: 'docker info >/dev/null 2>&1 || exit 1', enabled: false, priority: 3 },
+                { id: 'battery_check', name: 'Battery Level', type: 'command_check', command: 'pmset -g batt 2>/dev/null | grep -o "[0-9]*%" | tr -d "%" | awk \'{if($1 < 15) exit 1}\'', enabled: true, priority: 1 },
+                { id: 'pending_tasks', name: 'Stale Tasks', type: 'command_check', command: 'sqlite3 ~/.onicode/onicode.db "SELECT COUNT(*) FROM tasks WHERE status IN (\'pending\',\'in_progress\')" 2>/dev/null | awk \'{if($1+0 > 15) exit 1}\'', enabled: true, priority: 4 },
+                { id: 'memory_bloat', name: 'Memory Files Size', type: 'command_check', command: 'du -sk ~/.onicode/memory/ 2>/dev/null | awk \'{if($1+0 > 10240) exit 1}\' || exit 0', enabled: true, priority: 5 },
+            ];
             db.prepare(`
                 INSERT INTO heartbeat_config (id, enabled, interval_minutes, checklist, quiet_hours_start, quiet_hours_end, max_actions_per_beat, updated_at)
-                VALUES (?, 0, 30, '[]', '22:00', '08:00', 3, ?)
-            `).run('default', Date.now());
-            logger.info('heartbeat', 'Default heartbeat config created');
+                VALUES (?, 1, 30, ?, '22:00', '08:00', 10, ?)
+            `).run('default', JSON.stringify(defaultChecks), Date.now());
+            logger.info('heartbeat', `Default heartbeat config created with ${defaultChecks.length} checks`);
+        } else {
+            // Backfill: if existing config has empty checklist, populate with defaults
+            const full = db.prepare('SELECT checklist FROM heartbeat_config WHERE id = ?').get('default');
+            if (full) {
+                let checklist = [];
+                try { checklist = JSON.parse(full.checklist || '[]'); } catch { /* ignore */ }
+                if (!checklist || checklist.length === 0) {
+                    const defaultChecks = [
+                        { id: 'disk_space', name: 'Disk Space', type: 'command_check', command: 'df -h / | awk \'NR==2{gsub(/%/,"",$5); if($5 > 90) exit 1}\'', enabled: true, priority: 1 },
+                        { id: 'memory_usage', name: 'Memory Usage', type: 'command_check', command: 'vm_stat | awk \'/Pages free/{free=$3} /Pages active/{active=$3} END{if(active/(active+free) > 0.9) exit 1}\'', enabled: true, priority: 2 },
+                        { id: 'git_uncommitted', name: 'Uncommitted Changes', type: 'command_check', command: 'cd ~ && find Documents/Code -maxdepth 2 -name .git -exec sh -c \'cd "$(dirname "{}")" && git diff --quiet 2>/dev/null || echo "dirty: $(dirname "{}")";\' \\; | head -5 | grep -q dirty && exit 1 || exit 0', enabled: true, priority: 3 },
+                        { id: 'system_load', name: 'System Load', type: 'command_check', command: 'uptime | awk -F\'load averages:\' \'{split($2,a,\" \"); if(a[1]+0 > 8.0) exit 1}\'', enabled: true, priority: 2 },
+                        { id: 'battery_check', name: 'Battery Level', type: 'command_check', command: 'pmset -g batt 2>/dev/null | grep -o "[0-9]*%" | tr -d "%" | awk \'{if($1 < 15) exit 1}\'', enabled: true, priority: 1 },
+                        { id: 'node_outdated', name: 'Node Packages Outdated', type: 'command_check', command: 'npm outdated --depth=0 2>/dev/null | wc -l | awk \'{if($1 > 10) exit 1}\'', enabled: false, priority: 5 },
+                        { id: 'port_check', name: 'Dev Server (3000)', type: 'command_check', command: 'lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1 || exit 0', enabled: false, priority: 4 },
+                        { id: 'docker_status', name: 'Docker Running', type: 'command_check', command: 'docker info >/dev/null 2>&1 || exit 1', enabled: false, priority: 3 },
+                        { id: 'pending_tasks', name: 'Stale Tasks', type: 'command_check', command: 'sqlite3 ~/.onicode/onicode.db "SELECT COUNT(*) FROM tasks WHERE status IN (\'pending\',\'in_progress\')" 2>/dev/null | awk \'{if($1+0 > 15) exit 1}\'', enabled: true, priority: 4 },
+                        { id: 'memory_bloat', name: 'Memory Files Size', type: 'command_check', command: 'du -sk ~/.onicode/memory/ 2>/dev/null | awk \'{if($1+0 > 10240) exit 1}\' || exit 0', enabled: true, priority: 5 },
+                    ];
+                    db.prepare('UPDATE heartbeat_config SET checklist = ?, max_actions_per_beat = 5, updated_at = ? WHERE id = ?')
+                        .run(JSON.stringify(defaultChecks), Date.now(), 'default');
+                    logger.info('heartbeat', `Backfilled ${defaultChecks.length} default checks into existing heartbeat config`);
+                }
+            }
         }
     } catch (err) {
         logger.error('heartbeat', `Failed to ensure heartbeat defaults: ${err.message}`);
@@ -382,7 +425,112 @@ async function executeHeartbeat() {
     _emitEvent('heartbeat-tick', summary);
     logger.info('heartbeat', `Beat complete: ${summary.checks_run} checks, ${summary.actions_needed} actions`, summary);
 
+    // Silent when healthy — only triage when issues found
+    if (summary.actions_needed > 0 || summary.errors > 0) {
+        _triageHeartbeatResults(summary).catch(err => {
+            logger.error('heartbeat', `Heartbeat triage failed: ${err.message}`);
+        });
+    } else {
+        logger.info('heartbeat', 'All checks healthy — staying silent');
+    }
+
     return summary;
+}
+
+/**
+ * Triage heartbeat results through the system triage workflow.
+ * The workflow uses AI with tool access to investigate issues and decide
+ * whether the user should be notified.
+ */
+async function _triageHeartbeatResults(summary) {
+    const resultsText = summary.results.map(r => {
+        const status = r.error ? 'ERROR' : r.action_needed ? 'ISSUE' : 'OK';
+        return `- ${r.check_name} [${status}]${r.reason ? ': ' + r.reason : ''}${r.error ? ' (Error: ' + r.error + ')' : ''}`;
+    }).join('\n');
+
+    // Need provider config for AI triage — if not set yet, fall back to raw report
+    if (!_lastProviderConfig) {
+        logger.info('heartbeat', 'No provider configured yet — sending raw report');
+        _fallbackNotify(summary);
+        return;
+    }
+
+    // Run through the system triage workflow (by ID — real DB record)
+    if (_executeWorkflow) {
+        try {
+            logger.info('heartbeat', `Running triage workflow: ${HEARTBEAT_TRIAGE_WORKFLOW_ID}`);
+            const result = await _executeWorkflow(
+                HEARTBEAT_TRIAGE_WORKFLOW_ID,
+                { heartbeat_results: resultsText },
+                'heartbeat'
+            );
+
+            if (!result?.success) {
+                logger.error('heartbeat', `Triage workflow returned error: ${result?.error || 'unknown'}`);
+                _fallbackNotify(summary);
+                return;
+            }
+
+            // Extract the AI's analysis from step output
+            let output = result?.result?.step_0;
+            // Handle both string output and object output { success, output, ... }
+            if (output && typeof output === 'object') {
+                output = output.output || output.error || JSON.stringify(output);
+            }
+
+            if (output && typeof output === 'string' && !output.includes('ALL_CLEAR')) {
+                // AI decided to notify — send to chat
+                logger.info('heartbeat', 'Triage workflow: AI decided to notify user');
+                if (_sendAutomationMessage) {
+                    _sendAutomationMessage(output, 'heartbeat', 'Heartbeat Alert');
+                }
+            } else {
+                logger.info('heartbeat', 'Triage workflow: AI decided issues are minor, staying silent');
+            }
+        } catch (err) {
+            logger.error('heartbeat', `Triage workflow threw: ${err.message}`);
+            _fallbackNotify(summary);
+        }
+        return;
+    }
+
+    // Fallback: direct AI triage (no workflow engine available)
+    if (_makeAICall && _lastProviderConfig) {
+        try {
+            const response = await _callAI(
+                `You are a background system monitor. These heartbeat checks found issues:\n\n${resultsText}\n\nIf these are minor/expected, respond with just: ALL_CLEAR\nIf the user should be notified, write a brief actionable summary (under 100 words).`
+            );
+            if (response && !response.includes('ALL_CLEAR')) {
+                if (_sendAutomationMessage) {
+                    _sendAutomationMessage(response, 'heartbeat', 'Heartbeat Alert');
+                }
+            } else {
+                logger.info('heartbeat', 'Direct AI triage decided: issues minor, staying silent');
+            }
+        } catch (err) {
+            logger.error('heartbeat', `Direct AI triage failed: ${err.message}`);
+            _fallbackNotify(summary);
+        }
+        return;
+    }
+
+    // Last resort: no AI available, just send raw report
+    _fallbackNotify(summary);
+}
+
+/**
+ * Fallback: send raw heartbeat report when AI triage is unavailable.
+ */
+function _fallbackNotify(summary) {
+    if (!_sendAutomationMessage) return;
+    const lines = summary.results
+        .filter(r => r.action_needed || r.error)
+        .map(r => `- **${r.check_name}**: ${r.reason || r.error || 'issue detected'}`)
+        .join('\n');
+    _sendAutomationMessage(
+        `**Heartbeat** — ${summary.actions_needed} issue(s) detected:\n\n${lines}`,
+        'heartbeat', 'Heartbeat Alert'
+    );
 }
 
 // ── Check executors ──
@@ -399,22 +547,14 @@ async function _executeAIEvalCheck(check, result) {
             result.reason = parsed.reason || '';
             result.urgency = parsed.urgency || 'low';
 
-            if (result.action_needed) {
-                if (check.trigger_workflow_id && _executeWorkflow) {
-                    await _executeWorkflow(check.trigger_workflow_id, {
-                        trigger: 'heartbeat',
-                        check: check.name,
-                        reason: result.reason,
-                        urgency: result.urgency,
-                    });
-                    result.workflow_triggered = true;
-                } else {
-                    _sendNotification(
-                        `Heartbeat: ${check.name}`,
-                        `[${result.urgency.toUpperCase()}] ${result.reason}`
-                    );
-                    result.notification_sent = true;
-                }
+            if (result.action_needed && check.trigger_workflow_id && _executeWorkflow) {
+                await _executeWorkflow(check.trigger_workflow_id, {
+                    trigger: 'heartbeat',
+                    check: check.name,
+                    reason: result.reason,
+                    urgency: result.urgency,
+                });
+                result.workflow_triggered = true;
             }
         } else {
             result.error = 'AI response did not contain valid JSON';
@@ -440,12 +580,6 @@ function _executeCommandCheck(check, result) {
         result.action_needed = true;
         result.reason = `Command exited with code ${err.status || 1}: ${(err.stderr || '').toString().slice(0, 200)}`;
         result.urgency = 'medium';
-
-        _sendNotification(
-            `Heartbeat: ${check.name}`,
-            `Command check failed (exit ${err.status || 1})`
-        );
-        result.notification_sent = true;
     }
 
     return result;
@@ -719,4 +853,5 @@ module.exports = {
     setWorkflowExecutor,
     setMainWindow,
     setProviderConfig,
+    setSendAutomationMessage,
 };

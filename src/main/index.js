@@ -22,9 +22,9 @@ const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITI
 const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
 const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
 const { registerKeystoreIPC } = require('./keystore');
-const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg, setProviderConfig: setSchedulerProviderConfig } = require('./scheduler');
-const { registerWorkflowIPC, executeWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
-const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig } = require('./heartbeat');
+const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setWorkflowCreator: setSchedulerWorkflowCreator, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg, setProviderConfig: setSchedulerProviderConfig } = require('./scheduler');
+const { registerWorkflowIPC, executeWorkflow, createWorkflow, ensureSystemWorkflow, isSystemWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
+const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig, setSendAutomationMessage: setHeartbeatAutomationMsg } = require('./heartbeat');
 
 let mainWindow = null;
 
@@ -3842,14 +3842,37 @@ app.whenReady().then(() => {
     setWorkflowWindow(mainWindow);
     setHeartbeatWindow(mainWindow);
     setSchedulerWorkflowExecutor(executeWorkflow);
+    setSchedulerWorkflowCreator(createWorkflow);
     setSchedulerAutomationMsg(sendAutomationMessage);
     setHeartbeatWorkflowExecutor(executeWorkflow);
+    setHeartbeatAutomationMsg(sendAutomationMessage);
     setWorkflowToolExecutor(executeAnyTool);
     setWorkflowToolSetResolver((name) => SUB_AGENT_TOOL_SETS[name] || SUB_AGENT_TOOL_SETS['read-only']);
     setWorkflowToolDefsGetter(() => getAllToolDefinitions({ full: true }));
 
     // Ensure heartbeat defaults and start automation
     try { ensureHeartbeatDefaults(); } catch (err) { logger.error('main', `ensureHeartbeatDefaults failed: ${err.message}`); }
+
+    // Create system workflows (must happen AFTER storage is initialized by ensureHeartbeatDefaults)
+    try {
+        ensureSystemWorkflow('system_heartbeat_triage', {
+            name: 'Heartbeat Triage',
+            description: 'System workflow: AI analyzes heartbeat issues and decides whether to notify the user.',
+            tags: ['system', 'heartbeat'],
+            steps: [{
+                name: 'Analyze Issues',
+                type: 'ai_prompt',
+                goal: `You are a background system monitor for an AI development environment (Onicode). Analyze these heartbeat check results and investigate the issues:\n\n{{params.heartbeat_results}}\n\nUse your tools to gather more context if needed (check disk usage, memory, git status, running processes, etc.).\n\nDecide if the user should be interrupted with a notification:\n- If the issues are minor, expected, or not actionable (e.g. some uncommitted git changes, slightly high memory on a dev machine, a few pending tasks) → respond with just: ALL_CLEAR\n- If there are significant issues that need the user's attention (disk nearly full, critical errors, battery dying, excessive stale tasks, memory bloat) → write a brief, actionable summary (under 100 words) explaining what needs attention and why. Be conversational, not robotic.`,
+                tool_set: 'research',
+                complexity: 'simple',
+                max_rounds: 5,
+            }],
+        });
+        logger.info('main', 'System workflow system_heartbeat_triage ensured');
+    } catch (err) {
+        logger.error('main', `Failed to create system_heartbeat_triage workflow: ${err.message}`);
+    }
+
     try { startSchedulerLoop(); } catch (err) { logger.error('main', `startSchedulerLoop failed: ${err.message}`); }
     try { startHeartbeat(); } catch (err) { logger.error('main', `startHeartbeat failed: ${err.message}`); }
 

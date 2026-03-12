@@ -144,6 +144,13 @@ function generateId() {
     return 'wf_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+/**
+ * Check if a workflow is a system workflow (protected from deletion/editing).
+ */
+function isSystemWorkflow(id) {
+    return typeof id === 'string' && id.startsWith('system_');
+}
+
 function generateRunId() {
     return 'wr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
@@ -217,6 +224,7 @@ function listWorkflows() {
 }
 
 function updateWorkflow(id, updates) {
+    if (isSystemWorkflow(id)) throw new Error(`Cannot edit system workflow "${id}"`);
     const existing = getWorkflow(id);
     if (!existing) throw new Error(`Workflow not found: ${id}`);
     getStorage().workflowStorage.update(id, updates);
@@ -225,8 +233,45 @@ function updateWorkflow(id, updates) {
 }
 
 function deleteWorkflow(id) {
+    if (isSystemWorkflow(id)) throw new Error(`Cannot delete system workflow "${id}"`);
     getStorage().workflowStorage.delete(id);
     logger.info('workflows', `Deleted workflow: ${id}`);
+}
+
+/**
+ * Create or update a system workflow (idempotent).
+ * System workflows use fixed IDs starting with "system_" and cannot be deleted/edited by users.
+ */
+function ensureSystemWorkflow(id, definition) {
+    if (!id.startsWith('system_')) throw new Error('System workflow IDs must start with "system_"');
+    const existing = getWorkflow(id);
+    if (existing) {
+        // Update steps/description if changed, keep enabled state
+        getStorage().workflowStorage.update(id, {
+            steps: definition.steps,
+            description: definition.description,
+            updated_at: Date.now(),
+        });
+        logger.info('workflows', `System workflow updated: ${id}`);
+        return getWorkflow(id);
+    }
+    // Create new
+    const wf = {
+        id,
+        name: definition.name,
+        description: definition.description || '',
+        steps: definition.steps,
+        trigger_config: definition.trigger_config || {},
+        enabled: true,
+        project_id: null,
+        project_path: null,
+        tags: definition.tags || ['system'],
+        created_at: Date.now(),
+        updated_at: Date.now(),
+    };
+    getStorage().workflowStorage.save(wf);
+    logger.info('workflows', `System workflow created: ${id} ("${wf.name}")`);
+    return wf;
 }
 
 // ══════════════════════════════════════════
@@ -242,6 +287,7 @@ function deleteWorkflow(id) {
  * @returns {Promise<object>} run result
  */
 async function executeWorkflow(workflowOrId, params = {}, triggerType = 'manual', scheduleId = null) {
+    const isAdhoc = typeof workflowOrId === 'object' && workflowOrId?.id?.startsWith('adhoc_');
     const workflow = typeof workflowOrId === 'string'
         ? getWorkflow(workflowOrId)
         : workflowOrId;
@@ -250,7 +296,7 @@ async function executeWorkflow(workflowOrId, params = {}, triggerType = 'manual'
         return { success: false, error: `Workflow not found: ${workflowOrId}` };
     }
 
-    if (!workflow.enabled) {
+    if (!isAdhoc && !workflow.enabled) {
         return { success: false, error: `Workflow "${workflow.name}" is disabled` };
     }
 
@@ -299,8 +345,8 @@ async function executeWorkflow(workflowOrId, params = {}, triggerType = 'manual'
         started_at: Date.now(),
     };
 
-    try { getStorage().workflowRunStorage.update(runId, { status: 'running', started_at: run.started_at }); }
-    catch { getStorage().workflowRunStorage.save(run); }
+    // Save run record — INSERT OR REPLACE handles both fresh and previously-queued runs
+    getStorage().workflowRunStorage.save(run);
     sendToRenderer('workflow-run-started', { runId, workflowId: workflow.id, workflowName: workflow.name });
 
     // Execution context — accumulates step outputs
@@ -455,7 +501,8 @@ async function executeWorkflow(workflowOrId, params = {}, triggerType = 'manual'
     };
 
     // Queue result for delivery (respects chat activity state)
-    if (triggerType !== 'manual') {
+    // Heartbeat triage workflows handle their own delivery — suppress here
+    if (triggerType !== 'manual' && triggerType !== 'heartbeat') {
         // Summarize asynchronously, then queue
         summarizeResult(structuredResult).then(summary => {
             structuredResult.content = summary;
@@ -504,7 +551,7 @@ async function executeStep(step, context, stepIndex) {
 
 async function executeAIPromptStep(step, context) {
     // Route to agentic execution if new fields are present
-    if (step.goal || step.tool_set || step.tool_priority || step.max_rounds) {
+    if (step.goal || step.tool_set || step.tool_priority || step.max_rounds || step.complexity) {
         return executeAgenticStep(step, context);
     }
 
@@ -530,7 +577,10 @@ async function executeAgenticStep(step, context) {
     }
 
     const goal = substituteVars(step.goal || step.prompt || '', context);
-    const maxRounds = step.max_rounds || 10;
+    // Complexity determines default max_rounds: simple=10, moderate=25, complex=40
+    const COMPLEXITY_ROUNDS = { simple: 10, moderate: 25, complex: 40 };
+    const complexity = step.complexity || 'moderate';
+    const maxRounds = step.max_rounds || COMPLEXITY_ROUNDS[complexity] || 25;
     const toolSetName = step.tool_set || 'read-only';
     const toolsUsed = [];
 
@@ -609,6 +659,7 @@ ${fileContext}${previousStepContext}`;
                 stepName: step.name,
                 round: round + 1,
                 maxRounds,
+                status: 'thinking',
             });
 
             const result = await _makeAICall(messages, _lastProviderConfig, allowedTools);
@@ -620,6 +671,9 @@ ${fileContext}${previousStepContext}`;
             // No tool calls — agent is done
             if (!result.hasToolCalls && !result.functionCalls?.length) {
                 const output = result.textContent || result.content || '';
+                sendToRenderer('workflow-agent-round', {
+                    stepName: step.name, round: round + 1, maxRounds, status: 'done',
+                });
                 return { success: true, output: output.slice(0, 8000), toolsUsed, rounds: round + 1 };
             }
 
@@ -641,6 +695,15 @@ ${fileContext}${previousStepContext}`;
 
                 toolsUsed.push(tc.name);
 
+                // Emit tool call event so UI can show what's happening
+                sendToRenderer('workflow-agent-tool', {
+                    stepName: step.name,
+                    round: round + 1,
+                    toolName: tc.name,
+                    args: typeof tc.arguments === 'string' ? tc.arguments.slice(0, 200) : '',
+                    status: 'running',
+                });
+
                 // Enforce tool set boundary
                 if (!allowedSet.has(tc.name)) {
                     messages.push({
@@ -657,6 +720,15 @@ ${fileContext}${previousStepContext}`;
                 } catch (err) {
                     toolResult = { error: err.message };
                 }
+
+                sendToRenderer('workflow-agent-tool', {
+                    stepName: step.name,
+                    round: round + 1,
+                    toolName: tc.name,
+                    status: 'done',
+                    success: !toolResult?.error,
+                });
+
                 messages.push({
                     role: 'tool',
                     tool_call_id: tc.id || tc.call_id,
@@ -905,9 +977,10 @@ const WORKFLOW_TOOL_DEFINITIONS = [
                                 type: { type: 'string', enum: ['ai_prompt', 'command', 'tool_call', 'condition', 'notify', 'wait', 'webhook'] },
                                 prompt: { type: 'string', description: 'For ai_prompt: the prompt text (legacy mode, no tools)' },
                                 goal: { type: 'string', description: 'For ai_prompt: what the step should achieve (enables agentic mode with tool access)' },
-                                tool_set: { type: 'string', enum: ['read-only', 'file-ops', 'search', 'git', 'browser', 'workspace'], description: 'For ai_prompt: which tools the agent can use' },
+                                tool_set: { type: 'string', enum: ['read-only', 'file-ops', 'search', 'git', 'browser', 'workspace', 'research'], description: 'For ai_prompt: which tools the agent can use. research = websearch + URL reading + browser.' },
+                                complexity: { type: 'string', enum: ['simple', 'moderate', 'complex'], description: 'Task complexity — sets default max_rounds: simple=10, moderate=25, complex=40. Default: moderate.' },
                                 tool_priority: { type: 'array', items: { type: 'string' }, description: 'For ai_prompt: preferred tools listed first' },
-                                max_rounds: { type: 'number', description: 'For ai_prompt: max AI rounds (default 10)' },
+                                max_rounds: { type: 'number', description: 'For ai_prompt: max AI rounds (overrides complexity default). 1 round = 1 AI call + all tool calls it makes.' },
                                 context: { type: 'object', description: 'For ai_prompt: { files?: string[], previous_steps?: boolean, project_docs?: boolean }' },
                                 command: { type: 'string', description: 'For command: shell command to run' },
                                 tool: { type: 'string', description: 'For tool_call: tool name' },
@@ -1269,6 +1342,8 @@ module.exports = {
     listWorkflows,
     updateWorkflow,
     deleteWorkflow,
+    ensureSystemWorkflow,
+    isSystemWorkflow,
 
     // Execution
     executeWorkflow,

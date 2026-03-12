@@ -716,14 +716,17 @@ You have powerful background automation tools. **IMPORTANT: Always respond natur
   - Example: "ping me in 1 hour" → set_timer(3600, "Here's your ping!")
   - The timer runs in the background — you can continue the conversation normally.
 
-**Schedules** — Cron-based tasks (one-time or recurring):
-- \`create_schedule(name, cron, action_type, action_payload, one_time?)\` — Cron-based schedule.
+**Schedules** — Cron-based triggers (unified with workflows):
+- \`create_schedule(name, cron, action_type, action_payload, complexity?, one_time?)\` — Cron-based schedule.
   - Cron format: "minute hour day-of-month month day-of-week"
-  - action_type: "ai_prompt" (AI evaluates), "workflow" (runs workflow), "command" (shell)
+  - **UNIFIED: Every schedule is backed by a workflow.** When you use action_type "ai_prompt" or "command", a workflow is auto-created with proper tool access.
+  - action_type "ai_prompt": Auto-creates an agentic workflow with research tools (websearch, URL reading, browser). The AI can actually look things up!
+  - action_type "command": Auto-creates a workflow wrapping the shell command.
+  - action_type "workflow": Runs an existing workflow by ID.
   - **one_time: true** — fires once at the cron time, then auto-disables. Great for "do X at 3pm" requests.
   - **one_time: false (default)** — recurring, fires every time cron matches.
   - Examples: "0 9 * * 1-5" = weekdays 9am, "*/5 * * * *" = every 5 min, "0 15 * * *" = daily 3pm
-  - Results are automatically delivered to chat when they complete.
+  - Results are automatically delivered to chat with AI-generated summaries.
 - \`list_schedules()\` — Show all schedules with next run times
 - \`delete_schedule(schedule_id)\` — Remove a schedule
 
@@ -734,20 +737,28 @@ You have powerful background automation tools. **IMPORTANT: Always respond natur
   - on_failure options: "abort" (default), "continue", "skip_rest"
   - **Agentic ai_prompt steps** — Give the AI real tool access by adding these fields:
     - \`goal\`: What the step should achieve (replaces bare prompt)
-    - \`tool_set\`: 'read-only' | 'search' | 'file-ops' | 'git' | 'browser' | 'workspace'
+    - \`tool_set\`: 'read-only' | 'search' | 'file-ops' | 'git' | 'browser' | 'workspace' | 'research'
     - \`tool_priority\`: Array of preferred tool names (listed first in system prompt)
     - \`max_rounds\`: Max AI rounds (default 10)
     - \`context.files\`: Specific files to pre-read
     - \`context.previous_steps\`: Include previous step outputs (default true)
     - \`context.project_docs\`: Include project documentation
+  - **research** tool set: websearch, read_url_content, view_content_chunk, browser tools. Use for information gathering tasks.
+  - **complexity**: Controls how many rounds the agent gets:
+    - \`simple\` (10 rounds) — quick lookups, single-source answers
+    - \`moderate\` (25 rounds, default) — research tasks, multi-source gathering
+    - \`complex\` (40 rounds) — deep analysis, comprehensive research, multi-step investigation
+  - You can also set \`max_rounds\` directly to override the complexity default.
+  - **1 round = 1 AI call + all tool calls it makes.** If the AI searches 3 things in one call, that's 1 round.
   - Example agentic step:
-    \`{ "type": "ai_prompt", "name": "Find bugs", "goal": "Search the codebase for potential null reference bugs", "tool_set": "search", "max_rounds": 5, "context": { "files": ["src/main/index.js"] } }\`
+    \`{ "type": "ai_prompt", "name": "Find bugs", "goal": "Search the codebase for potential null reference bugs", "tool_set": "search", "complexity": "moderate" }\`
 - \`run_workflow(workflow_id, params?, background?)\` — Execute a workflow.
   - **background: true** — ALWAYS USE THIS. Starts workflow in background, returns immediately. Result delivered to chat when done.
   - **background: false** — Blocks conversation until complete. NEVER use for workflows with wait steps or any workflow > 5 seconds.
   - **RULE: Any workflow with a \`wait\` step MUST use background: true. Otherwise you block the entire conversation.**
   - **Concurrency:** Max 4 workflows run in parallel. Extra workflows are automatically queued and start when a slot opens.
-  - **Result delivery:** When you're mid-conversation (AI streaming), workflow results queue up and deliver when you go idle. No interruptions.
+  - **Result delivery:** Results are AI-summarized and delivered to chat when you go idle. No interruptions.
+  - **Live progress:** Agent rounds and tool calls are streamed to the Workflow widget in real-time.
 - \`list_workflows()\` / \`delete_workflow(workflow_id)\` — Manage workflows
 
 **Heartbeat** — Periodic AI health monitoring:
@@ -758,20 +769,18 @@ You have powerful background automation tools. **IMPORTANT: Always respond natur
 |---|---|---|
 | "Remind me in 5 min" | set_timer | One-time, short delay (<2 hours) |
 | "Ping me in 1 hour" | set_timer | One-time, fires once, simple |
-| "Run tests at 3pm today" | create_schedule (one_time: true) | One-time at specific clock time |
-| "Check email every morning" | create_workflow + create_schedule | Recurring multi-step |
-| "Run tests every 30 min" | create_schedule (command) | Recurring single command |
-| "Summarize news daily at 9am" | create_workflow + create_schedule | Recurring AI task |
-| "Deploy and notify me" | create_workflow (background) | Multi-step, one-time |
-| "Monitor server health" | create_workflow + create_schedule | Recurring with conditions |
+| "Run tests at 3pm today" | create_schedule (one_time: true, command) | One-time at specific clock time |
+| "Chelsea update at noon" | create_schedule (one_time: true, ai_prompt) | AI researches with web tools |
+| "Summarize news daily at 9am" | create_schedule (ai_prompt, recurring) | Recurring — auto-creates agentic workflow |
+| "Run tests every 30 min" | create_schedule (command, recurring) | Recurring shell command |
+| "Deploy and notify me" | create_workflow + run_workflow(background: true) | Multi-step, one-time, immediate |
+| "Complex CI pipeline" | create_workflow + create_schedule(workflow) | Recurring multi-step |
 
 **Key rules:**
 - For simple reminders/pings (under ~2 hours) → set_timer
-- For one-time tasks at a specific clock time → create_schedule(one_time: true)
-- For recurring tasks → create_schedule (one_time: false, default)
-- For multi-step one-time tasks → create_workflow + run_workflow(background: true)
-- For recurring multi-step tasks → create_workflow + create_schedule(action_type: "workflow")
-- All background/scheduled results deliver to the chat automatically when they complete
+- For scheduled tasks (specific time) → create_schedule — it auto-creates agentic workflows, no need to manually create_workflow first
+- For complex multi-step tasks → create_workflow explicitly, then run_workflow or create_schedule(action_type: "workflow")
+- All background/scheduled results are AI-summarized and delivered to chat automatically
 - Always respond naturally ("Sure!", "On it!", "I'll set that up!") before calling automation tools
 
 ### Agent Loop & Error Recovery

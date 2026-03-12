@@ -40,10 +40,13 @@ let _executeWorkflow = null;
 let _sendAutomationMessageFn = null;
 let _lastProviderConfig = null;
 
+let _createWorkflow = null;
+
 function setAICallFunction(fn) { _makeAICall = fn; }
 function setWorkflowExecutor(fn) { _executeWorkflow = fn; }
 function setSendAutomationMessage(fn) { _sendAutomationMessageFn = fn; }
 function setProviderConfig(config) { _lastProviderConfig = config; }
+function setWorkflowCreator(fn) { _createWorkflow = fn; }
 
 /**
  * Helper: call _makeAICall with proper (messages, providerConfig) signature.
@@ -292,62 +295,92 @@ const concurrency = new ConcurrencyManager();
 // ══════════════════════════════════════════
 
 /**
- * Execute a schedule's action.
+ * Execute a schedule's action — always runs a workflow.
+ *
+ * Every schedule is backed by a workflow. For legacy schedules without a workflow_id,
+ * an ad-hoc workflow is created on the fly from the action definition.
+ *
  * @param {object} schedule — the schedule row
  * @returns {Promise<{ success: boolean, output?: string, error?: string }>}
  */
 async function executeAction(schedule) {
+    if (!_executeWorkflow) {
+        return { success: false, error: 'Workflow executor not configured' };
+    }
+
+    // 1. If schedule has a workflow_id, run that directly
+    const wfId = schedule.workflow_id;
+    if (wfId) {
+        try {
+            let actionParams = {};
+            try {
+                const action = typeof schedule.action === 'string' ? JSON.parse(schedule.action) : (schedule.action || {});
+                actionParams = action.params || {};
+            } catch { /* ignore */ }
+            const result = await _executeWorkflow(wfId, actionParams, 'scheduler', schedule.id);
+            const output = result?.result?.step_0 || (result?.error ? `Error: ${result.error}` : 'Completed');
+            return {
+                success: result?.success !== false,
+                output: typeof output === 'string' ? output.slice(0, 4000) : JSON.stringify(output).slice(0, 4000),
+                error: result?.error,
+                _deliveredByWorkflow: true,
+            };
+        } catch (err) {
+            return { success: false, error: `Workflow failed: ${err.message}` };
+        }
+    }
+
+    // 2. Legacy: no workflow_id — build ad-hoc workflow from action
     let action;
     try {
-        action = typeof schedule.action === 'string'
-            ? JSON.parse(schedule.action)
-            : schedule.action;
+        action = typeof schedule.action === 'string' ? JSON.parse(schedule.action) : schedule.action;
     } catch {
         return { success: false, error: 'Invalid action JSON' };
     }
 
     const type = action?.type;
+    const steps = [];
 
-    switch (type) {
-        case 'ai_prompt': {
-            try {
-                const output = await _callAI(action.prompt || action.payload);
-                return { success: true, output: typeof output === 'string' ? output : JSON.stringify(output).slice(0, 4000) };
-            } catch (err) {
-                return { success: false, error: `AI call failed: ${err.message}` };
-            }
-        }
+    if (type === 'ai_prompt') {
+        const prompt = action.prompt || action.payload;
+        if (!prompt) return { success: false, error: 'No prompt provided' };
+        steps.push({
+            name: schedule.name,
+            type: 'ai_prompt',
+            goal: prompt,
+            tool_set: 'research',
+            complexity: action.complexity || 'moderate',
+        });
+    } else if (type === 'command') {
+        const cmd = action.command || action.payload;
+        if (!cmd) return { success: false, error: 'No command specified' };
+        steps.push({
+            name: schedule.name,
+            type: 'command',
+            command: cmd,
+        });
+    } else {
+        return { success: false, error: `Unknown action type: ${type}` };
+    }
 
-        case 'workflow': {
-            if (!_executeWorkflow) {
-                return { success: false, error: 'Workflow executor not configured' };
-            }
-            try {
-                const wfId = action.workflow_id || schedule.workflow_id;
-                const result = await _executeWorkflow(wfId, action.params);
-                return { success: true, output: typeof result === 'string' ? result : JSON.stringify(result).slice(0, 2000) };
-            } catch (err) {
-                return { success: false, error: `Workflow failed: ${err.message}` };
-            }
-        }
-
-        case 'command': {
-            try {
-                const cmd = action.command || action.payload;
-                if (!cmd) return { success: false, error: 'No command specified' };
-                const output = execSync(cmd, {
-                    timeout: 30000,
-                    encoding: 'utf-8',
-                    maxBuffer: 1024 * 1024,
-                }).trim();
-                return { success: true, output: output.slice(0, 2000) };
-            } catch (err) {
-                return { success: false, error: `Command failed: ${err.message?.slice(0, 500)}` };
-            }
-        }
-
-        default:
-            return { success: false, error: `Unknown action type: ${type}` };
+    try {
+        const adhocWorkflow = {
+            id: `adhoc_${schedule.id}_${Date.now()}`,
+            name: schedule.name,
+            description: `Scheduled task: ${schedule.name}`,
+            enabled: true,
+            steps,
+        };
+        const result = await _executeWorkflow(adhocWorkflow, {}, 'scheduler', schedule.id);
+        const output = result?.result?.step_0 || (result?.error ? `Error: ${result.error}` : 'Completed');
+        return {
+            success: result?.success !== false,
+            output: typeof output === 'string' ? output.slice(0, 4000) : JSON.stringify(output).slice(0, 4000),
+            error: result?.error,
+            _deliveredByWorkflow: true,
+        };
+    } catch (err) {
+        return { success: false, error: `Workflow execution failed: ${err.message}` };
     }
 }
 
@@ -473,11 +506,14 @@ function tick() {
                 });
 
                 // Deliver result to chat via automation message
-                const statusEmoji = result.success ? '\u2705' : '\u274c';
-                const msg = result.success
-                    ? `${statusEmoji} **${schedule.name}** completed${result.output ? ':\n' + result.output.slice(0, 1000) : '.'}`
-                    : `${statusEmoji} **${schedule.name}** failed: ${result.error || 'Unknown error'}`;
-                _sendAutomationMessage(msg, 'scheduler', schedule.name);
+                // (skip if result was delivered by workflow pipeline — avoids double messages)
+                if (!result._deliveredByWorkflow) {
+                    const statusEmoji = result.success ? '\u2705' : '\u274c';
+                    const msg = result.success
+                        ? `${statusEmoji} **${schedule.name}** completed${result.output ? ':\n' + result.output.slice(0, 1000) : '.'}`
+                        : `${statusEmoji} **${schedule.name}** failed: ${result.error || 'Unknown error'}`;
+                    _sendAutomationMessage(msg, 'scheduler', schedule.name);
+                }
 
                 if (isOneTime) {
                     logger.info('scheduler', `One-time schedule "${schedule.name}" (${schedule.id}) has been disabled after firing`);
@@ -833,15 +869,20 @@ const SCHEDULER_TOOL_DEFINITIONS = [
                     action_type: {
                         type: 'string',
                         enum: ['ai_prompt', 'workflow', 'command'],
-                        description: 'Type of action to execute: ai_prompt (send prompt to AI), workflow (run workflow), command (shell command)',
+                        description: 'Type of action: ai_prompt (auto-creates an agentic workflow with web search + tools), workflow (runs existing workflow by ID), command (auto-creates workflow with shell command step)',
                     },
                     action_payload: {
                         type: 'string',
-                        description: 'The action payload: prompt text for ai_prompt, command string for command, or params JSON for workflow',
+                        description: 'For ai_prompt: the goal/prompt (AI gets websearch, URL reading, browser tools). For command: shell command string. For workflow: params JSON.',
                     },
                     workflow_id: {
                         type: 'string',
-                        description: 'Workflow ID (required when action_type is "workflow")',
+                        description: 'Workflow ID (required when action_type is "workflow", auto-generated for ai_prompt/command)',
+                    },
+                    complexity: {
+                        type: 'string',
+                        enum: ['simple', 'moderate', 'complex'],
+                        description: 'For ai_prompt: task complexity. simple=10 rounds (quick lookups), moderate=25 rounds (research tasks, default), complex=40 rounds (deep analysis, multi-source research).',
                     },
                     one_time: {
                         type: 'boolean',
@@ -896,10 +937,49 @@ const SCHEDULER_TOOL_DEFINITIONS = [
 async function executeSchedulerTool(toolName, args) {
     switch (toolName) {
         case 'create_schedule': {
-            const { name, cron, action_type, action_payload, workflow_id, one_time } = args;
-            const action = { type: action_type };
+            const { name, cron, action_type, action_payload, workflow_id, complexity, one_time } = args;
 
-            if (action_type === 'ai_prompt') {
+            let resolvedWorkflowId = workflow_id;
+            const action = { type: action_type };
+            const taskComplexity = complexity || 'moderate';
+
+            // Unified: every schedule runs a workflow.
+            // If action_type is 'ai_prompt' or 'command', auto-create a workflow for it.
+            if (action_type === 'ai_prompt' && _createWorkflow) {
+                try {
+                    const wf = _createWorkflow({
+                        name: `${name} (auto)`,
+                        description: `Auto-created workflow for schedule: ${name}`,
+                        steps: [{
+                            name: name,
+                            type: 'ai_prompt',
+                            goal: action_payload,
+                            tool_set: 'research',
+                            complexity: taskComplexity,
+                        }],
+                    });
+                    resolvedWorkflowId = wf.id;
+                    action.prompt = action_payload;
+                } catch (err) {
+                    return { error: `Failed to create backing workflow: ${err.message}` };
+                }
+            } else if (action_type === 'command' && _createWorkflow) {
+                try {
+                    const wf = _createWorkflow({
+                        name: `${name} (auto)`,
+                        description: `Auto-created workflow for schedule: ${name}`,
+                        steps: [{
+                            name: name,
+                            type: 'command',
+                            command: action_payload,
+                        }],
+                    });
+                    resolvedWorkflowId = wf.id;
+                    action.command = action_payload;
+                } catch (err) {
+                    return { error: `Failed to create backing workflow: ${err.message}` };
+                }
+            } else if (action_type === 'ai_prompt') {
                 action.prompt = action_payload;
             } else if (action_type === 'command') {
                 action.command = action_payload;
@@ -913,18 +993,19 @@ async function executeSchedulerTool(toolName, args) {
                     name,
                     cron_expression: cron,
                     action,
-                    workflow_id,
+                    workflow_id: resolvedWorkflowId,
                     one_time: !!one_time,
                 });
                 const typeLabel = one_time ? 'One-time' : 'Recurring';
                 return {
-                    message: `${typeLabel} schedule "${name}" created. Next run: ${schedule.next_run_at}`,
+                    message: `${typeLabel} schedule "${name}" created${resolvedWorkflowId ? ` (workflow: ${resolvedWorkflowId})` : ''}. Next run: ${schedule.next_run_at}`,
                     schedule: {
                         id: schedule.id,
                         name: schedule.name,
                         cron: schedule.cron_expression,
                         next_run: schedule.next_run_at,
                         action_type,
+                        workflow_id: resolvedWorkflowId,
                         one_time: !!one_time,
                     },
                 };
@@ -1002,6 +1083,7 @@ module.exports = {
     // Host wiring
     setAICallFunction,
     setWorkflowExecutor,
+    setWorkflowCreator,
     setMainWindow,
     setSendAutomationMessage,
     setProviderConfig,

@@ -440,6 +440,16 @@ contextBridge.exposeInMainWorld('onicode', {
         ipcRenderer.on('workflow-step-completed', handler);
         return () => ipcRenderer.removeListener('workflow-step-completed', handler);
     },
+    onWorkflowAgentRound: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-agent-round', handler);
+        return () => ipcRenderer.removeListener('workflow-agent-round', handler);
+    },
+    onWorkflowAgentTool: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('workflow-agent-tool', handler);
+        return () => ipcRenderer.removeListener('workflow-agent-tool', handler);
+    },
 
     // ── Automation Messages ──
     onAutomationMessage: (callback) => {

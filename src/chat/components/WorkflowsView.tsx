@@ -795,17 +795,21 @@ export default function WorkflowsView({ isVisible = true }: { isVisible?: boolea
                                     </div>
                                 </div>
                                 <div className="wv-card-actions">
-                                    <span className={`wv-enabled-badge ${wf.enabled ? 'wv-enabled' : 'wv-disabled'}`}
-                                        onClick={() => toggleWorkflowEnabled(wf)} title={wf.enabled ? 'Click to disable' : 'Click to enable'}>
-                                        {wf.enabled ? 'Enabled' : 'Disabled'}
+                                    <span className={`wv-enabled-badge ${wf.enabled ? 'wv-enabled' : 'wv-disabled'}${wf.id.startsWith('system_') ? ' wv-system-badge' : ''}`}
+                                        onClick={() => !wf.id.startsWith('system_') && toggleWorkflowEnabled(wf)}
+                                        title={wf.id.startsWith('system_') ? 'System workflow (always enabled)' : wf.enabled ? 'Click to disable' : 'Click to enable'}
+                                        style={wf.id.startsWith('system_') ? { cursor: 'default' } : undefined}>
+                                        {wf.id.startsWith('system_') ? 'System' : wf.enabled ? 'Enabled' : 'Disabled'}
                                     </span>
                                     <button className="wv-btn wv-btn-sm" onClick={() => runWorkflow(wf.id)}
                                         disabled={runningWorkflow === wf.id} title="Run">
                                         <PlayIcon /> {runningWorkflow === wf.id ? 'Running...' : 'Run'}
                                     </button>
-                                    <button className="wv-btn-icon wv-btn-danger-icon" onClick={() => deleteWorkflow(wf.id)} title="Delete">
-                                        <TrashIcon />
-                                    </button>
+                                    {!wf.id.startsWith('system_') && (
+                                        <button className="wv-btn-icon wv-btn-danger-icon" onClick={() => deleteWorkflow(wf.id)} title="Delete">
+                                            <TrashIcon />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 

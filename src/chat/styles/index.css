@@ -10175,6 +10175,41 @@ body {
   white-space: nowrap;
 }
 
+.ww-agent-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 9.5px;
+}
+
+.ww-agent-round {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.ww-agent-tool {
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.ww-mini-spinner {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ── Upcoming Schedules ── */
 
 .ww-schedule-row {
@@ -10698,6 +10733,16 @@ body {
 
 .wv-enabled-badge:hover {
   filter: brightness(1.2);
+}
+
+.wv-system-badge {
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--accent, #8b5cf6);
+  cursor: default;
+}
+
+.wv-system-badge:hover {
+  filter: none;
 }
 
 /* ── Tags ── */

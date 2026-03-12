@@ -440,6 +440,8 @@ interface OnicodeAPI {
     onWorkflowRunCompleted: (callback: (data: { runId: string; workflowId: string; workflowName: string; status: string; duration: number; error?: string }) => void) => () => void;
     onWorkflowStepStarted: (callback: (data: { runId: string; stepIndex: number; stepName: string; stepType: string; total: number }) => void) => () => void;
     onWorkflowStepCompleted: (callback: (data: { runId: string; stepIndex: number; stepName: string; success: boolean; duration: number; total: number }) => void) => () => void;
+    onWorkflowAgentRound: (callback: (data: { stepName: string; round: number; maxRounds: number; status: string }) => void) => () => void;
+    onWorkflowAgentTool: (callback: (data: { stepName: string; round: number; toolName: string; args?: string; status: string; success?: boolean }) => void) => () => void;
 
     // Automation Messages
     onAutomationMessage: (callback: (data: { id: string; content: string; source: string; title?: string; timestamp: number }) => void) => () => void;
