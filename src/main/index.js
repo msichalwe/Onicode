@@ -22,9 +22,9 @@ const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITI
 const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
 const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
 const { registerKeystoreIPC } = require('./keystore');
-const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg } = require('./scheduler');
+const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg, setProviderConfig: setSchedulerProviderConfig } = require('./scheduler');
 const { registerWorkflowIPC, executeWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
-const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow } = require('./heartbeat');
+const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig } = require('./heartbeat');
 
 let mainWindow = null;
 
@@ -1098,11 +1098,13 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     const MAX_ROUNDS = 75;
     const MAX_AUTO_CONTINUES = 15;
 
-    // Wire provider config for sub-agent + orchestrator use
+    // Wire provider config for sub-agent + orchestrator + automation use
     const provConfig = { id: 'codex', apiKey: accessToken, selectedModel: model };
     setLastProviderConfig(provConfig);
     _lastProviderConfig = provConfig;
     setWorkflowProviderConfig(provConfig);
+    setSchedulerProviderConfig(provConfig);
+    setHeartbeatProviderConfig(provConfig);
     setPermissions(activePermissions);
     setAgentModeRef(agentMode);
     setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks (BEFORE startSession)
@@ -1128,11 +1130,12 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     if (projectPath && chatMessages.length > 0) {
         try {
             const lastUserMsg = [...chatMessages].reverse().find(m => m.role === 'user');
-            if (lastUserMsg?.content) {
+            const lastUserText = lastUserMsg?.content ? (Array.isArray(lastUserMsg.content) ? lastUserMsg.content.filter(b => b.type === 'text').map(b => b.text).join(' ') : lastUserMsg.content) : '';
+            if (lastUserText) {
                 const workingSet = [...(fileContext.readFiles?.keys() || []), ...(fileContext.modifiedFiles?.keys() || [])];
                 // Fire with 2s timeout
                 const preResult = await Promise.race([
-                    preRetrieve(lastUserMsg.content, projectPath, workingSet),
+                    preRetrieve(lastUserText, projectPath, workingSet),
                     new Promise(resolve => setTimeout(() => resolve(null), 2000)),
                 ]);
                 const preContext = assemblePreRetrievedContext(preResult);
@@ -1144,10 +1147,25 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     }
 
     // Convert to Responses API input format
-    const inputItems = chatMessages.map((m) => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content,
-    }));
+    const inputItems = chatMessages.map((m) => {
+        // Handle multimodal content (images) — convert array content to Responses API format
+        if (Array.isArray(m.content)) {
+            const contentParts = m.content.map(block => {
+                if (block.type === 'image_url' && block.image_url?.url) {
+                    return { type: 'input_image', image_url: block.image_url.url };
+                }
+                if (block.type === 'text') {
+                    return { type: 'input_text', text: block.text || '' };
+                }
+                return block;
+            });
+            return { role: m.role === 'assistant' ? 'assistant' : 'user', content: contentParts };
+        }
+        return {
+            role: m.role === 'assistant' ? 'assistant' : 'user',
+            content: m.content,
+        };
+    });
 
     let autoContinueCount = 0;
     const toolsUsed = new Set();
@@ -1746,6 +1764,39 @@ function streamAnthropicSingle(messages, providerConfig, includeTools = true) {
                 });
             }
             return { role: 'assistant', content: contentBlocks };
+        }
+        // Handle multimodal content (images) — convert OpenAI image_url format to Anthropic image format
+        if (Array.isArray(m.content)) {
+            const anthropicBlocks = m.content.map(block => {
+                if (block.type === 'image_url' && block.image_url?.url) {
+                    // Convert data URL to Anthropic's base64 image format
+                    const dataUrl = block.image_url.url;
+                    const match = dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+                    if (match) {
+                        return {
+                            type: 'image',
+                            source: {
+                                type: 'base64',
+                                media_type: match[1],
+                                data: match[2],
+                            },
+                        };
+                    }
+                    // URL-based image (not data URL)
+                    return {
+                        type: 'image',
+                        source: {
+                            type: 'url',
+                            url: dataUrl,
+                        },
+                    };
+                }
+                if (block.type === 'text') {
+                    return { type: 'text', text: block.text || '' };
+                }
+                return block;
+            });
+            return { role: m.role, content: anthropicBlocks };
         }
         return { role: m.role, content: m.content };
     });
@@ -2418,10 +2469,12 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
     // Snapshot task state at request start so completion summary only shows changes
     const _taskStartSnapshot = { ...taskManager.getSummary() };
 
-    // Wire provider config for sub-agent + orchestrator use
+    // Wire provider config for sub-agent + orchestrator + automation use
     setLastProviderConfig(providerConfig);
     _lastProviderConfig = providerConfig;
     setWorkflowProviderConfig(providerConfig);
+    setSchedulerProviderConfig(providerConfig);
+    setHeartbeatProviderConfig(providerConfig);
 
     // Start or continue agentic session (preserves tasks for same project)
     startSession(null, projectPath);
@@ -2530,10 +2583,11 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
     if (projectPath && conversationMessages.length > 0) {
         try {
             const lastUserMsg = [...conversationMessages].reverse().find(m => m.role === 'user');
-            if (lastUserMsg?.content) {
+            const lastUserTextContent = lastUserMsg?.content ? (Array.isArray(lastUserMsg.content) ? lastUserMsg.content.filter(b => b.type === 'text').map(b => b.text).join(' ') : lastUserMsg.content) : '';
+            if (lastUserTextContent) {
                 const workingSet = [...(fileContext.readFiles?.keys() || []), ...(fileContext.modifiedFiles?.keys() || [])];
                 const preResult = await Promise.race([
-                    preRetrieve(lastUserMsg.content, projectPath, workingSet),
+                    preRetrieve(lastUserTextContent, projectPath, workingSet),
                     new Promise(resolve => setTimeout(() => resolve(null), 2000)),
                 ]);
                 const preContext = assemblePreRetrievedContext(preResult);

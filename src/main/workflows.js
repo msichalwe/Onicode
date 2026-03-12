@@ -50,6 +50,30 @@ function setToolSetResolver(fn) { _getToolSet = fn; }
 function setToolDefinitionsGetter(fn) { _getToolDefinitions = fn; }
 function setProviderConfig(config) { _lastProviderConfig = config; }
 
+/**
+ * Helper: call _makeAICall with proper (messages, providerConfig) signature.
+ * Wraps a plain prompt string into a messages array.
+ */
+async function _callAI(prompt) {
+    if (!_makeAICall) throw new Error('AI call function not configured');
+    if (!_lastProviderConfig) throw new Error('No provider configured — send at least one chat message first');
+    const messages = [
+        { role: 'system', content: 'You are a helpful AI assistant running an automated workflow step. Be concise and informative.' },
+        { role: 'user', content: prompt },
+    ];
+    const result = await _makeAICall(messages, _lastProviderConfig, []);
+    if (typeof result === 'string') return result;
+    if (result?.textContent) return result.textContent;
+    if (result?.content) {
+        if (typeof result.content === 'string') return result.content;
+        if (Array.isArray(result.content)) {
+            return result.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+        }
+    }
+    if (result?.choices?.[0]?.message?.content) return result.choices[0].message.content;
+    return JSON.stringify(result).slice(0, 4000);
+}
+
 // ══════════════════════════════════════════
 //  Workflow Concurrency Queue
 // ══════════════════════════════════════════
@@ -484,13 +508,10 @@ async function executeAIPromptStep(step, context) {
         return executeAgenticStep(step, context);
     }
 
-    if (!_makeAICall) {
-        return { success: false, error: 'AI call function not configured' };
-    }
     const prompt = substituteVars(step.prompt || step.payload || '', context);
     try {
-        const response = await _makeAICall(prompt);
-        return { success: true, output: typeof response === 'string' ? response : JSON.stringify(response).slice(0, 4000) };
+        const output = await _callAI(prompt);
+        return { success: true, output: typeof output === 'string' ? output : JSON.stringify(output).slice(0, 4000) };
     } catch (err) {
         return { success: false, error: `AI prompt failed: ${err.message}` };
     }
@@ -1083,12 +1104,11 @@ function setTimer(seconds, action) {
                     break;
                 }
                 case 'ai_prompt': {
-                    if (_makeAICall) {
-                        const response = await _makeAICall(action.prompt || action.body || '');
-                        const text = typeof response === 'string' ? response : JSON.stringify(response).slice(0, 4000);
+                    try {
+                        const text = await _callAI(action.prompt || action.body || '');
                         sendAutomationMessage(text, 'timer', action.title || 'Onicode Timer');
-                    } else {
-                        sendAutomationMessage(action.prompt || action.body || '(AI not configured)', 'timer', action.title || 'Onicode Timer');
+                    } catch (err) {
+                        sendAutomationMessage(`AI prompt failed: ${err.message}`, 'timer', action.title || 'Onicode Timer');
                     }
                     break;
                 }

@@ -306,6 +306,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         localStorage.getItem('onicode-thinking-level') || 'medium'
     );
     const [showModelPicker, setShowModelPicker] = useState(false);
+    const [showAttachMenu, setShowAttachMenu] = useState(false);
+    const attachMenuRef = useRef<HTMLDivElement>(null);
     const sessionStartRef = useRef<number | null>(null);
 
     // ── Refs ──
@@ -323,6 +325,18 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // Keep ref in sync with prop so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
+
+    // Close attach menu on outside click
+    useEffect(() => {
+        if (!showAttachMenu) return;
+        const handler = (e: MouseEvent) => {
+            if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+                setShowAttachMenu(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [showAttachMenu]);
 
     // ── Load from SQLite (primary source) on mount ──
     useEffect(() => {
@@ -1029,15 +1043,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
 
         // Build attachment context — include actual file contents for code/text files
+        // Images with dataUrl are passed separately for vision API support
         let attachmentContext = '';
+        const imageAttachments: Array<{ name: string; dataUrl: string; mimeType?: string }> = [];
         if (currentAttachments && currentAttachments.length > 0) {
             const parts: string[] = ['\n\n---\n**Attached files:**'];
             for (const att of currentAttachments) {
                 const sizeStr = att.size ? (att.size < 1024 ? `${att.size}B` : `${Math.round(att.size / 1024)}KB`) : '';
                 if (att.type === 'link') {
                     parts.push(`\n**Link:** [${att.name}](${att.url})`);
+                } else if (att.type === 'image' && att.dataUrl) {
+                    // Collect images for vision API — send as multimodal content
+                    imageAttachments.push({ name: att.name, dataUrl: att.dataUrl, mimeType: att.mimeType });
+                    parts.push(`\n**Image: \`${att.name}\`** (${sizeStr}) — image included for visual analysis`);
                 } else if (att.type === 'image') {
-                    parts.push(`\n**Image: \`${att.name}\`** (${sizeStr}${att.mimeType ? ', ' + att.mimeType : ''}) — image attached for reference`);
+                    parts.push(`\n**Image: \`${att.name}\`** (${sizeStr}${att.mimeType ? ', ' + att.mimeType : ''}) — image attached but no preview available`);
                 } else if (att.type === 'doc') {
                     parts.push(`\n**Document: \`${att.name}\`** (${sizeStr}${att.mimeType ? ', ' + att.mimeType : ''})${att.content ? '\n```\n' + att.content + '\n```' : ' — binary document, content not directly readable'}`);
                 } else if (att.content) {
@@ -1212,13 +1232,29 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             } catch { /* compaction failed, use original messages */ }
         }
 
+        // Build the final user message — if images are attached, use multimodal content format
+        const finalUserText = userMessage + attachmentContext;
+        let finalUserContent: string | Array<{ type: string; text?: string; image_url?: { url: string }; source?: { type: string; media_type: string; data: string } }>;
+        if (imageAttachments.length > 0) {
+            // Multimodal content: text + image blocks (main process will route to correct API format)
+            finalUserContent = [
+                { type: 'text', text: finalUserText },
+                ...imageAttachments.map(img => ({
+                    type: 'image_url' as const,
+                    image_url: { url: img.dataUrl },
+                })),
+            ];
+        } else {
+            finalUserContent = finalUserText;
+        }
+
         const apiMessages = [
             { role: 'system', content: systemContent },
             ...messagesToSend.map((m) => ({
                 role: m.role === 'ai' ? 'assistant' : 'user',
                 content: m.content,
             })),
-            { role: 'user', content: userMessage + attachmentContext },
+            { role: 'user', content: finalUserContent },
         ];
 
         if (isElectron) {
@@ -2981,14 +3017,6 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     <div className="messages" ref={messagesContainerRef}>
                         {messages.map((message) => (
                             <div key={message.id} className={`message message-${message.role}`}>
-                                {message.role === 'user' && (
-                                    <div className="message-avatar user">
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                            <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
-                                            <circle cx="12" cy="7" r="4" />
-                                        </svg>
-                                    </div>
-                                )}
                                 <div className="message-content-wrapper">
                                     {message.toolSteps && message.toolSteps.length > 0 && renderToolSteps(message.toolSteps)}
                                     {message.role === 'ai' && isQuestionMessage(message.content) ? (
@@ -3357,11 +3385,79 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                         className="file-input-hidden"
                         onChange={handleFileChange}
                     />
-                    <button className="attach-btn" onClick={handleFileSelect} title="Attach file" disabled={isTyping}>
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-                        </svg>
-                    </button>
+                    <div className="attach-menu-anchor" ref={attachMenuRef}>
+                        <button className="attach-btn" onClick={() => setShowAttachMenu(prev => !prev)} title="Attach" disabled={isTyping}>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                            </svg>
+                        </button>
+                        {showAttachMenu && (
+                            <div className="attach-menu">
+                                <button className="attach-menu-item" onClick={() => { setShowAttachMenu(false); fileInputRef.current?.click(); }}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
+                                    <div className="attach-menu-text"><span className="attach-menu-label">Upload Files</span><span className="attach-menu-desc">Images, code, documents</span></div>
+                                </button>
+                                <button className="attach-menu-item" onClick={() => {
+                                    setShowAttachMenu(false);
+                                    const url = prompt('Paste a URL to attach:');
+                                    if (url?.trim()) {
+                                        const trimmed = url.trim();
+                                        if (/^https?:\/\/\S+$/.test(trimmed)) {
+                                            try {
+                                                setAttachments(prev => [...prev, { type: 'link', name: new URL(trimmed).hostname, url: trimmed }]);
+                                            } catch { setAttachments(prev => [...prev, { type: 'link', name: trimmed.slice(0, 40), url: trimmed }]); }
+                                        }
+                                    }
+                                }}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
+                                    <div className="attach-menu-text"><span className="attach-menu-label">Paste URL</span><span className="attach-menu-desc">Attach a web link</span></div>
+                                </button>
+                                <button className="attach-menu-item" onClick={() => {
+                                    setShowAttachMenu(false);
+                                    const repoUrl = prompt('Git repository URL to clone:');
+                                    if (repoUrl?.trim() && window.onicode?.gitClone) {
+                                        const targetPath = prompt('Clone destination (leave empty for default):');
+                                        window.onicode.gitClone(repoUrl.trim(), targetPath?.trim() || undefined).then((r: any) => {
+                                            if (r?.success) {
+                                                setInput(prev => prev + (prev ? ' ' : '') + `Cloned ${repoUrl.trim()} to ${r.path || 'project folder'}`);
+                                            } else {
+                                                setInput(prev => prev + (prev ? ' ' : '') + `Clone failed: ${r?.error || 'unknown error'}`);
+                                            }
+                                        });
+                                    }
+                                }}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg>
+                                    <div className="attach-menu-text"><span className="attach-menu-label">Clone Repository</span><span className="attach-menu-desc">Clone a Git repo</span></div>
+                                </button>
+                                <button className="attach-menu-item" onClick={() => {
+                                    setShowAttachMenu(false);
+                                    requestPanel('files');
+                                }}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
+                                    <div className="attach-menu-text"><span className="attach-menu-label">Browse Files</span><span className="attach-menu-desc">Open file viewer panel</span></div>
+                                </button>
+                                <button className="attach-menu-item" onClick={() => {
+                                    setShowAttachMenu(false);
+                                    if (onChangeScope) onChangeScope('project');
+                                    requestPanel('project');
+                                }}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
+                                    <div className="attach-menu-text"><span className="attach-menu-label">Open Project</span><span className="attach-menu-desc">Switch to project mode</span></div>
+                                </button>
+                                <button className="attach-menu-item" onClick={() => {
+                                    setShowAttachMenu(false);
+                                    const query = prompt('What do you want to research?');
+                                    if (query?.trim()) {
+                                        setInput(prev => (prev ? prev + '\n' : '') + `Deep research: ${query.trim()}`);
+                                        textareaRef.current?.focus();
+                                    }
+                                }}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg>
+                                    <div className="attach-menu-text"><span className="attach-menu-label">Deep Research</span><span className="attach-menu-desc">AI-powered web research</span></div>
+                                </button>
+                            </div>
+                        )}
+                    </div>
                     <textarea
                         ref={textareaRef}
                         value={input}
@@ -3403,7 +3499,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ marginLeft: 3, verticalAlign: 'middle' }}><polyline points="6 9 12 15 18 9" /></svg>
                         </button>
                         {showModelPicker && (() => {
-                            const provider = getActiveProvider();
+                            const activeProvider = getActiveProvider();
                             const DEFAULT_MODELS: Record<string, string[]> = {
                                 codex: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3', 'o3-mini', 'o4-mini', 'codex-mini-latest'],
                                 oniai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini', 'claude-sonnet-4-20250514'],
@@ -3411,33 +3507,39 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                                 anthropic: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-3-5-20241022'],
                                 ollama: ['llama3', 'codellama', 'mistral', 'deepseek-coder'],
                             };
-                            const models = provider?.models?.length ? provider.models : (DEFAULT_MODELS[provider?.id || ''] || ['gpt-4o', 'gpt-4o-mini', 'o3-mini']);
+                            const PROVIDER_NAMES: Record<string, string> = { codex: 'OpenAI', anthropic: 'Anthropic', ollama: 'Ollama', oniai: 'OniAI', openclaw: 'OpenClaw' };
+                            let connectedProviders: ProviderConfig[] = [];
+                            try {
+                                const saved = localStorage.getItem('onicode-providers');
+                                if (saved) connectedProviders = JSON.parse(saved).filter((p: ProviderConfig) => p.connected && (p.apiKey?.trim() || p.id === 'ollama'));
+                            } catch {}
                             return (
-                                <div style={{
-                                    position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
-                                    background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8,
-                                    padding: 4, zIndex: 1000, minWidth: 180, maxHeight: 240, overflow: 'auto',
-                                    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                                }}>
-                                    {models.map((m: string) => (
-                                        <button key={m} onClick={() => {
-                                            try {
-                                                const saved = localStorage.getItem('onicode-providers');
-                                                if (saved) {
-                                                    const providers = JSON.parse(saved);
-                                                    const p = providers.find((pp: { id: string }) => pp.id === provider?.id);
-                                                    if (p) { p.selectedModel = m; localStorage.setItem('onicode-providers', JSON.stringify(providers)); }
-                                                }
-                                            } catch {}
-                                            setShowModelPicker(false);
-                                        }} style={{
-                                            display: 'block', width: '100%', textAlign: 'left', padding: '5px 10px',
-                                            fontSize: 11, borderRadius: 4, border: 'none', cursor: 'pointer',
-                                            background: m === provider?.selectedModel ? 'var(--accent)' : 'transparent',
-                                            color: m === provider?.selectedModel ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
-                                            fontFamily: 'JetBrains Mono, monospace',
-                                        }}>{m}</button>
-                                    ))}
+                                <div className="model-picker-dropdown">
+                                    {connectedProviders.map((prov: ProviderConfig) => {
+                                        const models = prov.models?.length ? prov.models : (DEFAULT_MODELS[prov.id] || []);
+                                        const isActive = prov.id === activeProvider?.id;
+                                        return (
+                                            <div key={prov.id} className="model-picker-group">
+                                                <div className="model-picker-provider">{PROVIDER_NAMES[prov.id] || prov.id}{isActive && <span className="model-picker-active">active</span>}</div>
+                                                {models.map((m: string) => (
+                                                    <button key={`${prov.id}-${m}`} className={`model-picker-item${isActive && m === prov.selectedModel ? ' selected' : ''}`} onClick={() => {
+                                                        try {
+                                                            const saved = localStorage.getItem('onicode-providers');
+                                                            if (saved) {
+                                                                const providers = JSON.parse(saved);
+                                                                // Disable all, enable this one, set model
+                                                                providers.forEach((pp: ProviderConfig) => { pp.enabled = pp.id === prov.id; });
+                                                                const target = providers.find((pp: ProviderConfig) => pp.id === prov.id);
+                                                                if (target) target.selectedModel = m;
+                                                                localStorage.setItem('onicode-providers', JSON.stringify(providers));
+                                                            }
+                                                        } catch {}
+                                                        setShowModelPicker(false);
+                                                    }}>{m}</button>
+                                                ))}
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             );
                         })()}

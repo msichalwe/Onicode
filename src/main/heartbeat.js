@@ -34,6 +34,7 @@ function getStorage() {
 let _mainWindow = null;
 let _makeAICall = null;
 let _executeWorkflow = null;
+let _lastProviderConfig = null;
 
 function setMainWindow(win) {
     _mainWindow = win;
@@ -45,6 +46,33 @@ function setAICallFunction(fn) {
 
 function setWorkflowExecutor(fn) {
     _executeWorkflow = fn;
+}
+
+function setProviderConfig(config) {
+    _lastProviderConfig = config;
+}
+
+/**
+ * Helper: call _makeAICall with proper (messages, providerConfig) signature.
+ */
+async function _callAI(prompt) {
+    if (!_makeAICall) throw new Error('AI call function not configured');
+    if (!_lastProviderConfig) throw new Error('No provider configured — send at least one chat message first');
+    const messages = [
+        { role: 'system', content: 'You are an AI monitoring agent running a heartbeat check. Respond concisely.' },
+        { role: 'user', content: prompt },
+    ];
+    const result = await _makeAICall(messages, _lastProviderConfig, []);
+    if (typeof result === 'string') return result;
+    if (result?.textContent) return result.textContent;
+    if (result?.content) {
+        if (typeof result.content === 'string') return result.content;
+        if (Array.isArray(result.content)) {
+            return result.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+        }
+    }
+    if (result?.choices?.[0]?.message?.content) return result.choices[0].message.content;
+    return JSON.stringify(result).slice(0, 4000);
 }
 
 // ══════════════════════════════════════════
@@ -360,15 +388,10 @@ async function executeHeartbeat() {
 // ── Check executors ──
 
 async function _executeAIEvalCheck(check, result) {
-    if (!_makeAICall) {
-        result.error = 'AI call function not configured';
-        return result;
-    }
-
     const prompt = `You are evaluating a heartbeat check: "${check.name}"\n${check.prompt || ''}\n\nRespond with ONLY a JSON object: { "action_needed": true/false, "reason": "brief reason", "urgency": "low"|"medium"|"high" }`;
 
     try {
-        const response = await _makeAICall(prompt);
+        const response = await _callAI(prompt);
         const jsonMatch = response.match(/\{[\s\S]*?\}/);
         if (jsonMatch) {
             const parsed = JSON.parse(jsonMatch[0]);
@@ -695,4 +718,5 @@ module.exports = {
     setAICallFunction,
     setWorkflowExecutor,
     setMainWindow,
+    setProviderConfig,
 };

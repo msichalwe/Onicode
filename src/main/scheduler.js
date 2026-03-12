@@ -38,10 +38,37 @@ function sendToRenderer(channel, data) {
 let _makeAICall = null;
 let _executeWorkflow = null;
 let _sendAutomationMessageFn = null;
+let _lastProviderConfig = null;
 
 function setAICallFunction(fn) { _makeAICall = fn; }
 function setWorkflowExecutor(fn) { _executeWorkflow = fn; }
 function setSendAutomationMessage(fn) { _sendAutomationMessageFn = fn; }
+function setProviderConfig(config) { _lastProviderConfig = config; }
+
+/**
+ * Helper: call _makeAICall with proper (messages, providerConfig) signature.
+ * Wraps a plain prompt string into a messages array.
+ */
+async function _callAI(prompt) {
+    if (!_makeAICall) throw new Error('AI call function not configured');
+    if (!_lastProviderConfig) throw new Error('No provider configured — send at least one chat message first so the scheduler knows which AI to use');
+    const messages = [
+        { role: 'system', content: 'You are a helpful AI assistant running a scheduled task. Be concise and informative.' },
+        { role: 'user', content: prompt },
+    ];
+    const result = await _makeAICall(messages, _lastProviderConfig, []);
+    // Extract text from various response formats
+    if (typeof result === 'string') return result;
+    if (result?.textContent) return result.textContent;
+    if (result?.content) {
+        if (typeof result.content === 'string') return result.content;
+        if (Array.isArray(result.content)) {
+            return result.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+        }
+    }
+    if (result?.choices?.[0]?.message?.content) return result.choices[0].message.content;
+    return JSON.stringify(result).slice(0, 4000);
+}
 
 /**
  * Send a message to the chat from the scheduler (background).
@@ -283,12 +310,9 @@ async function executeAction(schedule) {
 
     switch (type) {
         case 'ai_prompt': {
-            if (!_makeAICall) {
-                return { success: false, error: 'AI call function not configured' };
-            }
             try {
-                const result = await _makeAICall(action.prompt || action.payload);
-                return { success: true, output: typeof result === 'string' ? result : JSON.stringify(result).slice(0, 2000) };
+                const output = await _callAI(action.prompt || action.payload);
+                return { success: true, output: typeof output === 'string' ? output : JSON.stringify(output).slice(0, 4000) };
             } catch (err) {
                 return { success: false, error: `AI call failed: ${err.message}` };
             }
@@ -980,4 +1004,5 @@ module.exports = {
     setWorkflowExecutor,
     setMainWindow,
     setSendAutomationMessage,
+    setProviderConfig,
 };
