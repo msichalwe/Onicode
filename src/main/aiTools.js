@@ -1001,6 +1001,7 @@ const DEFERRED_TOOL_CATEGORIES = {
     code_intelligence: ['find_symbol', 'find_references', 'list_symbols', 'find_implementation'],
     context_engine: ['get_context_summary', 'explore_codebase', 'get_dependency_graph', 'get_smart_context'],
     verification: ['verify_project'],
+    memory_intelligence: ['memory_smart_search', 'memory_get_related', 'memory_hot_list'],
 };
 
 // Core tools always sent to AI (everything NOT in deferred categories)
@@ -1595,6 +1596,50 @@ const TOOL_DEFINITIONS = [
                     category: { type: 'string', enum: ['preference', 'personal', 'technical', 'decision', 'correction', 'general'], description: 'Category for the fact (default: general)' },
                 },
                 required: ['fact'],
+            },
+        },
+    },
+    // ── Memory Intelligence Tools (OpenViking-inspired) ──
+    {
+        type: 'function',
+        function: {
+            name: 'memory_smart_search',
+            description: 'Intent-aware memory search with hotness ranking. Analyzes your query to generate focused sub-queries, searches across all memory categories, and ranks results by relevance AND how frequently/recently each memory is accessed. Use this instead of memory_search for complex or ambiguous queries.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Natural language query — can be vague ("what does the user prefer") or specific ("their timezone")' },
+                    project_id: { type: 'string', description: 'Optional project ID to scope search' },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_get_related',
+            description: 'Get memories related to a specific memory by following relation links. Memories that were extracted together or are topically connected are automatically linked. Use to explore context around a known fact.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    memory_id: { type: 'number', description: 'The memory ID to find relations for' },
+                },
+                required: ['memory_id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_hot_list',
+            description: 'List the most actively used memories ranked by hotness (access frequency * recency). Shows what knowledge is most important to the current user/project. Use to understand what context matters most.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    category: { type: 'string', description: 'Optional category filter: fact, soul, user, long-term, daily, project' },
+                    limit: { type: 'number', description: 'Max results (default: 15)' },
+                },
             },
         },
     },
@@ -3727,17 +3772,20 @@ async function executeTool(name, args) {
             case 'init_project': {
                 const { name: projName, projectPath, description: projDesc, techStack } = args;
 
-                // GUARD: If a project is already active in this session, don't create another one
+                // GUARD: Only block if trying to re-init the SAME project path
                 if (_currentProjectPath && fs.existsSync(_currentProjectPath)) {
-                    logger.warn('init_project', `Blocked — project already active at ${_currentProjectPath}`);
-                    return {
-                        success: true,
-                        project_path: _currentProjectPath,
-                        project_name: path.basename(_currentProjectPath),
-                        already_registered: true,
-                        message: `A project is already active at ${_currentProjectPath}. Use this project instead.`,
-                        NEXT: 'Do NOT call init_project again. Continue building in the active project.',
-                    };
+                    const expandedCheck = projectPath.replace(/^~/, os.homedir());
+                    if (path.resolve(expandedCheck) === path.resolve(_currentProjectPath)) {
+                        logger.warn('init_project', `Blocked — same project already active at ${_currentProjectPath}`);
+                        return {
+                            success: true,
+                            project_path: _currentProjectPath,
+                            project_name: path.basename(_currentProjectPath),
+                            already_registered: true,
+                            message: `This project is already active at ${_currentProjectPath}. Use this project instead.`,
+                            NEXT: 'Do NOT call init_project again. Continue building in the active project.',
+                        };
+                    }
                 }
 
                 // Expand ~ to home directory — use ~/OniProjects/ by default (avoids macOS TCC permission issues with ~/Documents/)
@@ -3997,6 +4045,67 @@ async function executeTool(name, args) {
                     factKey,
                     category,
                     message: `Saved: "${fact}" — indexed for semantic search.`,
+                };
+            }
+
+            // ── Memory Intelligence Executors (OpenViking-inspired) ──
+
+            case 'memory_smart_search': {
+                const { smartRetrieve } = require('./memory');
+                const query = (args.query || '').trim();
+                if (!query) return { error: 'query is required' };
+
+                const results = await smartRetrieve(query, { projectId: args.project_id });
+                return {
+                    query: args.query,
+                    results: results.map(r => ({
+                        id: r.id,
+                        file: r.file,
+                        category: r.category,
+                        content: (r.abstract || r.snippet || r.content || '').slice(0, 200),
+                        hotness: r.hotness?.toFixed(2) || '0',
+                        score: r.combinedScore?.toFixed(3) || r.score?.toFixed(3) || '0',
+                        updated_at: r.updated_at,
+                    })),
+                    totalResults: results.length,
+                    searchMethod: 'Intent analysis + FTS5 + TF-IDF + hotness ranking',
+                };
+            }
+
+            case 'memory_get_related': {
+                const { getRelatedMemories } = require('./memory');
+                const memId = args.memory_id;
+                if (!memId) return { error: 'memory_id is required' };
+
+                const related = getRelatedMemories(memId);
+                return {
+                    memory_id: memId,
+                    related: related.map(r => ({
+                        id: r.id,
+                        category: r.category,
+                        relation: r.relation_type,
+                        content: (r.abstract || r.content || '').slice(0, 200),
+                        updated_at: r.updated_at,
+                    })),
+                    totalRelated: related.length,
+                };
+            }
+
+            case 'memory_hot_list': {
+                const memStorage = require('./storage').memoryStorage;
+                const memories = memStorage.listByHotness(args.category || null, args.limit || 15);
+                return {
+                    category: args.category || 'all',
+                    memories: memories.map(m => ({
+                        id: m.id,
+                        category: m.category,
+                        key: m.key,
+                        abstract: (m.abstract || m.content || '').slice(0, 150),
+                        hotness: m.hotness?.toFixed(3) || '0',
+                        access_count: m.access_count || 0,
+                        last_accessed: m.last_accessed_at || m.updated_at,
+                    })),
+                    total: memories.length,
                 };
             }
 

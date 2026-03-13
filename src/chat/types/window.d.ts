@@ -249,6 +249,10 @@ interface OnicodeAPI {
     memoryList: () => Promise<{ success: boolean; files?: Array<{ name: string; size: number; modified: string; scope: string; category: string; id?: number }>; error?: string }>;
     memoryDelete: (filename: string) => Promise<{ success: boolean; error?: string }>;
     memorySearch: (query: string, scope?: string) => Promise<{ success: boolean; results?: Array<{ id: number; category: string; key: string; file: string; content: string; snippet: string; updated_at: string }>; error?: string }>;
+    memorySmartSearch: (query: string, context?: { projectId?: string }) => Promise<{ success: boolean; results?: Array<{ id: number; category: string; file: string; content: string; hotness: string; score: string; updated_at: string }>; error?: string }>;
+    memoryRelated: (memoryId: number) => Promise<{ success: boolean; related?: Array<{ id: number; category: string; relation_type: string; content: string; updated_at: string }>; error?: string }>;
+    memoryHotList: (category?: string, limit?: number) => Promise<{ success: boolean; memories?: Array<{ id: number; category: string; key: string; abstract: string; hotness: string; access_count: number; last_accessed: string }>; error?: string }>;
+    memoryCommitSession: (messages: unknown[]) => Promise<{ success: boolean; extracted?: number; saved?: number; merged?: number; skipped?: number; deleted?: number; error?: string }>;
     memoryStats: () => Promise<{ success: boolean; total?: number; byCategory?: Record<string, number>; error?: string }>;
     memoryCompact: (messages: unknown[], keepRecent?: number) => Promise<{ success: boolean; result?: { summary: string; recentMessages: unknown[]; compactedCount: number } | null; error?: string }>;
 

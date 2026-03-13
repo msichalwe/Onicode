@@ -208,6 +208,10 @@ contextBridge.exposeInMainWorld('onicode', {
     memoryList: () => ipcRenderer.invoke('memory-list'),
     memoryDelete: (filename) => ipcRenderer.invoke('memory-delete', filename),
     memorySearch: (query, scope) => ipcRenderer.invoke('memory-search', query, scope),
+    memorySmartSearch: (query, context) => ipcRenderer.invoke('memory-smart-retrieve', query, context),
+    memoryRelated: (memoryId) => ipcRenderer.invoke('memory-related', memoryId),
+    memoryHotList: (category, limit) => ipcRenderer.invoke('memory-hotness-list', category, limit),
+    memoryCommitSession: (messages) => ipcRenderer.invoke('memory-commit-session', messages),
     memoryStats: () => ipcRenderer.invoke('memory-stats'),
     memoryCompact: (messages, keepRecent) => ipcRenderer.invoke('memory-compact', messages, keepRecent),
 

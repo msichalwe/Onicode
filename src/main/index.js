@@ -9,7 +9,7 @@ const { registerTerminalIPC, killAllSessions } = require('./terminal');
 const { registerProjectIPC } = require('./projects');
 const { registerGitIPC } = require('./git');
 const { registerConnectorIPC } = require('./connectors');
-const { registerMemoryIPC, setMainWindow: setMemoryWindow } = require('./memory');
+const { registerMemoryIPC, setMainWindow: setMemoryWindow, setAICallFunction: setMemoryAICall, commitSession: commitMemorySession, smartRetrieve, getRelatedMemories, trackMemoryAccess } = require('./memory');
 const { logger, registerLoggerIPC } = require('./logger');
 const { registerBrowserIPC } = require('./browser');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
@@ -100,6 +100,7 @@ const TOOL_SETS = {
     notebook: new Set(['read_notebook', 'edit_notebook']),
     deploy: new Set(['read_deployment_config', 'deploy_web_app', 'check_deploy_status']),
     memory: new Set(['memory_read', 'memory_write', 'memory_append', 'memory_search', 'memory_save_fact',
+        'memory_smart_search', 'memory_get_related', 'memory_hot_list',
         'conversation_search', 'conversation_recall']),
 };
 
@@ -782,6 +783,12 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
             projectPath = prevPath;
             logger.info('session', `Using projectPath from previous streaming session: ${projectPath}`);
         }
+    }
+
+    // Clear stale project path when starting a fresh conversation with no project context
+    // This prevents init_project from being blocked by a leftover path from a previous conversation
+    if (!projectPath && messages.length <= 2) {
+        _currentProjectPath = null;
     }
 
     // Reload hooks for current project (ensures project-level hooks are fresh)
@@ -1477,14 +1484,22 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 logger.toolCall(fn.name, args, round);
                 let toolResult;
                 if (fn.name === 'init_project' && _currentProjectPath) {
-                    // HARD GUARD: Block duplicate init_project when a project is already active
-                    logger.warn('agent-loop', `Blocked duplicate init_project call — project already active at ${_currentProjectPath}`);
-                    toolResult = {
-                        success: true,
-                        already_registered: true,
-                        project_path: _currentProjectPath,
-                        message: `A project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
-                    };
+                    // Only block if AI is trying to re-init the SAME project path
+                    const requestedPath = (args.projectPath || '').replace(/^~/, os.homedir());
+                    const isSamePath = requestedPath && path.resolve(requestedPath) === path.resolve(_currentProjectPath);
+                    if (isSamePath) {
+                        logger.warn('agent-loop', `Blocked duplicate init_project — same path already active: ${_currentProjectPath}`);
+                        toolResult = {
+                            success: true,
+                            already_registered: true,
+                            project_path: _currentProjectPath,
+                            message: `This project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
+                        };
+                    } else {
+                        // Different project — allow it, clear old project state
+                        logger.info('agent-loop', `Switching from ${_currentProjectPath} to new project: ${requestedPath}`);
+                        toolResult = await executeAnyTool(fn.name, args);
+                    }
                 } else {
                     toolResult = await executeAnyTool(fn.name, args);
                 }
@@ -2423,6 +2438,9 @@ setAICallFunction(makeSubAgentAICall);
 // Wire AI call function to compactor for semantic compaction
 setCompactorAICall(makeSubAgentAICall);
 
+// Wire AI call function to memory intelligence (LLM extraction, dedup, abstracts)
+setMemoryAICall(makeSubAgentAICall);
+
 // Wire AI call function to scheduler, workflows, heartbeat
 setSchedulerAICall(makeSubAgentAICall);
 setWorkflowAICall(makeSubAgentAICall);
@@ -2925,14 +2943,22 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             logger.toolCall(tc.name, args, round);
             let toolResult;
             if (tc.name === 'init_project' && _currentProjectPath) {
-                // HARD GUARD: Block duplicate init_project when a project is already active
-                logger.warn('agent-loop', `Blocked duplicate init_project call — project already active at ${_currentProjectPath}`);
-                toolResult = {
-                    success: true,
-                    already_registered: true,
-                    project_path: _currentProjectPath,
-                    message: `A project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
-                };
+                // Only block if AI is trying to re-init the SAME project path
+                const requestedPath = (args.projectPath || '').replace(/^~/, os.homedir());
+                const isSamePath = requestedPath && path.resolve(requestedPath) === path.resolve(_currentProjectPath);
+                if (isSamePath) {
+                    logger.warn('agent-loop', `Blocked duplicate init_project — same path already active: ${_currentProjectPath}`);
+                    toolResult = {
+                        success: true,
+                        already_registered: true,
+                        project_path: _currentProjectPath,
+                        message: `This project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
+                    };
+                } else {
+                    // Different project — allow it, clear old project state
+                    logger.info('agent-loop', `Switching from ${_currentProjectPath} to new project: ${requestedPath}`);
+                    toolResult = await executeAnyTool(tc.name, args);
+                }
             } else {
                 toolResult = await executeAnyTool(tc.name, args);
             }
@@ -3511,6 +3537,18 @@ function extractAndSaveMemory(messages, providerConfig) {
         }
 
         logger.info('memory', `Auto-extraction: ${learnings.length} learnings, ${projectLearnings.length} project facts, AI used memory: ${aiUsedMemory}`);
+
+        // ── LLM-powered extraction + dedup pipeline (async, non-blocking) ──
+        // Only run if the conversation had enough substance and AI didn't already save memories
+        if (!aiUsedMemory && messages.length >= 4) {
+            commitMemorySession(messages, `session_${Date.now()}`)
+                .then(stats => {
+                    if (stats.saved > 0 || stats.merged > 0) {
+                        logger.info('memory', `LLM pipeline: ${stats.saved} saved, ${stats.merged} merged, ${stats.skipped} skipped, ${stats.deleted} superseded`);
+                    }
+                })
+                .catch(err => logger.warn('memory', `LLM pipeline error: ${err.message}`));
+        }
     } catch (err) {
         console.log('[Memory] Auto-extraction error:', err.message);
     }
@@ -3559,6 +3597,9 @@ const DEFAULT_PERMISSIONS = {
     memory_append: 'allow',
     memory_search: 'allow',
     memory_save_fact: 'allow',
+    memory_smart_search: 'allow',
+    memory_get_related: 'allow',
+    memory_hot_list: 'allow',
     conversation_search: 'allow',
     conversation_recall: 'allow',
     get_context_summary: 'allow',

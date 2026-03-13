@@ -323,6 +323,33 @@ function initSchema() {
     // Migrations for existing databases — add new columns to tasks
     try { db.exec("ALTER TABLE tasks ADD COLUMN blocks TEXT DEFAULT '[]'"); } catch(e) {}
     try { db.exec("ALTER TABLE tasks ADD COLUMN blocked_by TEXT DEFAULT '[]'"); } catch(e) {}
+
+    // ── OpenViking-inspired memory intelligence columns ──
+    try { db.exec("ALTER TABLE memories ADD COLUMN abstract TEXT"); } catch(e) {}
+    try { db.exec("ALTER TABLE memories ADD COLUMN access_count INTEGER DEFAULT 0"); } catch(e) {}
+    try { db.exec("ALTER TABLE memories ADD COLUMN last_accessed_at TEXT"); } catch(e) {}
+    try { db.exec("ALTER TABLE memories ADD COLUMN source_session TEXT"); } catch(e) {}
+
+    // Memory relations (bidirectional links between memories)
+    try {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS memory_relations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                relation_type TEXT NOT NULL DEFAULT 'related',
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(source_id, target_id, relation_type),
+                FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_relations_source ON memory_relations(source_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_relations_target ON memory_relations(target_id);
+        `);
+    } catch(e) {}
+
+    try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_access ON memories(access_count DESC)"); } catch(e) {}
+    try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_accessed ON memories(last_accessed_at DESC)"); } catch(e) {}
 }
 
 /**
@@ -1115,8 +1142,18 @@ const memoryStorage = {
         const dailyToday = d.prepare("SELECT content FROM memories WHERE category = 'daily' AND key = ?").get(today);
         const dailyYesterday = d.prepare("SELECT content FROM memories WHERE category = 'daily' AND key = ?").get(yesterday);
 
-        // Recent facts (last 20 individual facts/preferences)
-        const recentFacts = d.prepare("SELECT content FROM memories WHERE category = 'fact' ORDER BY updated_at DESC LIMIT 20").all();
+        // Recent facts — ranked by hotness (access_count * recency blend)
+        // Hotness formula: 0.6 * normalized_access + 0.4 * recency_decay
+        const recentFacts = d.prepare(`
+            SELECT content, abstract, access_count,
+                   COALESCE(last_accessed_at, updated_at) as last_touch
+            FROM memories WHERE category = 'fact'
+            ORDER BY (
+                0.6 * MIN(COALESCE(access_count, 0), 50) / 50.0 +
+                0.4 * MAX(0, 1.0 - (julianday('now') - julianday(COALESCE(last_accessed_at, updated_at))) / 30.0)
+            ) DESC
+            LIMIT 25
+        `).all();
 
         return {
             soul: soul?.content || null,
@@ -1125,10 +1162,126 @@ const memoryStorage = {
             projectMemory: projectMem?.content || null,
             dailyToday: dailyToday?.content || null,
             dailyYesterday: dailyYesterday?.content || null,
-            recentFacts: recentFacts.map(f => f.content),
+            // Use abstracts when available (L0), fall back to full content
+            recentFacts: recentFacts.map(f => f.abstract || f.content),
             hasSoul: !!soul,
             hasUserProfile: !!user,
         };
+    },
+
+    // ── Access Tracking (OpenViking hotness) ──
+
+    /** Record an access to a memory (for hotness scoring). */
+    trackAccess(id) {
+        const d = getDB();
+        d.prepare(`
+            UPDATE memories SET access_count = COALESCE(access_count, 0) + 1,
+                                last_accessed_at = datetime('now')
+            WHERE id = ?
+        `).run(id);
+    },
+
+    /** Bulk-track access for multiple memory IDs. */
+    trackAccessBulk(ids) {
+        if (!ids || ids.length === 0) return;
+        const d = getDB();
+        const stmt = d.prepare(`
+            UPDATE memories SET access_count = COALESCE(access_count, 0) + 1,
+                                last_accessed_at = datetime('now')
+            WHERE id = ?
+        `);
+        const tx = d.transaction(() => { for (const id of ids) stmt.run(id); });
+        tx();
+    },
+
+    /** Store an L0 abstract for a memory. */
+    setAbstract(id, abstract) {
+        const d = getDB();
+        d.prepare("UPDATE memories SET abstract = ? WHERE id = ?").run(abstract, id);
+    },
+
+    /** Set session source for a memory. */
+    setSource(id, sessionId) {
+        const d = getDB();
+        d.prepare("UPDATE memories SET source_session = ? WHERE id = ?").run(sessionId, id);
+    },
+
+    // ── Relations (bidirectional links) ──
+
+    /** Create a relation between two memories. */
+    addRelation(sourceId, targetId, relationType = 'related') {
+        const d = getDB();
+        try {
+            d.prepare(`
+                INSERT OR IGNORE INTO memory_relations (source_id, target_id, relation_type)
+                VALUES (?, ?, ?)
+            `).run(sourceId, targetId, relationType);
+            // Bidirectional: also insert reverse
+            d.prepare(`
+                INSERT OR IGNORE INTO memory_relations (source_id, target_id, relation_type)
+                VALUES (?, ?, ?)
+            `).run(targetId, sourceId, relationType);
+        } catch { /* ignore constraint violations */ }
+    },
+
+    /** Get all memories related to a given memory ID. */
+    getRelated(memoryId) {
+        const d = getDB();
+        return d.prepare(`
+            SELECT m.*, mr.relation_type FROM memory_relations mr
+            JOIN memories m ON m.id = mr.target_id
+            WHERE mr.source_id = ?
+            ORDER BY m.updated_at DESC LIMIT 20
+        `).all(memoryId);
+    },
+
+    /** Delete relations for a memory. */
+    deleteRelations(memoryId) {
+        const d = getDB();
+        d.prepare('DELETE FROM memory_relations WHERE source_id = ? OR target_id = ?').run(memoryId, memoryId);
+    },
+
+    // ── Similar Memory Search (for deduplication) ──
+
+    /** Find memories in the same category with overlapping content (FTS5 + recency). */
+    findSimilar(content, category, limit = 5) {
+        const d = getDB();
+        try {
+            // Extract key terms for FTS5 query
+            const terms = content.toLowerCase()
+                .replace(/[^a-z0-9\s]/g, ' ')
+                .split(/\s+/)
+                .filter(t => t.length > 3)
+                .slice(0, 8);
+            if (terms.length === 0) return [];
+            const ftsQuery = terms.map(t => `"${t}"*`).join(' OR ');
+            return d.prepare(`
+                SELECT m.*, rank FROM memories_fts fts
+                JOIN memories m ON m.id = fts.rowid
+                WHERE memories_fts MATCH ? AND m.category = ?
+                ORDER BY rank LIMIT ?
+            `).all(ftsQuery, category, limit);
+        } catch {
+            return [];
+        }
+    },
+
+    // ── Hotness-Ranked Listing ──
+
+    /** List memories ranked by hotness score (access frequency * recency). */
+    listByHotness(category, limit = 20) {
+        const d = getDB();
+        let sql = `
+            SELECT *, (
+                0.6 * MIN(COALESCE(access_count, 0), 50) / 50.0 +
+                0.4 * MAX(0, 1.0 - (julianday('now') - julianday(COALESCE(last_accessed_at, updated_at))) / 30.0)
+            ) as hotness FROM memories
+        `;
+        const params = [];
+        if (category) { sql += ' WHERE category = ?'; params.push(category); }
+        sql += ' ORDER BY hotness DESC LIMIT ?';
+        params.push(limit);
+        return d.prepare(sql).all(...params);
     },
 
     /** Get summary stats. */

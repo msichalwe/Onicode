@@ -1817,6 +1817,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 get_orchestration_status: 'Orchestration',
                 glob_files: 'Found', explore_codebase: 'Explored', memory_write: 'Memory',
                 memory_append: 'Memory', memory_search: 'Memory Search', memory_save_fact: 'Remembered',
+                memory_smart_search: 'Smart Search', memory_get_related: 'Related Memories', memory_hot_list: 'Hot Memories',
                 conversation_search: 'Recalled', conversation_recall: 'Loaded Context',
                 webfetch: 'Fetched', websearch: 'Searched',
                 get_context_summary: 'Context', get_system_logs: 'Logs', get_changelog: 'Changelog',
@@ -2118,6 +2119,20 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     const factText = String(a.fact || '').slice(0, 60);
                     const cat = String(a.category || 'general');
                     return `[${cat}] ${factText}`;
+                }
+                case 'memory_smart_search': {
+                    const sq = String(a.query || '').slice(0, 40);
+                    const sTotal = r?.totalResults ?? '?';
+                    return `"${sq}" (${sTotal} results, hotness-ranked)`;
+                }
+                case 'memory_get_related': {
+                    const rTotal = r?.totalRelated ?? '?';
+                    return `memory #${a.memory_id} → ${rTotal} related`;
+                }
+                case 'memory_hot_list': {
+                    const hCat = String(a.category || 'all');
+                    const hTotal = r?.total ?? '?';
+                    return `${hCat} (${hTotal} memories)`;
                 }
                 case 'conversation_search': {
                     const cq = String(a.query || '').slice(0, 40);
