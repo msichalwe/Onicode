@@ -1,0 +1,308 @@
+/* ── Retry Button ── */
+.retry-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 5px 12px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-light);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.retry-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+.retry-button svg {
+  opacity: 0.5;
+  width: 12px;
+  height: 12px;
+}
+
+/* ── Ask User Question Card (Cascade-level) ── */
+.ask-user-card {
+  margin: 8px 0;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  animation: slideUp 0.2s ease;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ask-user-question {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+.ask-user-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ask-user-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  text-align: left;
+  min-width: 100px;
+}
+.ask-user-option:hover {
+  border-color: var(--accent);
+  background: var(--hover);
+}
+.ask-user-option.selected {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+}
+.ask-user-option-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+.ask-user-option-desc {
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+.ask-user-confirm {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 8px;
+  font-family: inherit;
+}
+.ask-user-confirm:hover {
+  filter: brightness(1.1);
+}
+.ask-user-custom {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.ask-user-custom-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: inherit;
+  outline: none;
+}
+.ask-user-custom-input:focus {
+  border-color: var(--accent);
+}
+
+/* ══════════════════════════════════════════
+   Question Dialog — AI Discovery Questions
+   ══════════════════════════════════════════ */
+
+.question-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.question-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.question-item {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  transition: border-color 0.2s;
+}
+
+.question-item.answered {
+  border-color: var(--accent);
+}
+
+.question-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.question-num {
+  font-weight: 700;
+  color: var(--accent);
+  margin-right: 4px;
+}
+
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.question-option {
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-ui);
+  white-space: nowrap;
+}
+
+.question-option:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  background: var(--accent-light);
+}
+
+.question-option.selected {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.question-option-custom {
+  border-style: dashed;
+}
+
+.question-input {
+  margin-top: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.question-input:focus {
+  border-color: var(--accent);
+}
+
+.question-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.question-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.question-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.question-ai-decide {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.question-ai-decide:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.question-submit {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.question-submit:hover {
+  background: var(--accent-hover);
+}
+
+.question-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Submitted state */
+.question-dialog-submitted {
+  opacity: 0.85;
+}
+
+.question-dialog-submitted .question-dialog-header {
+  color: var(--success);
+}
+
+.question-item.locked {
+  pointer-events: none;
+  padding: 8px 12px;
+}
+
+.question-item.locked .question-text {
+  margin-bottom: 0;
+}
+
+.question-answer-badge {
+  display: inline;
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-light);
+  border-radius: var(--radius-full);
+}
+
+.question-option .question-check-icon {
+  margin-right: 2px;
+}
+

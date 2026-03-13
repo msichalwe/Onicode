@@ -1,0 +1,480 @@
+/* ══════════════════════════════════════════
+   Project Widget — Side panel project details
+   ══════════════════════════════════════════ */
+
+.project-widget {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.project-widget-header h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.project-widget-path {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: var(--font-code);
+  word-break: break-all;
+}
+
+.project-widget-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-widget-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.project-widget-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.project-widget-tag {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: var(--radius-full);
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.project-widget-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-code);
+}
+
+.project-widget-docs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.project-widget-doc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+
+.project-widget-doc:hover {
+  background: var(--bg-hover);
+}
+
+/* ── Project File Tree ── */
+
+.project-widget-label-toggle {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+
+.project-widget-label-toggle:hover {
+  color: var(--text-primary);
+}
+
+.project-widget-files {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.project-file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  font-family: "JetBrains Mono", monospace;
+}
+
+.project-file-item.directory {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.project-file-item:hover {
+  background: var(--bg-hover);
+}
+
+.project-file-clickable {
+  cursor: pointer;
+}
+
+.project-file-clickable:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+/* ── Document Viewer Widget ── */
+
+.docviewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.docviewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-height: 36px;
+  gap: 8px;
+}
+
+.docviewer-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.docviewer-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.docviewer-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.docviewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.docviewer-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.docviewer-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.docviewer-save {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.docviewer-save:hover {
+  opacity: 0.9;
+}
+
+.docviewer-body {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+.docviewer-code {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: "JetBrains Mono", monospace;
+  white-space: pre;
+  overflow-x: auto;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.docviewer-code code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.docviewer-textarea {
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: "JetBrains Mono", monospace;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: none;
+  outline: none;
+  resize: none;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.docviewer-textarea::selection {
+  background: var(--accent);
+  color: #fff;
+}
+
+.docviewer-markdown {
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+
+.docviewer-markdown h1, .docviewer-markdown h2, .docviewer-markdown h3 {
+  margin: 16px 0 8px 0;
+  color: var(--text-primary);
+}
+
+.docviewer-markdown p {
+  margin: 8px 0;
+}
+
+.docviewer-markdown code {
+  background: var(--bg-secondary);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.docviewer-markdown pre {
+  background: var(--bg-secondary);
+  padding: 12px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.docviewer-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.docviewer-markdown a {
+  color: var(--accent);
+}
+
+.docviewer-markdown img {
+  max-width: 100%;
+  border-radius: var(--radius);
+}
+
+.docviewer-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  height: 100%;
+}
+
+.docviewer-image img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+}
+
+.docviewer-image svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.docviewer-pdf {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.docviewer-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-secondary);
+}
+
+.docviewer-binary p {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.docviewer-binary-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.docviewer-open-btn {
+  margin-top: 8px;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.docviewer-open-btn:hover {
+  opacity: 0.9;
+}
+
+.docviewer-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.docviewer-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--error, #ef4444);
+  font-size: 13px;
+}
+
+/* ── Task Display in Project Widget ── */
+
+.project-widget-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 32px;
+  text-align: right;
+}
+
+.project-widget-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.project-widget-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.project-widget-task:hover {
+  background: var(--bg-hover);
+}
+
+.project-widget-task.task-high {
+  border-left: 2px solid var(--error);
+  padding-left: 4px;
+}
+
+.project-widget-task.task-low {
+  opacity: 0.7;
+}
+
+.task-status-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+  width: 16px;
+  text-align: center;
+  margin-top: 1px;
+}
+
+.task-done {
+  color: var(--success);
+}
+
+.task-progress {
+  color: var(--accent);
+}
+
+.task-pending {
+  color: var(--text-tertiary);
+}
+
+.task-skipped {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+
+.task-content-done {
+  text-decoration: line-through;
+  opacity: 0.6;
+}

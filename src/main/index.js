@@ -28,6 +28,13 @@ const { registerWorkflowIPC, executeWorkflow, createWorkflow, ensureSystemWorkfl
 const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig, setSendAutomationMessage: setHeartbeatAutomationMsg } = require('./heartbeat');
 const { createTray, destroyTray, updateTrayMenu, hasTray } = require('./tray');
 
+// ── Extracted modules ──
+const { registerProviderIPC, isOAuthToken, decodeJWT, getAccountId } = require('./ai/providers');
+const { registerMiscIPC } = require('./ipc/misc');
+const { registerDataIPC } = require('./ipc/data');
+const { registerPermissionsIPC, DEFAULT_PERMISSIONS, getActivePermissions, getAgentMode, loadProjectPermissions, setAgentMode, isDangerousProtectionEnabled, isAutoCommitEnabled } = require('./ipc/permissions');
+const { registerPlanModeIPC } = require('./ipc/planMode');
+
 let mainWindow = null;
 
 // ══════════════════════════════════════════
@@ -328,78 +335,9 @@ ipcMain.handle('open-external', async (_event, url) => {
     if (url) shell.openExternal(url);
 });
 
-// ══════════════════════════════════════════
-//  JWT + Token Helpers
-// ══════════════════════════════════════════
+// JWT + Token helpers → ./ai/providers.js (isOAuthToken, decodeJWT, getAccountId)
 
-/** Detect if a token is a ChatGPT OAuth JWT vs a standard sk-... API key */
-function isOAuthToken(apiKey) {
-    if (!apiKey) return false;
-    // Standard OpenAI API keys start with sk-
-    if (apiKey.startsWith('sk-')) return false;
-    // JWTs have 3 dot-separated base64 segments
-    const parts = apiKey.split('.');
-    return parts.length === 3;
-}
-
-/** Decode JWT payload to extract chatgpt_account_id */
-function decodeJWT(token) {
-    try {
-        const parts = token.split('.');
-        if (parts.length !== 3) return null;
-        const payload = Buffer.from(parts[1], 'base64').toString('utf-8');
-        return JSON.parse(payload);
-    } catch {
-        return null;
-    }
-}
-
-/** Extract ChatGPT account ID from OAuth JWT */
-function getAccountId(token) {
-    const payload = decodeJWT(token);
-    if (!payload) return null;
-    // The account ID is nested under the auth claim
-    const authClaim = payload['https://api.openai.com/auth'];
-    return authClaim?.chatgpt_account_id || null;
-}
-
-// ══════════════════════════════════════════
-//  PKCE Helpers
-// ══════════════════════════════════════════
-
-function generateRandomString(length) {
-    return crypto.randomBytes(length).toString('hex').slice(0, length);
-}
-
-function generatePKCE() {
-    const verifier = generateRandomString(64);
-    const hash = crypto.createHash('sha256').update(verifier).digest();
-    const challenge = hash
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
-    return { verifier, challenge };
-}
-
-// ══════════════════════════════════════════
-//  Codex OAuth Config (matches Codex CLI)
-// ══════════════════════════════════════════
-
-const CODEX_OAUTH = {
-    clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
-    authorizeEndpoint: 'https://auth.openai.com/oauth/authorize',
-    tokenEndpoint: 'https://auth.openai.com/oauth/token',
-    redirectUri: 'http://localhost:1455/auth/callback',
-    scope: 'openid profile email offline_access',
-    audience: 'https://api.openai.com/v1',
-};
-
-// ══════════════════════════════════════════
-//  IPC: Codex OAuth — generate PKCE + auth URL
-// ══════════════════════════════════════════
-
-let pendingOAuth = null;
+// PKCE + OAuth config + handlers → ./ai/providers.js
 
 ipcMain.handle('codex-oauth-get-auth-url', async () => {
     const pkce = generatePKCE();

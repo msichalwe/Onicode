@@ -1,0 +1,154 @@
+/* ── Right Panel ── */
+.main-content.with-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+.right-panel {
+  width: 420px;
+  min-width: 320px;
+  max-width: 50vw;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  transition:
+    background var(--transition-theme),
+    border-color var(--transition-theme);
+  animation: panelSlideIn 0.25s ease-out;
+}
+
+@keyframes panelSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.right-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.right-panel-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.panel-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.panel-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.panel-tab.active {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.right-panel-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.panel-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* (panel-open-toggle removed — unified header handles this) */
+
+.right-panel-body {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+
+/* ══════════════════════════════════════════
+   Right Panel Collapse / Retract
+   ══════════════════════════════════════════ */
+
+.right-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.panel-collapse {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel-collapse:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.right-panel-collapsed {
+  width: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
+}
+
+.right-panel-collapsed .right-panel-header {
+  flex-direction: column;
+  padding: 8px 4px;
+  gap: 4px;
+}
+
+.right-panel-collapsed .right-panel-tabs {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.right-panel-collapsed .right-panel-actions {
+  flex-direction: column;
+  gap: 2px;
+}

@@ -1,0 +1,192 @@
+/* ══════════════════════════════════════════
+   Project Mode Bar — Top bar when project is active
+   ══════════════════════════════════════════ */
+
+.project-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  min-height: 34px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 50;
+}
+
+.project-mode-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-right: 4px;
+}
+
+.project-mode-id {
+  color: var(--text-tertiary);
+  font-family: var(--font-code);
+  font-size: 11px;
+}
+
+.project-mode-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.project-mode-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--font-ui);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.project-mode-action:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.project-mode-action.primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.project-mode-action.primary:hover {
+  background: var(--accent-hover);
+}
+
+.project-mode-stats {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-code);
+  font-size: 11px;
+}
+
+.project-mode-stat-add {
+  color: var(--success);
+}
+
+.project-mode-stat-del {
+  color: var(--error);
+}
+
+/* ── Project Mode Selector & Dropdown ── */
+
+.project-mode-selector {
+  position: relative;
+}
+
+.project-mode-name-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.project-mode-name-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+}
+
+.project-mode-chevron {
+  opacity: 0.5;
+  transition: transform 0.15s;
+}
+
+.project-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  z-index: 200;
+  padding: 4px;
+  animation: dropdownFadeIn 0.12s ease-out;
+}
+
+@keyframes dropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.project-dropdown-header {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 6px 8px 4px;
+}
+
+.project-dropdown-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: 8px;
+  text-align: center;
+}
+
+.project-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.project-dropdown-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.project-dropdown-exit {
+  color: var(--error);
+}
+
+.project-dropdown-exit:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.project-dropdown-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}

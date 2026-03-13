@@ -1,0 +1,603 @@
+/* Agent widget enhancements */
+.agents-current-status {
+  font-size: 11px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agents-section {
+  margin-bottom: 8px;
+}
+
+.agents-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  padding: 4px 12px;
+  font-weight: 600;
+}
+
+.agent-item-result {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-kill-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.agent-kill-btn:hover {
+  color: var(--error, #ef4444);
+  background: var(--bg-hover);
+}
+
+/* Agent role badges */
+.agent-role-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.agent-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Orchestration progress */
+.orchestration-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.orchestration-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-hover);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.orchestration-bar-fill {
+  height: 100%;
+  background: var(--accent, #10b981);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.orchestration-counts {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.orchestration-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.orch-node {
+  font-size: 0.65rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.orch-node-done {
+  background: color-mix(in srgb, var(--accent, #10b981) 15%, transparent);
+  color: var(--accent, #10b981);
+}
+
+.orch-node-running {
+  background: color-mix(in srgb, #3b82f6 15%, transparent);
+  color: #3b82f6;
+  animation: pulse-subtle 1.5s ease-in-out infinite;
+}
+
+.orch-node-error {
+  background: color-mix(in srgb, var(--error, #ef4444) 15%, transparent);
+  color: var(--error, #ef4444);
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ══════════════════════════════════════════
+   Agent Status Indicator
+   ══════════════════════════════════════════ */
+
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-bottom: 2px;
+  animation: agent-status-in 0.2s ease-out;
+}
+
+@keyframes agent-status-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.agent-status-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: agent-pulse 1.5s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes agent-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+.agent-status-thinking .agent-status-indicator {
+  background: #f59e0b;
+}
+
+.agent-status-streaming .agent-status-indicator {
+  background: var(--accent);
+}
+
+.agent-status-continuing .agent-status-indicator {
+  background: #8b5cf6;
+  animation: agent-pulse 0.8s ease-in-out infinite;
+}
+
+.agent-status-sub-agent .agent-status-indicator {
+  background: #06b6d4;
+}
+
+.agent-status-executing .agent-status-indicator {
+  background: #22c55e;
+}
+
+.agent-status-text {
+  flex: 1;
+  font-weight: 500;
+  font-size: 11.5px;
+}
+
+.agent-status-round {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+}
+
+
+/* ── Agent Runtime ── */
+.runtime-active-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--success);
+  color: #fff;
+  font-weight: 600;
+  animation: pulse 2s ease infinite;
+}
+
+.runtime-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 16px 8px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.runtime-tab {
+  flex: 1;
+  padding: 6px 8px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: all var(--transition-fast);
+}
+
+.runtime-tab:hover {
+  background: var(--bg-hover);
+}
+
+.runtime-tab.active {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.runtime-tab-count {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+}
+
+.runtime-tab.active .runtime-tab-count {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.runtime-section {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px;
+}
+
+.runtime-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.runtime-empty p {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.runtime-empty span {
+  font-size: 12px;
+  max-width: 280px;
+}
+
+.runtime-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.runtime-item {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+}
+
+.runtime-item-running {
+  border-left: 3px solid var(--success);
+}
+
+.runtime-item-done {
+  border-left: 3px solid var(--text-tertiary);
+  opacity: 0.7;
+}
+
+.runtime-item-error {
+  border-left: 3px solid var(--error);
+}
+
+.runtime-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.runtime-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.runtime-status-dot.running {
+  background: var(--success);
+  animation: pulse 2s ease infinite;
+}
+
+.runtime-status-dot.done {
+  background: var(--text-tertiary);
+}
+
+.runtime-status-dot.error {
+  background: var(--error);
+}
+
+.runtime-item-id {
+  font-family: var(--font-code);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.runtime-item-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.runtime-item-task {
+  font-size: 12px;
+  color: var(--text-primary);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.runtime-item-result {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  font-family: var(--font-code);
+  white-space: pre-wrap;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.runtime-item-cmd {
+  font-family: var(--font-code);
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--bg-code);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.runtime-item-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+.runtime-port {
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* ══════════════════════════════════════════
+   Agent Runtime Widget (Right Panel)
+   ══════════════════════════════════════════ */
+
+/* ── Tasks Widget (side panel) ── */
+.widget-tasks {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.tasks-summary {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: 8px;
+}
+
+.tasks-summary-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.tasks-summary-count {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.tasks-summary-active {
+  color: var(--accent);
+}
+
+.tasks-progress-bar {
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.tasks-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+
+.widget-agents {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px;
+  gap: 8px;
+}
+
+.agents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.agents-running-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success);
+  background: rgba(16, 185, 129, 0.1);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+.agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.agent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  transition: background 0.15s;
+}
+
+.agent-item:hover {
+  background: var(--bg-hover);
+}
+
+.agent-item-running {
+  border-left: 2px solid var(--success);
+}
+
+.agent-item-done {
+  opacity: 0.6;
+}
+
+.agent-item-error {
+  border-left: 2px solid var(--error);
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-tertiary);
+}
+
+.agent-dot.running {
+  background: var(--success);
+  box-shadow: 0 0 4px var(--success);
+  animation: pulse 1.5s infinite;
+}
+
+.agent-dot.done {
+  background: var(--text-tertiary);
+}
+
+.agent-dot.error {
+  background: var(--error);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.agent-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-item-id {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+.agent-item-task {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-item-cmd {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-port {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--success);
+  font-weight: 600;
+}
+
+.agent-tool-count {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  padding: 1px 5px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-full);
+  font-weight: 500;
+}
+
+.agent-tools-list {
+  padding: 4px 8px 4px 24px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ── Git PRs Section (widget) ── */
+.git-prs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── Attachments Widget ── */
+.widget-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.tasks-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 2px;
+}
+

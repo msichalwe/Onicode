@@ -1,0 +1,383 @@
+/* ── App Layout ── */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Titlebar Drag Region ── */
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-height);
+  -webkit-app-region: drag;
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* ── Sidebar ── */
+.sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 8px;
+  gap: 4px;
+  transition:
+    background var(--transition-theme),
+    border-color var(--transition-theme);
+  z-index: 10;
+}
+
+.sidebar-logo {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  filter: grayscale(0.2);
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 0 8px;
+}
+
+.sidebar-btn {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+  font-size: 10px;
+  font-family: var(--font-ui);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  -webkit-app-region: no-drag;
+}
+
+.sidebar-btn svg {
+  width: 22px;
+  height: 22px;
+  stroke-width: 1.8;
+  transition: all var(--transition-fast);
+}
+
+.sidebar-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sidebar-btn.active {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.sidebar-btn.active svg {
+  stroke: var(--accent);
+}
+
+.sidebar-badge {
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--accent);
+  color: var(--text-on-accent, #fff);
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 8px;
+  padding: 0 4px;
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+
+.sidebar-spacer {
+  flex: 1;
+}
+
+.sidebar-bottom {
+  padding: 0 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+/* ── Main Content ── */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Chat View ── */
+.chat-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  width: 100%;
+}
+
+/* ── Unified App Header ── */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  padding-left: 80px; /* Clear macOS traffic lights (close/min/max) */
+  height: var(--titlebar-height);
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-light);
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+  z-index: 60;
+  position: relative;
+  transition: background var(--transition-theme), border-color var(--transition-theme);
+}
+
+.app-header > * {
+  -webkit-app-region: no-drag;
+}
+
+.app-header-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: -0.01em;
+}
+
+.app-header-project {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-header-project-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.app-header-project-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.app-header-branch {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-family: var(--font-code);
+  color: var(--text-tertiary);
+}
+
+.app-header-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 200px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 200;
+  padding: 4px;
+}
+
+.app-header-dropdown-empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.app-header-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 0.1s;
+}
+
+.app-header-dropdown-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.app-header-dropdown-exit {
+  color: var(--error);
+}
+
+.app-header-dropdown-exit:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error);
+}
+
+.app-header-dropdown-divider {
+  height: 1px;
+  background: var(--border-light);
+  margin: 4px 0;
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.app-header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.app-header-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.app-header-new {
+  color: var(--text-secondary);
+}
+
+
+/* ── View Layers (keep ChatView mounted) ── */
+
+.view-layer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.view-layer.view-hidden {
+  display: none;
+}
+
+.view-layer.view-active {
+  display: flex;
+  flex: 1;
+}
+
+/* ── Scope Tag Bar ── */
+
+.scope-tag-bar {
+  display: flex;
+  align-items: center;
+  padding: 0 4px 6px;
+}
+
+.scope-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  white-space: nowrap;
+  animation: scopeTagIn 0.15s ease-out;
+}
+
+@keyframes scopeTagIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.scope-tag-project {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.scope-tag-documents {
+  background: rgba(168, 85, 247, 0.12);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.25);
+}
+
+.scope-tag-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.1s;
+}
+
+.scope-tag-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}

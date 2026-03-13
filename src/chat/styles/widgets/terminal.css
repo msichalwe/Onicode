@@ -1,0 +1,275 @@
+/* ── Widget: Terminal ── */
+.widget-terminal {
+  flex: 1;
+  background: var(--bg-code);
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 12px;
+  overflow-y: auto;
+  cursor: text;
+}
+
+.terminal-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.terminal-input-line {
+  display: flex;
+  align-items: center;
+}
+
+.terminal-prompt {
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.terminal-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: 13px;
+  outline: none;
+  caret-color: var(--accent);
+}
+
+/* ── Widget: Browser ── */
+.widget-browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.browser-toolbar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.browser-url {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  outline: none;
+}
+
+.browser-url:focus {
+  border-color: var(--accent);
+}
+
+/* ── Widget: Placeholder ── */
+.widget-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.widget-placeholder p {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.widget-placeholder span {
+  font-size: 12px;
+}
+
+/* ── Terminal Output ── */
+.terminal-output {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ══════════════════════════════════════════
+   Terminal Session Tracking (Cascade-like)
+   ══════════════════════════════════════════ */
+
+/* Terminal widget — unified layout: statusbar → sessions → output */
+.widget-terminal-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.widget-terminal-container .widget-terminal {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Compact status bar at the top */
+.terminal-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.terminal-statusbar-running {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.terminal-statusbar-proc {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-statusbar-proc:hover,
+.terminal-statusbar-proc.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb, 100, 100, 255), 0.08);
+}
+
+.terminal-statusbar-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.terminal-statusbar-toggle:hover {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+
+/* Completed sessions list (collapsible) */
+.terminal-sessions-list {
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  max-height: 120px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.terminal-session-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.terminal-session-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.terminal-session-active {
+  background: var(--bg-tertiary);
+  border-left: 2px solid var(--accent);
+}
+
+.terminal-session-status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 10px;
+}
+
+.terminal-session-status.done { color: #22c55e; }
+.terminal-session-status.error { color: var(--error, #ef4444); }
+
+.terminal-session-cmd {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.terminal-session-duration {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.terminal-session-exit {
+  color: var(--error, #ef4444);
+  font-size: 10px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+/* Label shown when viewing a specific AI session's output */
+.terminal-viewing-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 8px;
+  background: rgba(var(--accent-rgb, 100, 100, 255), 0.1);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.terminal-viewing-label code {
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-viewing-label button {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.terminal-viewing-label button:hover {
+  color: var(--text-primary);
+}
+
+.file-tree-indent {
+  padding-left: 12px;
+}

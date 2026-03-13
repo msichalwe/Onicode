@@ -1,0 +1,177 @@
+/* ── Context Tracker ── */
+.context-tracker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  padding: 4px 24px;
+  cursor: default;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.context-model {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.context-divider {
+  opacity: 0.4;
+}
+
+.context-warning {
+  color: var(--warning, #f59e0b);
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+/* ── Model Picker Dropdown ── */
+.model-picker-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  z-index: 1000;
+  min-width: 200px;
+  max-height: 300px;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  animation: attachMenuIn 0.12s ease-out;
+}
+
+.model-picker-group {
+  padding: 2px 0;
+}
+
+.model-picker-group + .model-picker-group {
+  border-top: 1px solid var(--border-light);
+  margin-top: 2px;
+  padding-top: 4px;
+}
+
+.model-picker-provider {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  padding: 4px 8px 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-picker-active {
+  font-size: 8px;
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.model-picker-refresh {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  opacity: 0.6;
+  transition: all 0.15s;
+}
+
+.model-picker-refresh:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.model-picker-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 5px;
+  border: none;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-primary);
+  transition: background 0.1s;
+}
+
+.model-picker-item:hover {
+  background: var(--bg-hover);
+}
+
+.model-picker-item.selected {
+  background: var(--accent);
+  color: var(--text-on-accent, #fff);
+}
+
+/* ── Thinking Level Control ── */
+.thinking-level-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.thinking-level-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-secondary);
+}
+
+.thinking-level-label {
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.thinking-level-low {
+  color: var(--text-tertiary);
+}
+
+.thinking-level-medium {
+  color: var(--accent);
+}
+
+.thinking-level-high {
+  color: var(--warning, #f59e0b);
+}
+
+
+/* Session timer */
+.session-timer {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-code);
+  padding: 0;
+  margin-left: auto;
+  font-weight: 500;
+  opacity: 0.7;
+}
