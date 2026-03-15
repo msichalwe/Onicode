@@ -7,6 +7,12 @@ import type {
     MermaidData, FlowchartData, TimelineData, KanbanData,
     MindmapData, DashboardData, SVGChartData,
 } from './types';
+import {
+    SimulationWidget, InteractiveGraphWidget, DataTableWidget,
+    ComparisonWidget, PricingWidget, AccordionWidget, TabsWidget,
+    SlidesWidget, RatingWidget, CountdownWidget, ColorPaletteWidget,
+    FloorPlanWidget, EquationWidget, VideoWidget, DocumentWidget,
+} from './InteractiveWidgets';
 
 interface WidgetRendererProps {
     widget: ChatWidget;
@@ -42,6 +48,21 @@ export default function WidgetRenderer({ widget, onAction, onUpdate }: WidgetRen
         case 'mindmap': return <MindmapWidget data={widget.data as unknown as MindmapData} />;
         case 'dashboard': return <DashboardWidget data={widget.data as unknown as DashboardData} onAction={onAction} />;
         case 'svg-chart': return <SVGChartWidget data={widget.data as unknown as SVGChartData} />;
+        case 'simulation': return <SimulationWidget data={widget.data} />;
+        case 'interactive-graph': return <InteractiveGraphWidget data={widget.data} />;
+        case 'data-table': return <DataTableWidget data={widget.data} />;
+        case 'comparison': return <ComparisonWidget data={widget.data} />;
+        case 'pricing': return <PricingWidget data={widget.data} />;
+        case 'accordion': return <AccordionWidget data={widget.data} />;
+        case 'tabs': return <TabsWidget data={widget.data} />;
+        case 'slides': return <SlidesWidget data={widget.data} />;
+        case 'rating': return <RatingWidget data={widget.data} />;
+        case 'countdown': return <CountdownWidget data={widget.data} />;
+        case 'color-palette': return <ColorPaletteWidget data={widget.data} />;
+        case 'floor-plan': return <FloorPlanWidget data={widget.data} />;
+        case 'equation': return <EquationWidget data={widget.data} />;
+        case 'video': return <VideoWidget data={widget.data} />;
+        case 'document': return <DocumentWidget data={widget.data} />;
         default: return null;
     }
 }

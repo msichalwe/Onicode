@@ -52,7 +52,23 @@ export type ChatWidgetType =
     | 'kanban'
     | 'mindmap'
     | 'dashboard'
-    | 'svg-chart';
+    | 'svg-chart'
+    // Interactive widgets (v2)
+    | 'simulation'
+    | 'interactive-graph'
+    | 'data-table'
+    | 'comparison'
+    | 'pricing'
+    | 'accordion'
+    | 'tabs'
+    | 'slides'
+    | 'rating'
+    | 'countdown'
+    | 'color-palette'
+    | 'floor-plan'
+    | 'equation'
+    | 'video'
+    | 'document';
 
 export interface ChatWidget {
     id: string;

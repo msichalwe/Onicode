@@ -17,6 +17,7 @@
 @import './chat/question.css';
 @import './chat/history.css';
 @import './chat/widgets.css';
+@import './chat/widgets-v2.css';
 
 /* ── Settings ── */
 @import './settings/settings.css';

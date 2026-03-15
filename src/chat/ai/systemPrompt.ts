@@ -1163,9 +1163,24 @@ You have \`show_widget\` — renders rich interactive cards inline in the chat. 
 - Kanban boards → \`show_widget({ type: "kanban", data: { columns: [{name,items:[{id,title,tag?}]}] } })\`
 - Mind maps → \`show_widget({ type: "mindmap", data: { root: {label, children: [{label, children?}]} } })\`
 - Dashboards → \`show_widget({ type: "dashboard", data: { widgets: [{type,data,span?}] } })\` (embeds other widgets)
-- Line/area/scatter/donut charts → \`show_widget({ type: "svg-chart", data: { type: "line", labels, datasets: [{label,values,color?}] } })\`
+- Line/area/scatter/donut charts → \`show_widget({ type: "svg-chart", type: "line", labels, datasets: [{label,values,color?}] })\`
+- Simulations (spread, growth) → \`show_widget({ type: "simulation", title, simulation_type: "spread"|"growth", grid_size: 20, speed: 2 })\`
+- Interactive hover graph → \`show_widget({ type: "interactive-graph", title, labels, datasets: [{label,values,color?}] })\`
+- Sortable data table → \`show_widget({ type: "data-table", title, columns: [{key,label}], rows: [{col:val}] })\`
+- Feature comparison → \`show_widget({ type: "comparison", items: [{name,values:{feature:val}}], features: ["f1","f2"] })\`
+- Pricing tiers → \`show_widget({ type: "pricing", plans: [{name,price,period,features:["a","b"],featured?}] })\`
+- Expandable FAQ → \`show_widget({ type: "accordion", items: [{title,content}] })\`
+- Tabbed content → \`show_widget({ type: "tabs", tabs: [{title,content}] })\`
+- Slide deck → \`show_widget({ type: "slides", slides: [{title,content,image?}] })\`
+- Star ratings → \`show_widget({ type: "rating", title, items: [{label,rating}], max: 5 })\` or interactive single rating
+- Event countdown → \`show_widget({ type: "countdown", title, date: "2025-12-31T00:00:00" })\`
+- Color palette → \`show_widget({ type: "color-palette", colors: [{color:"#hex",name}] })\`
+- Floor plan → \`show_widget({ type: "floor-plan", rooms: [{name,type,x,y,width,height,size?}] })\`
+- Math equations → \`show_widget({ type: "equation", equations: [{expr,label?}] })\`
+- Video embed → \`show_widget({ type: "video", url: "youtube-or-direct-url", title })\`
+- Document viewer → \`show_widget({ type: "document", title, pages: [{heading,content}] })\` or { content }
 
-**RULE:** If the response contains structured data (weather, stats, git, events, progress, relationships, processes, hierarchies), ALWAYS use show_widget instead of plain text. For diagrams and flows, prefer flowchart/timeline/mindmap widgets. Widgets make the chat interactive and visually rich.`);
+**RULE:** If the response contains structured data, ALWAYS use show_widget. 37 widget types available — pick the best match. For comparisons use comparison/pricing, for lists use accordion/tabs, for data use data-table/interactive-graph, for processes use simulation/flowchart/timeline. Widgets make the chat interactive and visually rich.`);
 
     // ── MCP Server Catalog & External Tools ──
     parts.push(`
