@@ -2,7 +2,7 @@ import React from 'react';
 import { WELCOME_SUGGESTIONS } from './constants';
 import type { WelcomeScreenProps } from './types';
 
-export default function WelcomeScreen({ conversations, onSuggestionClick, onShowHistory }: WelcomeScreenProps) {
+export default function WelcomeScreen({ onSuggestionClick }: WelcomeScreenProps) {
     return (
         <div className="welcome">
             <div className="welcome-logo">
@@ -25,15 +25,6 @@ export default function WelcomeScreen({ conversations, onSuggestionClick, onShow
                     <button key={s} className="welcome-chip" onClick={() => onSuggestionClick(s)}>{s}</button>
                 ))}
             </div>
-            {conversations.length > 0 && (
-                <button className="history-btn" onClick={onShowHistory}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <circle cx="12" cy="12" r="10" />
-                        <polyline points="12 6 12 12 16 14" />
-                    </svg>
-                    View chat history ({conversations.length})
-                </button>
-            )}
         </div>
     );
 }

@@ -422,9 +422,7 @@ export interface ContextBarProps {
 }
 
 export interface WelcomeScreenProps {
-    conversations: Conversation[];
     onSuggestionClick: (suggestion: string) => void;
-    onShowHistory: () => void;
 }
 
 export interface ConversationHistoryProps {
