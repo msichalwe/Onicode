@@ -12,8 +12,14 @@ import RightPanel, { type PanelState, type WidgetType } from './components/Right
 import { type ActiveProject } from './components/ProjectModeBar';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 
-export type ChatScope = 'general' | 'project' | 'documents';
+export type ChatScope = 'general' | 'project' | 'workmate' | 'documents';
 export type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
+export type OnicodeMode = 'onichat' | 'workmate' | 'projects';
+
+export interface WorkmateFolder {
+    path: string;
+    name: string;
+}
 
 import { isElectron } from './utils';
 
@@ -56,6 +62,10 @@ function AppContent() {
     const [panel, setPanel] = useState<PanelState>({ widget: null });
     const [activeProject, setActiveProject] = useState<ActiveProject | null>(null);
     const [chatScope, setChatScope] = useState<ChatScope>('general');
+    const [mode, setMode] = useState<OnicodeMode>(() => (localStorage.getItem('onicode-mode') as OnicodeMode) || 'onichat');
+    const [workmateFolder, setWorkmateFolder] = useState<WorkmateFolder | null>(() => {
+        try { const s = localStorage.getItem('onicode-workmate-folder'); return s ? JSON.parse(s) : null; } catch { return null; }
+    });
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [showExitWarning, setShowExitWarning] = useState(false);
     const [projectDropdown, setProjectDropdown] = useState(false);
