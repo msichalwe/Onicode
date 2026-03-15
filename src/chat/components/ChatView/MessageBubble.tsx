@@ -18,6 +18,30 @@ export default function MessageBubble({
 }: MessageBubbleProps) {
     const handleMarkdownClick = useCallback((e: React.MouseEvent) => {
         const target = e.target as HTMLElement;
+
+        // Check if clicked on a file path link (data-filepath attribute)
+        const fileLink = target.closest('[data-filepath]') as HTMLElement | null;
+        if (fileLink) {
+            e.preventDefault();
+            const filePath = fileLink.getAttribute('data-filepath') || '';
+            const fileName = filePath.split('/').pop() || filePath;
+            window.dispatchEvent(new CustomEvent('onicode-open-file', { detail: { path: filePath, name: fileName } }));
+            return;
+        }
+
+        // Check if clicked on a <code> element that looks like a file path
+        if (target.tagName === 'CODE' || target.closest('code')) {
+            const codeEl = target.tagName === 'CODE' ? target : target.closest('code')!;
+            const text = codeEl.textContent || '';
+            if (/^[\/~][\w\-.\/ ]+\.\w{1,10}$/.test(text.trim()) || text.trim().startsWith('/Users/') || text.trim().startsWith('/home/')) {
+                e.preventDefault();
+                const filePath = text.trim().replace(/^~/, '/Users/' + (window.onicode?.platform === 'darwin' ? '' : ''));
+                const fileName = filePath.split('/').pop() || filePath;
+                window.dispatchEvent(new CustomEvent('onicode-open-file', { detail: { path: filePath, name: fileName } }));
+                return;
+            }
+        }
+
         const anchor = target.closest('a');
         if (anchor && anchor.href) {
             e.preventDefault();
@@ -30,7 +54,12 @@ export default function MessageBubble({
     }, []);
 
     const renderMessageContent = (content: string) => {
-        const html = marked.parse(content, { breaks: true, gfm: true }) as string;
+        let html = marked.parse(content, { breaks: true, gfm: true }) as string;
+        // Linkify file paths in <code> tags — make them clickable
+        html = html.replace(/<code>(\/[\w\-.\/ ]+\.\w{1,10})<\/code>/g, (_match, path) => {
+            const name = path.split('/').pop();
+            return `<code class="file-path-link" data-filepath="${path}" title="Click to open in viewer">${name}</code>`;
+        });
         return <div className="markdown-body" onClick={handleMarkdownClick} dangerouslySetInnerHTML={{ __html: html }} />;
     };
 

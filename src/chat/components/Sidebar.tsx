@@ -122,22 +122,26 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
 //  Recent Chats — per-mode conversation history
 // ══════════════════════════════════════════
 
+// Matches SQLite columns from conversationStorage.list() — all snake_case
 interface RecentChat {
     id: string;
     title: string;
     updated_at: number;
+    created_at: number;
     scope?: string;
+    project_id?: string;
     project_name?: string;
-    mode?: string;
 }
 
 const MAX_RECENTS = 15;
 
 function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
     const [chats, setChats] = useState<RecentChat[]>([]);
+    const [loading, setLoading] = useState(true);
 
     const loadChats = useCallback(async () => {
-        if (!isElectron || !window.onicode?.conversationList) return;
+        if (!isElectron || !window.onicode?.conversationList) { setLoading(false); return; }
+        setLoading(true);
         try {
             const res = await window.onicode.conversationList(50, 0);
             if (res.success && res.conversations) {
@@ -145,23 +149,26 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
                 // Filter by mode — lenient: no scope = onichat
                 const filtered = all.filter(c => {
                     if (mode === 'projects') return !!(c.project_name || c.scope === 'project');
-                    if (mode === 'workpal') return c.scope === 'workpal';
+                    if (mode === 'workpal') return c.scope === 'workpal' || c.scope === 'workmate';
                     // OniChat: everything without explicit project/workpal scope
-                    return c.scope !== 'project' && c.scope !== 'workpal' && !c.project_name;
+                    return c.scope !== 'project' && c.scope !== 'workpal' && c.scope !== 'workmate' && !c.project_name;
                 });
                 setChats(filtered.slice(0, MAX_RECENTS));
             }
         } catch { /* ignore */ }
+        setLoading(false);
     }, [mode]);
 
     useEffect(() => { loadChats(); }, [loadChats]);
 
-    // Refresh on events (new chat, save, delete, history clear)
+    // Refresh on events + periodic refresh
     useEffect(() => {
         const handler = () => setTimeout(loadChats, 300);
         const events = ['onicode-new-chat', 'onicode-conversation-saved', 'onicode-conversation-deleted', 'onicode-conversations-cleared'];
         events.forEach(e => window.addEventListener(e, handler));
-        return () => events.forEach(e => window.removeEventListener(e, handler));
+        // Also refresh every 10s to catch title updates and new saves
+        const iv = setInterval(loadChats, 10000);
+        return () => { events.forEach(e => window.removeEventListener(e, handler)); clearInterval(iv); };
     }, [loadChats]);
 
     const handleClick = (chatId: string) => {
@@ -177,7 +184,7 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
         return `${Math.floor(diff / 86400000)}d`;
     };
 
-    if (chats.length === 0) return null;
+    if (!loading && chats.length === 0) return null;
 
     const openFullHistory = () => {
         onViewChange('chat');
@@ -190,6 +197,11 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
                 <span>Recents</span>
                 <button className="sidebar-recents-all" onClick={openFullHistory} title="View all chats">All</button>
             </div>
+            {loading ? (
+                <div className="sidebar-recents-loading">
+                    <span className="sidebar-loading-dot" /><span className="sidebar-loading-dot" /><span className="sidebar-loading-dot" />
+                </div>
+            ) : (
             <div className="sidebar-recents-list">
                 {chats.map(c => (
                     <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Untitled'}>
@@ -205,6 +217,7 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
                     </button>
                 ))}
             </div>
+            )}
         </div>
     );
 }

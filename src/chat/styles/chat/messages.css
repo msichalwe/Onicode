@@ -112,6 +112,20 @@
   color: var(--text-code);
 }
 
+.file-path-link {
+  cursor: pointer;
+  color: var(--accent) !important;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  transition: all 0.15s;
+}
+
+.file-path-link:hover {
+  text-decoration-style: solid;
+  background: color-mix(in srgb, var(--accent) 15%, transparent) !important;
+}
+
 .message-bubble pre code {
   background: none;
   padding: 0;

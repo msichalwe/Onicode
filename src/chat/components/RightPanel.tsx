@@ -40,8 +40,8 @@ const WIDGETS: WidgetDef[] = [
 type OnicodeMode = 'onichat' | 'workpal' | 'projects';
 
 const WIDGETS_BY_MODE: Record<OnicodeMode, Set<WidgetType>> = {
-    onichat: new Set([]),
-    workpal: new Set(['terminal', 'viewer', 'git']),
+    onichat: new Set(['terminal', 'tasks']),
+    workpal: new Set(['terminal', 'viewer', 'tasks', 'git']),
     projects: new Set(['terminal', 'project', 'viewer', 'agents', 'tasks', 'git']),
 };
 

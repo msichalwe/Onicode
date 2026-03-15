@@ -216,10 +216,8 @@ function AppContent() {
         setChatScope(newScope);
         localStorage.setItem('onicode-chat-scope', newScope);
 
-        // OniChat: hide panel
-        if (newMode === 'onichat') setPanel({ widget: null });
-        // Workmate/Projects: open terminal if panel is closed
-        if ((newMode === 'workpal' || newMode === 'projects') && !panel.widget) setPanel({ widget: 'terminal' });
+        // Open terminal if panel is closed on mode switch
+        if (!panel.widget) setPanel({ widget: 'terminal' });
 
         // Switch to chat view and start fresh conversation for new mode
         handleViewChange('chat');
@@ -269,7 +267,7 @@ function AppContent() {
     }, [activeProject]);
 
     // Derive panelHidden: always hidden in onichat, user-controlled otherwise
-    const effectivePanelHidden = mode === 'onichat' || panelHidden;
+    const effectivePanelHidden = panelHidden;
 
     const closePanel = useCallback(() => {
         setPanel({ widget: null });

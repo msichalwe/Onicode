@@ -121,10 +121,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const pendingChannelRef = useRef<{ chatId: number; channel: string } | null>(null);
     const modeRef = useRef(mode);
     const workpalFolderRef = useRef(workpalFolder);
+    const scopeRef = useRef(scope);
 
     // Keep refs in sync with props so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
     useEffect(() => { messageQueueRef.current = messageQueue; }, [messageQueue]);
+    useEffect(() => { scopeRef.current = scope; }, [scope]);
     useEffect(() => { modeRef.current = mode; }, [mode]);
     useEffect(() => { workpalFolderRef.current = workpalFolder; }, [workpalFolder]);
 
@@ -170,6 +172,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const persistConversation = useCallback((msgs: Message[], convId: string | null) => {
         if (msgs.length === 0) return convId;
 
+        const currentScope = scopeRef.current;
+        const currentProject = activeProjectRef.current;
         const convs = loadConversationsFromCache();
         let id = convId;
         let convToSave: Conversation | null = null;
@@ -180,10 +184,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 convs[idx].messages = msgs;
                 convs[idx].updatedAt = Date.now();
                 if (msgs.length === 1) convs[idx].title = generateTitle(msgs[0].content);
-                convs[idx].scope = scope;
-                if (scope === 'project' && activeProject) {
-                    convs[idx].projectId = activeProject.id;
-                    convs[idx].projectName = activeProject.name;
+                convs[idx].scope = currentScope;
+                if (currentScope === 'project' && currentProject) {
+                    convs[idx].projectId = currentProject.id;
+                    convs[idx].projectName = currentProject.name;
                 }
                 convToSave = convs[idx];
             }
@@ -195,11 +199,11 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 messages: msgs,
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
-                scope,
+                scope: currentScope,
             };
-            if (scope === 'project' && activeProject) {
-                newConv.projectId = activeProject.id;
-                newConv.projectName = activeProject.name;
+            if (currentScope === 'project' && currentProject) {
+                newConv.projectId = currentProject.id;
+                newConv.projectName = currentProject.name;
             }
             convs.unshift(newConv);
             convToSave = newConv;
@@ -209,8 +213,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         setConversations(convs);
         localStorage.setItem(ACTIVE_CONV_KEY, id);
         if (convToSave) persistConversationToSQLite(convToSave);
+        // Notify sidebar
+        window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
         return id;
-    }, [scope, activeProject]);
+    }, []);
 
     // ── Scroll ──
     const scrollToBottom = useCallback(() => {
@@ -1410,9 +1416,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
             {messages.length === 0 ? (
                 <WelcomeScreen
-                    conversations={conversations}
                     onSuggestionClick={handleSuggestionClick}
-                    onShowHistory={() => setShowHistory(true)}
                 />
             ) : (
                 <MessageList

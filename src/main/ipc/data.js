@@ -161,7 +161,8 @@ function registerDataIPC(deps) {
     ipcMain.handle('conversation-list', async (_event, limit, offset) => {
         try {
             const { conversationStorage } = require('../storage');
-            const conversations = conversationStorage.listFull(limit || 50);
+            // Use light list (no messages) for sidebar/search — much faster
+            const conversations = conversationStorage.list(limit || 50, offset || 0);
             return { success: true, conversations };
         } catch (err) {
             return { error: err.message };
