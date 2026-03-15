@@ -3258,6 +3258,17 @@ app.whenReady().then(() => {
         logger.info('main', `Loaded provider config from disk: ${savedProvConfig.id} / ${savedProvConfig.selectedModel || 'default'}`);
     }
 
+    // IPC: folder picker for Workmate mode
+    ipcMain.handle('select-folder', async () => {
+        const { dialog } = require('electron');
+        try {
+            const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'], title: 'Open Folder' });
+            if (result.canceled || result.filePaths.length === 0) return { success: false };
+            const folderPath = result.filePaths[0];
+            return { success: true, path: folderPath, name: path.basename(folderPath) };
+        } catch (err) { return { success: false, error: err.message }; }
+    });
+
     // IPC: renderer syncs provider config on load + on provider changes
     ipcMain.handle('sync-provider-config', (_event, config) => {
         if (!config?.id) return { success: false, error: 'Invalid config' };

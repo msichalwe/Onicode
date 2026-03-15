@@ -251,6 +251,17 @@ const LOCAL_COMMANDS = {
     '/help': () => `Onicode Telegram Commands\n\n/new — Start fresh conversation\n/clear — Clear conversation\n/status — Connection & model info\n/model — Current model\n\nAll messages go through the full Onicode AI with 70+ tools. Just ask me anything.`,
     '/status': () => { const b = _telegramState.botInfo; return `Bot: @${b?.username || '?'}\nProvider: ${_providerConfig?.id || '?'}\nModel: ${_providerConfig?.selectedModel || '?'}\nChats: ${_telegramState.activeChats.size}`; },
     '/model': () => `${_providerConfig?.selectedModel || 'not configured'} (${_providerConfig?.id || '?'})`,
+    '/switchmode': (_cid, args) => {
+        const valid = ['onichat', 'workmate', 'projects'];
+        const target = (args || '').toLowerCase().trim();
+        if (target && valid.includes(target)) {
+            // Emit to renderer to switch mode
+            emitToRenderer('channel-incoming', { channel: 'telegram', chatId: _cid, from: 'System', text: `/switchmode ${target}`, action: 'command', timestamp: Date.now() });
+            return `Switching to ${target} mode...`;
+        }
+        const current = 'onichat'; // default, renderer tracks actual mode
+        return `Usage: /switchmode <onichat|workmate|projects>\nModes:\n- onichat: General chat\n- workmate: Documents & productivity\n- projects: Coding & project management`;
+    },
 };
 
 // ══════════════════════════════════════════

@@ -37,14 +37,23 @@ const WIDGETS: WidgetDef[] = [
 //  Right Panel
 // ══════════════════════════════════════════
 
-interface RightPanelProps {
+type OnicodeMode = 'onichat' | 'workmate' | 'projects';
+
+const WIDGETS_BY_MODE: Record<OnicodeMode, Set<WidgetType>> = {
+    onichat: new Set([]),
+    workmate: new Set(['terminal', 'viewer', 'git']),
+    projects: new Set(['terminal', 'project', 'viewer', 'agents', 'tasks', 'git']),
+};
+
+export interface RightPanelProps {
     panel: PanelState;
     onClose: () => void;
     onChangeWidget: (widget: WidgetType) => void;
+    mode?: OnicodeMode;
 }
 
 // Track which widgets have been opened so they stay mounted (preserves terminal state)
-export default function RightPanel({ panel, onClose, onChangeWidget }: RightPanelProps) {
+export default function RightPanel({ panel, onClose, onChangeWidget, mode = 'projects' }: RightPanelProps) {
     const [collapsed, setCollapsed] = useState(false);
     const [mountedWidgets, setMountedWidgets] = useState<Set<WidgetType>>(new Set());
 
@@ -82,7 +91,7 @@ export default function RightPanel({ panel, onClose, onChangeWidget }: RightPane
         <div className={`right-panel ${collapsed ? 'right-panel-collapsed' : ''}`} style={{ display: isVisible ? undefined : 'none' }}>
             <div className="right-panel-header">
                 <div className="right-panel-tabs">
-                    {WIDGETS.map((w) => (
+                    {WIDGETS.filter(w => WIDGETS_BY_MODE[mode].has(w.id)).map((w) => (
                         <button key={w.id} className={`panel-tab ${panel.widget === w.id ? 'active' : ''}`} onClick={() => onChangeWidget(w.id)} title={w.label}>
                             {w.icon}
                         </button>

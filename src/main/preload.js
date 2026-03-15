@@ -404,6 +404,9 @@ contextBridge.exposeInMainWorld('onicode', {
     mcpCatalogSearch: (query, maxResults) => ipcRenderer.invoke('mcp-catalog-search', query, maxResults),
     mcpCatalogEntry: (id) => ipcRenderer.invoke('mcp-catalog-entry', id),
 
+    // ── Folder Picker ──
+    selectFolder: () => ipcRenderer.invoke('select-folder'),
+
     // ── Channels ──
     channelsList: () => ipcRenderer.invoke('channels-list'),
     channelTelegramValidate: (token) => ipcRenderer.invoke('channel-telegram-validate', token),

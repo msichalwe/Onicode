@@ -19,6 +19,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     { name: '/search', description: 'Search past conversations', usage: '/search <query>', category: 'chat' },
 
     // ── AI ──
+    { name: '/switchmode', description: 'Switch mode (onichat, workmate, projects)', usage: '/switchmode <mode>', category: 'system' },
     { name: '/model', description: 'Switch AI model', usage: '/model <name>', category: 'ai' },
     { name: '/thinklevel', description: 'Set thinking level (low, medium, high)', usage: '/thinklevel <level>', category: 'ai' },
     { name: '/system', description: 'Set custom system prompt', usage: '/system <prompt>', category: 'ai' },

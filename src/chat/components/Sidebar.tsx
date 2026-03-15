@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { isElectron } from '../utils';
 
 type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
+type OnicodeMode = 'onichat' | 'workmate' | 'projects';
 
 interface SidebarProps {
     currentView: View;
     onViewChange: (view: View) => void;
     unreadChatCount?: number;
+    mode?: OnicodeMode;
 }
 
-export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0 }: SidebarProps) {
+export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0, mode = 'onichat' }: SidebarProps) {
     const [automationCount, setAutomationCount] = useState(0);
 
     // Poll for workflow/schedule counts to show badge
@@ -58,77 +60,57 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
             </div>
 
             <nav className="sidebar-nav">
-                <button
-                    className={`sidebar-btn ${currentView === 'chat' ? 'active' : ''}`}
-                    onClick={() => onViewChange('chat')}
-                    title="Chat"
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                    </svg>
+                {/* Chat — always visible */}
+                <button className={`sidebar-btn ${currentView === 'chat' ? 'active' : ''}`} onClick={() => onViewChange('chat')} title="Chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
                     Chat
                     {unreadChatCount > 0 && <span className="sidebar-badge">{unreadChatCount > 99 ? '99+' : unreadChatCount}</span>}
                 </button>
 
-                <button
-                    className={`sidebar-btn ${currentView === 'projects' ? 'active' : ''}`}
-                    onClick={() => onViewChange('projects')}
-                    title="Projects"
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                    </svg>
-                    Projects
-                </button>
+                {/* Projects — visible in projects mode; opens project picker, not ProjectsView */}
+                {mode === 'projects' && (
+                    <button className={`sidebar-btn ${currentView === 'projects' ? 'active' : ''}`} onClick={() => onViewChange('projects')} title="Projects">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
+                        Projects
+                    </button>
+                )}
 
-                <button
-                    className={`sidebar-btn ${currentView === 'attachments' ? 'active' : ''}`}
-                    onClick={() => onViewChange('attachments')}
-                    title="Attachments Gallery"
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-                    </svg>
-                    Files
-                </button>
+                {/* Files — workmate + projects */}
+                {mode !== 'onichat' && (
+                    <button className={`sidebar-btn ${currentView === 'attachments' ? 'active' : ''}`} onClick={() => onViewChange('attachments')} title="Files">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
+                        Files
+                    </button>
+                )}
 
-                <button
-                    className={`sidebar-btn ${currentView === 'memories' ? 'active' : ''}`}
-                    onClick={() => onViewChange('memories')}
-                    title="Agent Runtime"
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="12" cy="12" r="3" />
-                        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-                    </svg>
-                    Agents
-                </button>
+                {/* Agents — projects only */}
+                {mode === 'projects' && (
+                    <button className={`sidebar-btn ${currentView === 'memories' ? 'active' : ''}`} onClick={() => onViewChange('memories')} title="Agents">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg>
+                        Agents
+                    </button>
+                )}
 
-                <button
-                    className={`sidebar-btn ${currentView === 'todo' ? 'active' : ''}`}
-                    onClick={() => onViewChange('todo')}
-                    title="Tasks"
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M9 11l3 3L22 4" />
-                        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
-                    </svg>
-                    Tasks
-                </button>
+                {/* Tasks — projects only */}
+                {mode === 'projects' && (
+                    <button className={`sidebar-btn ${currentView === 'todo' ? 'active' : ''}`} onClick={() => onViewChange('todo')} title="Tasks">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>
+                        Tasks
+                    </button>
+                )}
 
-                <button
-                    className={`sidebar-btn ${currentView === 'workflows' ? 'active' : ''}`}
-                    onClick={() => onViewChange('workflows')}
-                    title="Workflows & Schedules"
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                        <circle cx="12" cy="12" r="4" />
-                    </svg>
-                    Workflows
-                    {automationCount > 0 && <span className="sidebar-badge">{automationCount}</span>}
-                </button>
+                {/* Workflows — workmate + projects */}
+                {mode !== 'onichat' && (
+                    <button className={`sidebar-btn ${currentView === 'workflows' ? 'active' : ''}`} onClick={() => onViewChange('workflows')} title="Workflows & Schedules">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" /><circle cx="12" cy="12" r="4" /></svg>
+                        Workflows
+                        {automationCount > 0 && <span className="sidebar-badge">{automationCount}</span>}
+                    </button>
+                )}
             </nav>
+
+            {/* ── Recents: per-mode chat history ── */}
+            <RecentChats mode={mode} onViewChange={onViewChange} />
 
             <div className="sidebar-spacer" />
 
@@ -146,5 +128,87 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
                 </button>
             </div>
         </aside>
+    );
+}
+
+// ══════════════════════════════════════════
+//  Recent Chats — per-mode conversation history
+// ══════════════════════════════════════════
+
+interface RecentChat {
+    id: string;
+    title: string;
+    updated_at: number;
+    scope?: string;
+    project_name?: string;
+    mode?: string;
+}
+
+function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
+    const [chats, setChats] = useState<RecentChat[]>([]);
+
+    const loadChats = useCallback(async () => {
+        if (!isElectron || !window.onicode?.conversationList) return;
+        try {
+            const res = await window.onicode.conversationList(20, 0);
+            if (res.success && res.conversations) {
+                // Filter by mode: projects = has project_name, workmate = scope 'workmate', onichat = general
+                const filtered = (res.conversations as RecentChat[]).filter(c => {
+                    if (mode === 'projects') return c.project_name || c.scope === 'project';
+                    if (mode === 'workmate') return c.scope === 'workmate';
+                    return !c.project_name && c.scope !== 'project' && c.scope !== 'workmate';
+                });
+                setChats(filtered.slice(0, 10));
+            }
+        } catch { /* ignore */ }
+    }, [mode]);
+
+    useEffect(() => { loadChats(); }, [loadChats]);
+
+    // Refresh on new chat events
+    useEffect(() => {
+        const handler = () => setTimeout(loadChats, 500);
+        window.addEventListener('onicode-new-chat', handler);
+        window.addEventListener('onicode-conversation-saved', handler);
+        return () => {
+            window.removeEventListener('onicode-new-chat', handler);
+            window.removeEventListener('onicode-conversation-saved', handler);
+        };
+    }, [loadChats]);
+
+    const handleClick = (chatId: string) => {
+        onViewChange('chat');
+        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chatId }));
+    };
+
+    const timeAgo = (ts: number) => {
+        const diff = Date.now() - ts;
+        if (diff < 60000) return 'now';
+        if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
+        if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
+        return `${Math.floor(diff / 86400000)}d`;
+    };
+
+    if (chats.length === 0) return null;
+
+    return (
+        <div className="sidebar-recents">
+            <div className="sidebar-recents-header">Recents</div>
+            <div className="sidebar-recents-list">
+                {chats.map(c => (
+                    <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Untitled'}>
+                        <div className="sidebar-recent-title">{c.title || 'Untitled'}</div>
+                        <div className="sidebar-recent-meta">
+                            {mode === 'projects' && c.project_name ? (
+                                <span className="sidebar-recent-project">{c.project_name}</span>
+                            ) : mode === 'projects' ? (
+                                <span className="sidebar-recent-brainstorm">Brainstorm</span>
+                            ) : null}
+                            <span className="sidebar-recent-time">{timeAgo(c.updated_at)}</span>
+                        </div>
+                    </button>
+                ))}
+            </div>
+        </div>
     );
 }

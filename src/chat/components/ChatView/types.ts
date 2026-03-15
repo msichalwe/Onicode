@@ -261,11 +261,20 @@ export interface ProviderConfig {
 
 // ── Component props ──
 
+export type OnicodeMode = 'onichat' | 'workmate' | 'projects';
+
+export interface WorkmateFolder {
+    path: string;
+    name: string;
+}
+
 export interface ChatViewProps {
     scope?: ChatScope;
     activeProject?: ActiveProject | null;
     onChangeScope?: (scope: ChatScope) => void;
     onNewMessage?: () => void;
+    mode?: OnicodeMode;
+    workmateFolder?: WorkmateFolder | null;
 }
 
 export interface QueueItem {

@@ -187,6 +187,92 @@ function AppContent() {
         });
     }, []);
 
+    // ── Mode switching ──
+    const switchMode = useCallback(async (newMode: OnicodeMode) => {
+        if (newMode === mode) return;
+
+        // Workmate: prompt for folder if none selected
+        if (newMode === 'workmate' && !workmateFolder) {
+            if (isElectron && window.onicode?.selectFolder) {
+                const result = await window.onicode.selectFolder();
+                if (!result.success || !result.path) return; // cancelled
+                const folder = { path: result.path, name: result.name || result.path.split('/').pop() || 'folder' };
+                setWorkmateFolder(folder);
+                localStorage.setItem('onicode-workmate-folder', JSON.stringify(folder));
+            } else return;
+        }
+
+        // Projects: if no active project, switch to projects view to pick one
+        if (newMode === 'projects' && !activeProject) {
+            setMode('projects');
+            localStorage.setItem('onicode-mode', 'projects');
+            setChatScope('general');
+            handleViewChange('projects');
+            return;
+        }
+
+        setMode(newMode);
+        localStorage.setItem('onicode-mode', newMode);
+
+        // Derive scope from mode
+        const newScope: ChatScope = newMode === 'onichat' ? 'general' : newMode === 'workmate' ? 'workmate' : 'project';
+        setChatScope(newScope);
+        localStorage.setItem('onicode-chat-scope', newScope);
+
+        // OniChat: hide panel
+        if (newMode === 'onichat') setPanel({ widget: null });
+        // Workmate/Projects: open terminal if panel is closed
+        if ((newMode === 'workmate' || newMode === 'projects') && !panel.widget) setPanel({ widget: 'terminal' });
+
+        // Switch to chat view and start fresh conversation for new mode
+        handleViewChange('chat');
+        window.dispatchEvent(new CustomEvent('onicode-new-chat'));
+    }, [mode, workmateFolder, activeProject, panel.widget, handleViewChange]);
+
+    // Change workmate folder
+    const changeWorkmateFolder = useCallback(async () => {
+        if (!isElectron || !window.onicode?.selectFolder) return;
+        const result = await window.onicode.selectFolder();
+        if (!result.success || !result.path) return;
+        const folder = { path: result.path, name: result.name || result.path.split('/').pop() || 'folder' };
+        setWorkmateFolder(folder);
+        localStorage.setItem('onicode-workmate-folder', JSON.stringify(folder));
+        window.dispatchEvent(new CustomEvent('onicode-new-chat'));
+    }, []);
+
+    // Listen for mode switch events (from slash commands, keyboard, etc.)
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const newMode = (e as CustomEvent).detail as OnicodeMode;
+            if (newMode && ['onichat', 'workmate', 'projects'].includes(newMode)) switchMode(newMode);
+        };
+        window.addEventListener('onicode-mode-switch', handler);
+        return () => window.removeEventListener('onicode-mode-switch', handler);
+    }, [switchMode]);
+
+    // Keyboard shortcuts: Cmd+1/2/3 for mode switching
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if (!(e.metaKey || e.ctrlKey)) return;
+            if (e.key === '1') { e.preventDefault(); switchMode('onichat'); }
+            else if (e.key === '2') { e.preventDefault(); switchMode('workmate'); }
+            else if (e.key === '3') { e.preventDefault(); switchMode('projects'); }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [switchMode]);
+
+    // When a project is activated, auto-switch to projects mode
+    useEffect(() => {
+        if (activeProject) {
+            setMode('projects');
+            localStorage.setItem('onicode-mode', 'projects');
+        }
+    }, [activeProject]);
+
+    // Derive panelHidden: always hidden in onichat, user-controlled otherwise
+    const effectivePanelHidden = mode === 'onichat' || panelHidden;
+
     const closePanel = useCallback(() => {
         setPanel({ widget: null });
     }, []);
@@ -296,51 +382,51 @@ function AppContent() {
 
             {/* ── Unified App Header ── */}
             <header className="app-header">
-                {activeProject ? (
-                    <div className="app-header-project">
-                        <button
-                            className="app-header-project-btn"
-                            onClick={() => setProjectDropdown(!projectDropdown)}
-                        >
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                            </svg>
-                            <span>{activeProject.name}</span>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <polyline points="6 9 12 15 18 9" />
-                            </svg>
+                {/* Mode Switcher */}
+                <div className="mode-switcher">
+                    {([
+                        { id: 'onichat' as OnicodeMode, label: 'OniChat' },
+                        { id: 'workmate' as OnicodeMode, label: 'Workmate' },
+                        { id: 'projects' as OnicodeMode, label: 'Projects' },
+                    ]).map(m => (
+                        <button key={m.id} className={`mode-btn ${mode === m.id ? 'active' : ''}`} onClick={() => switchMode(m.id)} title={`${m.label} (${m.id === 'onichat' ? '⌘1' : m.id === 'workmate' ? '⌘2' : '⌘3'})`}>
+                            <span className="mode-btn-label">{m.label}</span>
                         </button>
-                        {activeProject.gitBranch && (
-                            <span className="app-header-branch">
-                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 01-9 9" />
-                                </svg>
-                                {activeProject.gitBranch}
-                            </span>
-                        )}
-                        {projectDropdown && (
-                            <div className="app-header-dropdown">
-                                {projects.filter(p => p.id !== activeProject.id).length === 0 ? (
-                                    <div className="app-header-dropdown-empty">No other projects</div>
-                                ) : (
-                                    projects.filter(p => p.id !== activeProject.id).map(p => (
+                    ))}
+                </div>
+
+                {/* Context indicator */}
+                <div className="mode-context">
+                    {mode === 'projects' && activeProject ? (
+                        <div className="app-header-project">
+                            <button className="app-header-project-btn" onClick={() => setProjectDropdown(!projectDropdown)}>
+                                <span>{activeProject.name}</span>
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                            </button>
+                            {activeProject.gitBranch && (
+                                <span className="app-header-branch">⑂ {activeProject.gitBranch}</span>
+                            )}
+                            {projectDropdown && (
+                                <div className="app-header-dropdown">
+                                    {projects.filter(p => p.id !== activeProject.id).map(p => (
                                         <button key={p.id} className="app-header-dropdown-item" onClick={() => { setProjectDropdown(false); switchProject(p); }}>
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
                                             {p.name}
                                         </button>
-                                    ))
-                                )}
-                                <div className="app-header-dropdown-divider" />
-                                <button className="app-header-dropdown-item app-header-dropdown-exit" onClick={() => { setProjectDropdown(false); requestExitProject(); }}>
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                                    Exit Project
-                                </button>
-                            </div>
-                        )}
-                    </div>
-                ) : (
-                    <div className="app-header-title">Onicode</div>
-                )}
+                                    ))}
+                                    <div className="app-header-dropdown-divider" />
+                                    <button className="app-header-dropdown-item app-header-dropdown-exit" onClick={() => { setProjectDropdown(false); requestExitProject(); }}>
+                                        Exit Project
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    ) : mode === 'workmate' && workmateFolder ? (
+                        <button className="mode-context-folder" onClick={changeWorkmateFolder} title={workmateFolder.path}>
+                            <span>{workmateFolder.name}</span>
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                        </button>
+                    ) : null}
+                </div>
 
                 <div className="app-header-actions">
                     <button className="app-header-btn" onClick={openHistory} title="History">
@@ -377,7 +463,7 @@ function AppContent() {
             )}
 
             <div className="app-body">
-                <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} />
+                <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} mode={mode} />
                 <div className={`main-content ${panel.widget ? 'with-panel' : ''}`}>
                     <div className={`view-layer ${currentView === 'chat' ? 'view-active' : 'view-hidden'}`}>
                         <ChatView
@@ -385,6 +471,8 @@ function AppContent() {
                             activeProject={activeProject}
                             onChangeScope={changeChatScope}
                             onNewMessage={handleNewChatMessage}
+                            mode={mode}
+                            workmateFolder={workmateFolder}
                         />
                     </div>
                     {/* Keep heavy views mounted to preserve state across tab switches */}
@@ -402,11 +490,12 @@ function AppContent() {
                         </div>
                     )}
                 </div>
-                {!panelHidden && (
+                {!effectivePanelHidden && (
                     <RightPanel
                         panel={panel}
                         onClose={closePanel}
                         onChangeWidget={changeWidget}
+                        mode={mode}
                     />
                 )}
             </div>

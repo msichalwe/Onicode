@@ -562,6 +562,9 @@ interface OnicodeAPI {
     ctxSavings: () => Promise<{ success?: boolean; totalBytesIn: number; totalBytesOut: number; bytesSaved: number; savingsPercent: number; perTool: Record<string, { calls: number; bytesIn: number; bytesOut: number }>; error?: string }>;
     onCtxSavingsUpdate: (callback: (data: { tool: string; bytesIn: number; bytesOut: number; savingsPercent: number }) => void) => () => void;
 
+    // Folder picker (for Workmate mode)
+    selectFolder: () => Promise<{ success: boolean; path?: string; name?: string }>;
+
     platform: string;
 
     getEnvironment: () => Promise<{
