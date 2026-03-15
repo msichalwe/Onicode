@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { isElectron } from '../utils';
 
 type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
-type OnicodeMode = 'onichat' | 'workmate' | 'projects';
+type OnicodeMode = 'onichat' | 'workpal' | 'projects';
 
 interface SidebarProps {
     currentView: View;
@@ -51,14 +51,6 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
     }, []);
     return (
         <aside className="sidebar">
-            <div className="sidebar-logo">
-                <svg width="28" height="28" viewBox="0 0 48 48" fill="none">
-                    <rect width="48" height="48" rx="12" fill="var(--accent)" />
-                    <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="var(--text-on-accent)" opacity="0.9" />
-                    <path d="M24 14l8 6v12l-8-4V14z" fill="var(--text-on-accent)" opacity="0.6" />
-                </svg>
-            </div>
-
             <nav className="sidebar-nav">
                 {/* Chat — always visible */}
                 <button className={`sidebar-btn ${currentView === 'chat' ? 'active' : ''}`} onClick={() => onViewChange('chat')} title="Chat">
@@ -109,7 +101,7 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
                 )}
             </nav>
 
-            {/* ── Recents: per-mode chat history ── */}
+            {/* ── Recents: per-mode chat history (max 15) ── */}
             <RecentChats mode={mode} onViewChange={onViewChange} />
 
             <div className="sidebar-spacer" />
@@ -144,21 +136,22 @@ interface RecentChat {
     mode?: string;
 }
 
-function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
+const MAX_RECENTS = 15;
+
+function RecentChats({ mode, onViewChange, searchQuery = '' }: { mode: OnicodeMode; onViewChange: (v: View) => void; searchQuery?: string }) {
     const [chats, setChats] = useState<RecentChat[]>([]);
 
     const loadChats = useCallback(async () => {
         if (!isElectron || !window.onicode?.conversationList) return;
         try {
-            const res = await window.onicode.conversationList(20, 0);
+            const res = await window.onicode.conversationList(50, 0);
             if (res.success && res.conversations) {
-                // Filter by mode: projects = has project_name, workmate = scope 'workmate', onichat = general
                 const filtered = (res.conversations as RecentChat[]).filter(c => {
                     if (mode === 'projects') return c.project_name || c.scope === 'project';
-                    if (mode === 'workmate') return c.scope === 'workmate';
-                    return !c.project_name && c.scope !== 'project' && c.scope !== 'workmate';
+                    if (mode === 'workpal') return c.scope === 'workpal';
+                    return !c.project_name && c.scope !== 'project' && c.scope !== 'workpal';
                 });
-                setChats(filtered.slice(0, 10));
+                setChats(filtered.slice(0, MAX_RECENTS));
             }
         } catch { /* ignore */ }
     }, [mode]);
@@ -189,13 +182,29 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
         return `${Math.floor(diff / 86400000)}d`;
     };
 
-    if (chats.length === 0) return null;
+    // Filter by search query
+    const displayed = searchQuery
+        ? chats.filter(c => (c.title || '').toLowerCase().includes(searchQuery.toLowerCase()) || (c.project_name || '').toLowerCase().includes(searchQuery.toLowerCase()))
+        : chats;
+
+    if (displayed.length === 0 && !searchQuery) return null;
+
+    const openFullHistory = () => {
+        onViewChange('chat');
+        window.dispatchEvent(new CustomEvent('onicode-show-history'));
+    };
 
     return (
         <div className="sidebar-recents">
-            <div className="sidebar-recents-header">Recents</div>
+            <div className="sidebar-recents-header">
+                <span>Recents</span>
+                <button className="sidebar-recents-all" onClick={openFullHistory} title="View all chats">All</button>
+            </div>
             <div className="sidebar-recents-list">
-                {chats.map(c => (
+                {displayed.length === 0 && searchQuery && (
+                    <div className="sidebar-recents-empty">No matches for &ldquo;{searchQuery}&rdquo;</div>
+                )}
+                {displayed.map(c => (
                     <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Untitled'}>
                         <div className="sidebar-recent-title">{c.title || 'Untitled'}</div>
                         <div className="sidebar-recent-meta">

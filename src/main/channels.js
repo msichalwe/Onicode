@@ -260,7 +260,7 @@ const LOCAL_COMMANDS = {
             return `Switching to ${target} mode...`;
         }
         const current = 'onichat'; // default, renderer tracks actual mode
-        return `Usage: /switchmode <onichat|workmate|projects>\nModes:\n- onichat: General chat\n- workmate: Documents & productivity\n- projects: Coding & project management`;
+        return `Usage: /switchmode <onichat|workpal|projects>\nModes:\n- onichat: General chat\n- workpal: Documents & productivity\n- projects: Coding & project management`;
     },
 };
 

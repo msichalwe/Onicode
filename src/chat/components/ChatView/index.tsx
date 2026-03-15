@@ -34,7 +34,7 @@ import InputArea from './InputArea';
 // Re-export types so existing imports from 'ChatView' continue to work
 export type { ToolStep, Message, Attachment, Conversation } from './types';
 
-export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage, mode = 'onichat', workmateFolder }: ChatViewProps) {
+export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage, mode = 'onichat', workpalFolder }: ChatViewProps) {
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
     const [activeConvId, setActiveConvId] = useState<string | null>(() => {
@@ -120,13 +120,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const pendingWidgetsRef = useRef<Array<{ id: string; type: string; data: Record<string, unknown> }>>([]);
     const pendingChannelRef = useRef<{ chatId: number; channel: string } | null>(null);
     const modeRef = useRef(mode);
-    const workmateFolderRef = useRef(workmateFolder);
+    const workpalFolderRef = useRef(workpalFolder);
 
     // Keep refs in sync with props so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
     useEffect(() => { messageQueueRef.current = messageQueue; }, [messageQueue]);
     useEffect(() => { modeRef.current = mode; }, [mode]);
-    useEffect(() => { workmateFolderRef.current = workmateFolder; }, [workmateFolder]);
+    useEffect(() => { workpalFolderRef.current = workpalFolder; }, [workpalFolder]);
 
     // Close attach menu on outside click
     useEffect(() => {
@@ -918,7 +918,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
         const systemContent = buildSystemPromptCached({
             mode: modeRef.current || 'onichat',
-            workingDirectory: workmateFolderRef.current?.path,
+            workingDirectory: workpalFolderRef.current?.path,
             activeProjectName: currentProject?.name,
             activeProjectPath: currentProject?.path,
             projectDocs,

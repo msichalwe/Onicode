@@ -102,14 +102,14 @@ export async function executeCommand(input: string, ctx: CommandContext): Promis
         // ══════════════════════════════════════════
 
         case '/switchmode': {
-            const validModes = ['onichat', 'workmate', 'projects'];
+            const validModes = ['onichat', 'workpal', 'projects'];
             const target = args?.toLowerCase().trim();
             if (target && validModes.includes(target)) {
                 window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: target }));
                 addAIMessage(ctx, `Switching to **${target}** mode...`);
                 return { handled: true };
             }
-            addAIMessage(ctx, `Usage: \`/switchmode <onichat|workmate|projects>\`\nCurrent mode: **${localStorage.getItem('onicode-mode') || 'onichat'}**`);
+            addAIMessage(ctx, `Usage: \`/switchmode <onichat|workpal|projects>\`\nCurrent mode: **${localStorage.getItem('onicode-mode') || 'onichat'}**`);
             return { handled: true };
         }
 

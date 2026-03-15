@@ -37,11 +37,11 @@ const WIDGETS: WidgetDef[] = [
 //  Right Panel
 // ══════════════════════════════════════════
 
-type OnicodeMode = 'onichat' | 'workmate' | 'projects';
+type OnicodeMode = 'onichat' | 'workpal' | 'projects';
 
 const WIDGETS_BY_MODE: Record<OnicodeMode, Set<WidgetType>> = {
     onichat: new Set([]),
-    workmate: new Set(['terminal', 'viewer', 'git']),
+    workpal: new Set(['terminal', 'viewer', 'git']),
     projects: new Set(['terminal', 'project', 'viewer', 'agents', 'tasks', 'git']),
 };
 

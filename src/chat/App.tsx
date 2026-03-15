@@ -12,16 +12,12 @@ import RightPanel, { type PanelState, type WidgetType } from './components/Right
 import { type ActiveProject } from './components/ProjectModeBar';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 
-export type ChatScope = 'general' | 'project' | 'workmate' | 'documents';
+export type ChatScope = 'general' | 'project' | 'workpal' | 'documents';
 export type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
-export type OnicodeMode = 'onichat' | 'workmate' | 'projects';
-
-export interface WorkmateFolder {
-    path: string;
-    name: string;
-}
 
 import { isElectron } from './utils';
+import { MODE_CONFIGS } from './modes';
+import type { OnicodeMode, WorkpalFolder } from './modes';
 
 // Error boundary to catch render crashes in secondary views
 class ViewErrorBoundary extends React.Component<
@@ -63,11 +59,12 @@ function AppContent() {
     const [activeProject, setActiveProject] = useState<ActiveProject | null>(null);
     const [chatScope, setChatScope] = useState<ChatScope>('general');
     const [mode, setMode] = useState<OnicodeMode>(() => (localStorage.getItem('onicode-mode') as OnicodeMode) || 'onichat');
-    const [workmateFolder, setWorkmateFolder] = useState<WorkmateFolder | null>(() => {
-        try { const s = localStorage.getItem('onicode-workmate-folder'); return s ? JSON.parse(s) : null; } catch { return null; }
+    const [workpalFolder, setWorkpalFolder] = useState<WorkpalFolder | null>(() => {
+        try { const s = localStorage.getItem('onicode-workpal-folder'); return s ? JSON.parse(s) : null; } catch { return null; }
     });
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [showExitWarning, setShowExitWarning] = useState(false);
+    const [showSearch, setShowSearch] = useState(false);
     const [projectDropdown, setProjectDropdown] = useState(false);
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const [unreadChatCount, setUnreadChatCount] = useState(0);
@@ -192,13 +189,13 @@ function AppContent() {
         if (newMode === mode) return;
 
         // Workmate: prompt for folder if none selected
-        if (newMode === 'workmate' && !workmateFolder) {
+        if (newMode === 'workpal' && !workpalFolder) {
             if (isElectron && window.onicode?.selectFolder) {
                 const result = await window.onicode.selectFolder();
                 if (!result.success || !result.path) return; // cancelled
                 const folder = { path: result.path, name: result.name || result.path.split('/').pop() || 'folder' };
-                setWorkmateFolder(folder);
-                localStorage.setItem('onicode-workmate-folder', JSON.stringify(folder));
+                setWorkpalFolder(folder);
+                localStorage.setItem('onicode-workpal-folder', JSON.stringify(folder));
             } else return;
         }
 
@@ -215,28 +212,28 @@ function AppContent() {
         localStorage.setItem('onicode-mode', newMode);
 
         // Derive scope from mode
-        const newScope: ChatScope = newMode === 'onichat' ? 'general' : newMode === 'workmate' ? 'workmate' : 'project';
+        const newScope: ChatScope = newMode === 'onichat' ? 'general' : newMode === 'workpal' ? 'workpal' : 'project';
         setChatScope(newScope);
         localStorage.setItem('onicode-chat-scope', newScope);
 
         // OniChat: hide panel
         if (newMode === 'onichat') setPanel({ widget: null });
         // Workmate/Projects: open terminal if panel is closed
-        if ((newMode === 'workmate' || newMode === 'projects') && !panel.widget) setPanel({ widget: 'terminal' });
+        if ((newMode === 'workpal' || newMode === 'projects') && !panel.widget) setPanel({ widget: 'terminal' });
 
         // Switch to chat view and start fresh conversation for new mode
         handleViewChange('chat');
         window.dispatchEvent(new CustomEvent('onicode-new-chat'));
-    }, [mode, workmateFolder, activeProject, panel.widget, handleViewChange]);
+    }, [mode, workpalFolder, activeProject, panel.widget, handleViewChange]);
 
     // Change workmate folder
-    const changeWorkmateFolder = useCallback(async () => {
+    const changeWorkpalFolder = useCallback(async () => {
         if (!isElectron || !window.onicode?.selectFolder) return;
         const result = await window.onicode.selectFolder();
         if (!result.success || !result.path) return;
         const folder = { path: result.path, name: result.name || result.path.split('/').pop() || 'folder' };
-        setWorkmateFolder(folder);
-        localStorage.setItem('onicode-workmate-folder', JSON.stringify(folder));
+        setWorkpalFolder(folder);
+        localStorage.setItem('onicode-workpal-folder', JSON.stringify(folder));
         window.dispatchEvent(new CustomEvent('onicode-new-chat'));
     }, []);
 
@@ -244,19 +241,20 @@ function AppContent() {
     useEffect(() => {
         const handler = (e: Event) => {
             const newMode = (e as CustomEvent).detail as OnicodeMode;
-            if (newMode && ['onichat', 'workmate', 'projects'].includes(newMode)) switchMode(newMode);
+            if (newMode && ['onichat', 'workpal', 'projects'].includes(newMode)) switchMode(newMode);
         };
         window.addEventListener('onicode-mode-switch', handler);
         return () => window.removeEventListener('onicode-mode-switch', handler);
     }, [switchMode]);
 
-    // Keyboard shortcuts: Cmd+1/2/3 for mode switching
+    // Keyboard shortcuts: Cmd+1/2/3 for mode switching, Cmd+K for search
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
             if (!(e.metaKey || e.ctrlKey)) return;
             if (e.key === '1') { e.preventDefault(); switchMode('onichat'); }
-            else if (e.key === '2') { e.preventDefault(); switchMode('workmate'); }
+            else if (e.key === '2') { e.preventDefault(); switchMode('workpal'); }
             else if (e.key === '3') { e.preventDefault(); switchMode('projects'); }
+            else if (e.key === 'k') { e.preventDefault(); setShowSearch(prev => !prev); }
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
@@ -384,12 +382,8 @@ function AppContent() {
             <header className="app-header">
                 {/* Mode Switcher */}
                 <div className="mode-switcher">
-                    {([
-                        { id: 'onichat' as OnicodeMode, label: 'OniChat' },
-                        { id: 'workmate' as OnicodeMode, label: 'Workmate' },
-                        { id: 'projects' as OnicodeMode, label: 'Projects' },
-                    ]).map(m => (
-                        <button key={m.id} className={`mode-btn ${mode === m.id ? 'active' : ''}`} onClick={() => switchMode(m.id)} title={`${m.label} (${m.id === 'onichat' ? '⌘1' : m.id === 'workmate' ? '⌘2' : '⌘3'})`}>
+                    {Object.values(MODE_CONFIGS).map(m => (
+                        <button key={m.id} className={`mode-btn ${mode === m.id ? 'active' : ''}`} onClick={() => switchMode(m.id)} title={`${m.label} (${m.shortcut})`}>
                             <span className="mode-btn-label">{m.label}</span>
                         </button>
                     ))}
@@ -420,15 +414,20 @@ function AppContent() {
                                 </div>
                             )}
                         </div>
-                    ) : mode === 'workmate' && workmateFolder ? (
-                        <button className="mode-context-folder" onClick={changeWorkmateFolder} title={workmateFolder.path}>
-                            <span>{workmateFolder.name}</span>
+                    ) : mode === 'workpal' && workpalFolder ? (
+                        <button className="mode-context-folder" onClick={changeWorkpalFolder} title={workpalFolder.path}>
+                            <span>{workpalFolder.name}</span>
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
                         </button>
                     ) : null}
                 </div>
 
                 <div className="app-header-actions">
+                    <button className="app-header-btn" onClick={() => setShowSearch(true)} title="Search chats (⌘K)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+                        </svg>
+                    </button>
                     <button className="app-header-btn" onClick={openHistory} title="History">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
@@ -462,6 +461,9 @@ function AppContent() {
                 </div>
             )}
 
+            {/* Search Modal */}
+            {showSearch && <SearchModal onClose={() => setShowSearch(false)} onSelect={(id) => { setShowSearch(false); handleViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: id })); }} />}
+
             <div className="app-body">
                 <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} mode={mode} />
                 <div className={`main-content ${panel.widget ? 'with-panel' : ''}`}>
@@ -472,7 +474,7 @@ function AppContent() {
                             onChangeScope={changeChatScope}
                             onNewMessage={handleNewChatMessage}
                             mode={mode}
-                            workmateFolder={workmateFolder}
+                            workpalFolder={workpalFolder}
                         />
                     </div>
                     {/* Keep heavy views mounted to preserve state across tab switches */}
@@ -500,6 +502,85 @@ function AppContent() {
                 )}
             </div>
 
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════
+//  Search Modal (⌘K)
+// ══════════════════════════════════════════
+
+function SearchModal({ onClose, onSelect }: { onClose: () => void; onSelect: (id: string) => void }) {
+    const [query, setQuery] = useState('');
+    const [results, setResults] = useState<Array<{ id: string; title: string; updated_at: number; project_name?: string; scope?: string }>>([]);
+    const [selected, setSelected] = useState(0);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => { inputRef.current?.focus(); }, []);
+
+    useEffect(() => {
+        if (!query.trim() || !isElectron) {
+            if (!query.trim()) {
+                // Show recent conversations when no query
+                window.onicode?.conversationList(15, 0).then(res => {
+                    if (res.success && res.conversations) setResults(res.conversations as typeof results);
+                }).catch(() => {});
+            }
+            return;
+        }
+        // Search conversations
+        const timer = setTimeout(async () => {
+            try {
+                const res = await window.onicode!.conversationList(30, 0);
+                if (res.success && res.conversations) {
+                    const q = query.toLowerCase();
+                    const filtered = (res.conversations as typeof results).filter(c =>
+                        (c.title || '').toLowerCase().includes(q) || (c.project_name || '').toLowerCase().includes(q)
+                    );
+                    setResults(filtered);
+                    setSelected(0);
+                }
+            } catch {}
+        }, 150);
+        return () => clearTimeout(timer);
+    }, [query]);
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Escape') onClose();
+        if (e.key === 'ArrowDown') { e.preventDefault(); setSelected(p => Math.min(p + 1, results.length - 1)); }
+        if (e.key === 'ArrowUp') { e.preventDefault(); setSelected(p => Math.max(p - 1, 0)); }
+        if (e.key === 'Enter' && results[selected]) { onSelect(results[selected].id); }
+    };
+
+    const timeAgo = (ts: number) => {
+        const diff = Date.now() - ts;
+        if (diff < 60000) return 'now';
+        if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
+        if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
+        return `${Math.floor(diff / 86400000)}d ago`;
+    };
+
+    return (
+        <div className="search-modal-overlay" onClick={onClose}>
+            <div className="search-modal" onClick={e => e.stopPropagation()}>
+                <div className="search-modal-input-row">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                    <input ref={inputRef} className="search-modal-input" placeholder="Search conversations..." value={query} onChange={e => setQuery(e.target.value)} onKeyDown={handleKeyDown} />
+                    <kbd className="search-modal-kbd">esc</kbd>
+                </div>
+                <div className="search-modal-results">
+                    {results.length === 0 && query && <div className="search-modal-empty">No conversations found</div>}
+                    {results.map((c, i) => (
+                        <button key={c.id} className={`search-modal-item ${i === selected ? 'selected' : ''}`} onClick={() => onSelect(c.id)} onMouseEnter={() => setSelected(i)}>
+                            <div className="search-modal-item-title">{c.title || 'Untitled'}</div>
+                            <div className="search-modal-item-meta">
+                                {c.project_name && <span className="search-modal-item-project">{c.project_name}</span>}
+                                <span>{timeAgo(c.updated_at)}</span>
+                            </div>
+                        </button>
+                    ))}
+                </div>
+            </div>
         </div>
     );
 }
