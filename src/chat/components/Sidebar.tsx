@@ -122,60 +122,64 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
 //  Recent Chats — per-mode conversation history
 // ══════════════════════════════════════════
 
-// Matches SQLite columns from conversationStorage.list() — all snake_case
 interface RecentChat {
     id: string;
     title: string;
-    updated_at: number;
-    created_at: number;
+    updatedAt: number;
     scope?: string;
-    project_id?: string;
-    project_name?: string;
+    projectId?: string;
+    projectName?: string;
 }
 
 const MAX_RECENTS = 15;
+const CACHE_KEY = 'onicode-conversations';
+
+function readRecentsFromCache(mode: OnicodeMode): RecentChat[] {
+    try {
+        const raw = localStorage.getItem(CACHE_KEY);
+        if (!raw) return [];
+        const all = JSON.parse(raw) as RecentChat[];
+        const filtered = all.filter(c => {
+            if (mode === 'projects') return !!(c.projectName || c.scope === 'project');
+            if (mode === 'workpal') return c.scope === 'workpal' || c.scope === 'workmate';
+            return c.scope !== 'project' && c.scope !== 'workpal' && c.scope !== 'workmate' && !c.projectName;
+        });
+        return filtered.slice(0, MAX_RECENTS);
+    } catch { return []; }
+}
 
 function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
-    const [chats, setChats] = useState<RecentChat[]>([]);
-    const [loading, setLoading] = useState(true);
+    const [chats, setChats] = useState<RecentChat[]>(() => readRecentsFromCache(mode));
 
-    const loadChats = useCallback(async () => {
-        if (!isElectron || !window.onicode?.conversationList) { setLoading(false); return; }
-        setLoading(true);
-        try {
-            const res = await window.onicode.conversationList(50, 0);
-            if (res.success && res.conversations) {
-                const all = res.conversations as RecentChat[];
-                // Filter by mode — lenient: no scope = onichat
-                const filtered = all.filter(c => {
-                    if (mode === 'projects') return !!(c.project_name || c.scope === 'project');
-                    if (mode === 'workpal') return c.scope === 'workpal' || c.scope === 'workmate';
-                    // OniChat: everything without explicit project/workpal scope
-                    return c.scope !== 'project' && c.scope !== 'workpal' && c.scope !== 'workmate' && !c.project_name;
-                });
-                setChats(filtered.slice(0, MAX_RECENTS));
-            }
-        } catch { /* ignore */ }
-        setLoading(false);
+    const refresh = useCallback(() => {
+        setChats(readRecentsFromCache(mode));
     }, [mode]);
 
-    useEffect(() => { loadChats(); }, [loadChats]);
+    // Refresh when mode changes
+    useEffect(() => { refresh(); }, [refresh]);
 
-    // Refresh on events + periodic refresh
+    // Refresh on events + periodic
     useEffect(() => {
-        const handler = () => setTimeout(loadChats, 300);
+        const handler = () => setTimeout(refresh, 200);
         const events = ['onicode-new-chat', 'onicode-conversation-saved', 'onicode-conversation-deleted', 'onicode-conversations-cleared'];
         events.forEach(e => window.addEventListener(e, handler));
-        // Also refresh every 10s to catch title updates and new saves
-        const iv = setInterval(loadChats, 10000);
-        return () => { events.forEach(e => window.removeEventListener(e, handler)); clearInterval(iv); };
-    }, [loadChats]);
+        // Also listen to storage changes (ChatView writes to localStorage)
+        const storageHandler = (e: StorageEvent) => { if (e.key === CACHE_KEY) refresh(); };
+        window.addEventListener('storage', storageHandler);
+        const iv = setInterval(refresh, 5000);
+        return () => {
+            events.forEach(e => window.removeEventListener(e, handler));
+            window.removeEventListener('storage', storageHandler);
+            clearInterval(iv);
+        };
+    }, [refresh]);
 
     const handleClick = (chatId: string) => {
         onViewChange('chat');
         window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chatId }));
     };
 
+    const loading = false; // localStorage reads are instant
     const timeAgo = (ts: number) => {
         const diff = Date.now() - ts;
         if (diff < 60000) return 'now';
@@ -207,12 +211,12 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
                     <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Untitled'}>
                         <div className="sidebar-recent-title">{c.title || 'Untitled'}</div>
                         <div className="sidebar-recent-meta">
-                            {mode === 'projects' && c.project_name ? (
-                                <span className="sidebar-recent-project">{c.project_name}</span>
+                            {mode === 'projects' && c.projectName ? (
+                                <span className="sidebar-recent-project">{c.projectName}</span>
                             ) : mode === 'projects' ? (
                                 <span className="sidebar-recent-brainstorm">Brainstorm</span>
                             ) : null}
-                            <span className="sidebar-recent-time">{timeAgo(c.updated_at)}</span>
+                            <span className="sidebar-recent-time">{timeAgo(c.updatedAt)}</span>
                         </div>
                     </button>
                 ))}

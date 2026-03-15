@@ -3,6 +3,42 @@ import { marked } from 'marked';
 import hljs from 'highlight.js/lib/core';
 import { isElectron } from '../../utils';
 
+// Register common languages for syntax highlighting
+import javascript from 'highlight.js/lib/languages/javascript';
+import typescript from 'highlight.js/lib/languages/typescript';
+import python from 'highlight.js/lib/languages/python';
+import css from 'highlight.js/lib/languages/css';
+import xml from 'highlight.js/lib/languages/xml';
+import json from 'highlight.js/lib/languages/json';
+import markdown from 'highlight.js/lib/languages/markdown';
+import yaml from 'highlight.js/lib/languages/yaml';
+import shell from 'highlight.js/lib/languages/shell';
+import bash from 'highlight.js/lib/languages/bash';
+import rust from 'highlight.js/lib/languages/rust';
+import go from 'highlight.js/lib/languages/go';
+import java from 'highlight.js/lib/languages/java';
+import sql from 'highlight.js/lib/languages/sql';
+import diff from 'highlight.js/lib/languages/diff';
+import plaintext from 'highlight.js/lib/languages/plaintext';
+
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('shell', shell);
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('rust', rust);
+hljs.registerLanguage('go', go);
+hljs.registerLanguage('java', java);
+hljs.registerLanguage('sql', sql);
+hljs.registerLanguage('diff', diff);
+hljs.registerLanguage('plaintext', plaintext);
+
 // ══════════════════════════════════════════
 //  File type detection
 // ══════════════════════════════════════════
@@ -20,8 +56,9 @@ const CODE_EXTENSIONS: Record<string, string> = {
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg']);
 const PDF_EXTENSIONS = new Set(['pdf']);
 const MARKDOWN_EXTENSIONS = new Set(['md', 'mdx']);
+const OFFICE_EXTENSIONS = new Set(['pptx', 'ppt', 'docx', 'doc', 'xlsx', 'xls']);
 
-type ViewerMode = 'code' | 'markdown' | 'image' | 'pdf' | 'binary' | 'loading' | 'error';
+type ViewerMode = 'code' | 'markdown' | 'image' | 'pdf' | 'office' | 'binary' | 'loading' | 'error';
 
 interface ViewerFile {
     path: string;
@@ -43,6 +80,7 @@ function getViewerMode(ext: string): ViewerMode {
     if (MARKDOWN_EXTENSIONS.has(ext)) return 'markdown';
     if (IMAGE_EXTENSIONS.has(ext)) return 'image';
     if (PDF_EXTENSIONS.has(ext)) return 'pdf';
+    if (OFFICE_EXTENSIONS.has(ext)) return 'office';
     if (CODE_EXTENSIONS[ext] || ext === '') return 'code';
     return 'binary';
 }
@@ -58,6 +96,10 @@ interface DocumentViewerWidgetProps {
 export default function DocumentViewerWidget({ data }: DocumentViewerWidgetProps) {
     const [file, setFile] = useState<ViewerFile | null>(null);
     const [editing, setEditing] = useState(false);
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchMatches, setSearchMatches] = useState(0);
+    const searchInputRef = useRef<HTMLInputElement>(null);
     const [editContent, setEditContent] = useState('');
     const [dirty, setDirty] = useState(false);
     const codeRef = useRef<HTMLElement>(null);
@@ -110,6 +152,9 @@ export default function DocumentViewerWidget({ data }: DocumentViewerWidgetProps
                     setFile({ path: filePath, name: fileName, ext, mode: 'pdf', dataUri: res.dataUri, size: res.size });
                 }
             });
+        } else if (mode === 'office') {
+            // Office files — open externally, show info card
+            setFile({ path: filePath, name: fileName, ext, mode: 'office', size: 0 });
         } else if (mode === 'code' || mode === 'markdown') {
             window.onicode!.readFileContent(filePath).then(res => {
                 if (res.error) {
@@ -160,6 +205,38 @@ export default function DocumentViewerWidget({ data }: DocumentViewerWidgetProps
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
     }, [editing, dirty, saveFile]);
+
+    // Search — Cmd+F opens, counts matches
+    useEffect(() => {
+        if (!searchOpen) return;
+        searchInputRef.current?.focus();
+    }, [searchOpen]);
+
+    useEffect(() => {
+        if (!searchQuery || !file?.content) { setSearchMatches(0); return; }
+        try {
+            const regex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+            const matches = file.content.match(regex);
+            setSearchMatches(matches ? matches.length : 0);
+        } catch { setSearchMatches(0); }
+    }, [searchQuery, file?.content]);
+
+    // Cmd+F to toggle search
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'f' && file) {
+                e.preventDefault();
+                setSearchOpen(prev => !prev);
+                if (!searchOpen) setTimeout(() => searchInputRef.current?.focus(), 50);
+            }
+            if (e.key === 'Escape' && searchOpen) {
+                setSearchOpen(false);
+                setSearchQuery('');
+            }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [file, searchOpen]);
 
     // Open file externally
     const openExternal = useCallback(() => {
@@ -226,6 +303,12 @@ export default function DocumentViewerWidget({ data }: DocumentViewerWidgetProps
                     </span>
                 </div>
                 <div className="docviewer-actions">
+                    {/* Search toggle */}
+                    {(file.mode === 'code' || file.mode === 'markdown') && (
+                        <button className={`docviewer-btn ${searchOpen ? 'active' : ''}`} onClick={() => { setSearchOpen(!searchOpen); if (searchOpen) setSearchQuery(''); }} title="Search (Cmd+F)">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                        </button>
+                    )}
                     {(file.mode === 'code' || file.mode === 'markdown') && (
                         <>
                             {!editing ? (
@@ -256,8 +339,32 @@ export default function DocumentViewerWidget({ data }: DocumentViewerWidgetProps
                 </div>
             </div>
 
+            {/* Search bar */}
+            {searchOpen && (
+                <div className="docviewer-search">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                    <input ref={searchInputRef} className="docviewer-search-input" placeholder="Find in file..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Escape' && (setSearchOpen(false), setSearchQuery(''))} />
+                    {searchQuery && <span className="docviewer-search-count">{searchMatches} match{searchMatches !== 1 ? 'es' : ''}</span>}
+                </div>
+            )}
+
             {/* Content area */}
             <div className="docviewer-body">
+                {file.mode === 'office' && (
+                    <div className="docviewer-office">
+                        <div className="docviewer-office-icon">
+                            {file.ext.startsWith('ppt') ? '📊' : file.ext.startsWith('doc') ? '📄' : '📈'}
+                        </div>
+                        <p className="docviewer-office-name">{file.name}</p>
+                        <p className="docviewer-office-hint">
+                            {file.ext.startsWith('ppt') ? 'PowerPoint' : file.ext.startsWith('doc') ? 'Word Document' : 'Excel Spreadsheet'}
+                        </p>
+                        <button className="docviewer-btn docviewer-office-open" onClick={openExternal}>
+                            Open in default app
+                        </button>
+                    </div>
+                )}
+
                 {file.mode === 'code' && !editing && (
                     <pre className="docviewer-code"><code ref={codeRef} className={`hljs language-${CODE_EXTENSIONS[file.ext] || ''}`} /></pre>
                 )}

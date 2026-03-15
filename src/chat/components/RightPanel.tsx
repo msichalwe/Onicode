@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 import TerminalWidget from './widgets/TerminalWidget';
 import AgentsWidget from './widgets/AgentsWidget';
@@ -56,6 +56,36 @@ export interface RightPanelProps {
 export default function RightPanel({ panel, onClose, onChangeWidget, mode = 'projects' }: RightPanelProps) {
     const [collapsed, setCollapsed] = useState(false);
     const [mountedWidgets, setMountedWidgets] = useState<Set<WidgetType>>(new Set());
+    const [panelWidth, setPanelWidth] = useState(() => {
+        const saved = localStorage.getItem('onicode-panel-width');
+        return saved ? parseInt(saved, 10) : 420;
+    });
+    const resizingRef = useRef(false);
+
+    const handleResizeStart = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        resizingRef.current = true;
+        const startX = e.clientX;
+        const startWidth = panelWidth;
+        const onMove = (ev: MouseEvent) => {
+            if (!resizingRef.current) return;
+            const delta = startX - ev.clientX; // dragging left = wider
+            const newWidth = Math.max(280, Math.min(window.innerWidth * 0.6, startWidth + delta));
+            setPanelWidth(newWidth);
+        };
+        const onUp = () => {
+            resizingRef.current = false;
+            localStorage.setItem('onicode-panel-width', String(panelWidth));
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    }, [panelWidth]);
 
     // Track mounted widgets so terminal etc. stay alive across tab switches AND panel close/open
     useEffect(() => {
@@ -88,7 +118,8 @@ export default function RightPanel({ panel, onClose, onChangeWidget, mode = 'pro
     if (!isVisible && !mountedWidgets.has('terminal')) return null;
 
     return (
-        <div className={`right-panel ${collapsed ? 'right-panel-collapsed' : ''}`} style={{ display: isVisible ? undefined : 'none' }}>
+        <div className={`right-panel ${collapsed ? 'right-panel-collapsed' : ''}`} style={{ display: isVisible ? undefined : 'none', width: `${panelWidth}px` }}>
+            <div className="right-panel-resize" onMouseDown={handleResizeStart} />
             <div className="right-panel-header">
                 <div className="right-panel-tabs">
                     {WIDGETS.filter(w => WIDGETS_BY_MODE[mode].has(w.id)).map((w) => (

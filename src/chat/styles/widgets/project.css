@@ -386,6 +386,84 @@
   font-size: 13px;
 }
 
+/* ── Viewer Search Bar ── */
+.docviewer-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.docviewer-search svg { flex-shrink: 0; color: var(--text-tertiary); }
+
+.docviewer-search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: 12px;
+  outline: none;
+}
+
+.docviewer-search-input::placeholder { color: var(--text-tertiary); }
+
+.docviewer-search-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.docviewer-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* ── Office File View ── */
+.docviewer-office {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+}
+
+.docviewer-office-icon {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.docviewer-office-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.docviewer-office-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.docviewer-office-open {
+  margin-top: 8px;
+  padding: 6px 16px !important;
+  font-size: 12px !important;
+  border: 1px solid var(--accent) !important;
+  color: var(--accent) !important;
+  border-radius: var(--radius-sm);
+}
+
+.docviewer-office-open:hover {
+  background: var(--accent) !important;
+  color: white !important;
+}
+
 /* ── Task Display in Project Widget ── */
 
 .project-widget-progress {

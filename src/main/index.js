@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, shell, net, protocol, nativeImage } = require('electron');
+app.setName('Onicode');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');

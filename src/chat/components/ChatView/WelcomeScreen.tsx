@@ -6,10 +6,12 @@ export default function WelcomeScreen({ onSuggestionClick }: WelcomeScreenProps)
     return (
         <div className="welcome">
             <div className="welcome-logo">
-                <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-                    <rect width="48" height="48" rx="12" fill="var(--accent)" />
-                    <path d="M16 32V20l8-6 8 6v12l-8-4-8 4z" fill="var(--text-on-accent)" opacity="0.9" />
-                    <path d="M24 14l8 6v12l-8-4V14z" fill="var(--text-on-accent)" opacity="0.6" />
+                <svg width="48" height="48" viewBox="0 0 1024 1024" fill="none">
+                    <rect width="1024" height="1024" rx="228" fill="#C4A882"/>
+                    <circle cx="512" cy="512" r="260" fill="none" stroke="#fff" strokeWidth="64" opacity="0.95"/>
+                    <path d="M432 412 L352 512 L432 612" fill="none" stroke="#fff" strokeWidth="48" strokeLinecap="round" strokeLinejoin="round" opacity="0.9"/>
+                    <path d="M592 412 L672 512 L592 612" fill="none" stroke="#fff" strokeWidth="48" strokeLinecap="round" strokeLinejoin="round" opacity="0.9"/>
+                    <circle cx="512" cy="512" r="28" fill="#fff" opacity="0.85"/>
                 </svg>
             </div>
             <h2>Welcome to Onicode</h2>

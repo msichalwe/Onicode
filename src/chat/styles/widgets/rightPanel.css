@@ -5,9 +5,9 @@
 }
 
 .right-panel {
-  width: 420px;
-  min-width: 320px;
-  max-width: 50vw;
+  position: relative;
+  min-width: 280px;
+  max-width: 60vw;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border-light);
   display: flex;
@@ -16,6 +16,23 @@
     background var(--transition-theme),
     border-color var(--transition-theme);
   animation: panelSlideIn 0.25s ease-out;
+}
+
+.right-panel-resize {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 10;
+  transition: background 0.15s;
+}
+
+.right-panel-resize:hover,
+.right-panel-resize:active {
+  background: var(--accent);
+  opacity: 0.3;
 }
 
 @keyframes panelSlideIn {
