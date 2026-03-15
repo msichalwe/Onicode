@@ -1333,6 +1333,24 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         if (activeConvId === convId) newChat();
     }, [activeConvId, newChat]);
 
+    // ── Listen for external load-conversation signal (from sidebar recents / search modal) ──
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const convId = (e as CustomEvent).detail as string;
+            if (!convId) return;
+            const cached = loadConversationsFromCache().find(c => c.id === convId);
+            if (cached) { loadConversation(cached); return; }
+            if (isElectron && window.onicode?.conversationGet) {
+                window.onicode.conversationGet(convId).then((res: unknown) => {
+                    const r = res as { success?: boolean; conversation?: Conversation };
+                    if (r.success && r.conversation) loadConversation(r.conversation);
+                }).catch(() => {});
+            }
+        };
+        window.addEventListener('onicode-load-conversation', handler);
+        return () => window.removeEventListener('onicode-load-conversation', handler);
+    }, [loadConversation]);
+
     // ── Toggle expanded step ──
     const toggleStepExpand = useCallback((stepId: string, event?: React.MouseEvent) => {
         const clickedEl = event?.currentTarget as HTMLElement | undefined;

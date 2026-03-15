@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { isElectron } from '../utils';
 
 type View = 'chat' | 'projects' | 'attachments' | 'memories' | 'settings' | 'todo' | 'workflows';
@@ -138,29 +138,51 @@ interface RecentChat {
 
 const MAX_RECENTS = 15;
 
-function RecentChats({ mode, onViewChange, searchQuery = '' }: { mode: OnicodeMode; onViewChange: (v: View) => void; searchQuery?: string }) {
+function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
     const [chats, setChats] = useState<RecentChat[]>([]);
+    const [hasMore, setHasMore] = useState(false);
+    const sentinelRef = useRef<HTMLDivElement>(null);
+    const pageRef = useRef(0);
+    const loadingRef = useRef(false);
 
-    const loadChats = useCallback(async () => {
-        if (!isElectron || !window.onicode?.conversationList) return;
-        try {
-            const res = await window.onicode.conversationList(50, 0);
-            if (res.success && res.conversations) {
-                const filtered = (res.conversations as RecentChat[]).filter(c => {
-                    if (mode === 'projects') return c.project_name || c.scope === 'project';
-                    if (mode === 'workpal') return c.scope === 'workpal';
-                    return !c.project_name && c.scope !== 'project' && c.scope !== 'workpal';
-                });
-                setChats(filtered.slice(0, MAX_RECENTS));
-            }
-        } catch { /* ignore */ }
+    const filterByMode = useCallback((conversations: RecentChat[]) => {
+        return conversations.filter(c => {
+            if (mode === 'projects') return c.project_name || c.scope === 'project';
+            if (mode === 'workpal') return c.scope === 'workpal';
+            return !c.project_name && c.scope !== 'project' && c.scope !== 'workpal';
+        });
     }, [mode]);
 
-    useEffect(() => { loadChats(); }, [loadChats]);
+    const loadChats = useCallback(async (reset = false) => {
+        if (!isElectron || !window.onicode?.conversationList || loadingRef.current) return;
+        loadingRef.current = true;
+        const offset = reset ? 0 : pageRef.current * 30;
+        try {
+            const res = await window.onicode.conversationList(30, offset);
+            if (res.success && res.conversations) {
+                const filtered = filterByMode(res.conversations as RecentChat[]);
+                if (reset) {
+                    setChats(filtered.slice(0, MAX_RECENTS));
+                    pageRef.current = 1;
+                } else {
+                    setChats(prev => {
+                        const ids = new Set(prev.map(c => c.id));
+                        const newOnes = filtered.filter(c => !ids.has(c.id));
+                        return [...prev, ...newOnes].slice(0, MAX_RECENTS);
+                    });
+                    pageRef.current++;
+                }
+                setHasMore(filtered.length >= 5 && (reset ? filtered.length : chats.length + filtered.length) < MAX_RECENTS);
+            }
+        } catch { /* ignore */ }
+        loadingRef.current = false;
+    }, [mode, filterByMode, chats.length]);
+
+    useEffect(() => { loadChats(true); }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Refresh on new chat events
     useEffect(() => {
-        const handler = () => setTimeout(loadChats, 500);
+        const handler = () => setTimeout(() => loadChats(true), 500);
         window.addEventListener('onicode-new-chat', handler);
         window.addEventListener('onicode-conversation-saved', handler);
         return () => {
@@ -168,6 +190,16 @@ function RecentChats({ mode, onViewChange, searchQuery = '' }: { mode: OnicodeMo
             window.removeEventListener('onicode-conversation-saved', handler);
         };
     }, [loadChats]);
+
+    // Lazy load: intersection observer on sentinel
+    useEffect(() => {
+        if (!hasMore || !sentinelRef.current) return;
+        const observer = new IntersectionObserver(([entry]) => {
+            if (entry.isIntersecting) loadChats(false);
+        }, { threshold: 0.5 });
+        observer.observe(sentinelRef.current);
+        return () => observer.disconnect();
+    }, [hasMore, loadChats]);
 
     const handleClick = (chatId: string) => {
         onViewChange('chat');
@@ -182,12 +214,7 @@ function RecentChats({ mode, onViewChange, searchQuery = '' }: { mode: OnicodeMo
         return `${Math.floor(diff / 86400000)}d`;
     };
 
-    // Filter by search query
-    const displayed = searchQuery
-        ? chats.filter(c => (c.title || '').toLowerCase().includes(searchQuery.toLowerCase()) || (c.project_name || '').toLowerCase().includes(searchQuery.toLowerCase()))
-        : chats;
-
-    if (displayed.length === 0 && !searchQuery) return null;
+    if (chats.length === 0) return null;
 
     const openFullHistory = () => {
         onViewChange('chat');
@@ -201,10 +228,7 @@ function RecentChats({ mode, onViewChange, searchQuery = '' }: { mode: OnicodeMo
                 <button className="sidebar-recents-all" onClick={openFullHistory} title="View all chats">All</button>
             </div>
             <div className="sidebar-recents-list">
-                {displayed.length === 0 && searchQuery && (
-                    <div className="sidebar-recents-empty">No matches for &ldquo;{searchQuery}&rdquo;</div>
-                )}
-                {displayed.map(c => (
+                {chats.map(c => (
                     <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Untitled'}>
                         <div className="sidebar-recent-title">{c.title || 'Untitled'}</div>
                         <div className="sidebar-recent-meta">
@@ -217,6 +241,7 @@ function RecentChats({ mode, onViewChange, searchQuery = '' }: { mode: OnicodeMo
                         </div>
                     </button>
                 ))}
+                {hasMore && <div ref={sentinelRef} className="sidebar-recents-sentinel" />}
             </div>
         </div>
     );
