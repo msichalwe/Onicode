@@ -48,6 +48,10 @@ export function toolIcon(name: string): string {
         set_timer: 'Timer Set',
         create_workflow: 'Workflow Created', run_workflow: 'Workflow Run', list_workflows: 'Workflows', delete_workflow: 'Workflow Deleted',
         configure_heartbeat: 'Heartbeat',
+        ctx_execute: 'Executed', ctx_search: 'KB Search', ctx_index: 'Indexed',
+        ctx_batch: 'Batch', ctx_stats: 'Context Stats', ctx_fetch: 'Fetched & Indexed',
+        mcp_search: 'MCP Search',
+        show_widget: 'Widget',
     };
     return icons[name] || name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
@@ -376,6 +380,40 @@ function getDetail(step: ToolStep): string {
             const hEnabled = (r as Record<string, unknown>)?.current_config as Record<string, unknown> | undefined;
             return hEnabled?.enabled ? 'Enabled' : 'Updated';
         }
+        case 'ctx_execute': {
+            const lang = (a as Record<string, unknown>)?.language || 'shell';
+            const savings = (r as Record<string, unknown>)?.context_savings;
+            return savings ? `${lang} (${savings})` : `${lang}`;
+        }
+        case 'ctx_search': {
+            const queries = (a as Record<string, unknown>)?.queries as string[] | undefined;
+            const total = (r as Record<string, unknown>)?.total_results;
+            return queries ? `"${queries[0]}"${queries.length > 1 ? ` +${queries.length - 1}` : ''} → ${total || 0} results` : '';
+        }
+        case 'ctx_index': {
+            const src = (a as Record<string, unknown>)?.source || (a as Record<string, unknown>)?.path || 'content';
+            const chunks = (r as Record<string, unknown>)?.chunk_count;
+            return `${src} (${chunks || 0} chunks)`;
+        }
+        case 'ctx_batch': {
+            const cmds = ((a as Record<string, unknown>)?.commands as unknown[])?.length || 0;
+            const qs = ((a as Record<string, unknown>)?.queries as unknown[])?.length || 0;
+            return `${cmds} commands, ${qs} queries`;
+        }
+        case 'ctx_stats': {
+            const cs = (r as Record<string, unknown>)?.context_savings as Record<string, unknown> | undefined;
+            return cs ? `${cs.savings_ratio} saved (${cs.bytes_saved} bytes)` : '';
+        }
+        case 'ctx_fetch': {
+            const fetchUrl = (a as Record<string, unknown>)?.url as string || '';
+            const indexed = (r as Record<string, unknown>)?.chunks_indexed;
+            return `${fetchUrl.slice(0, 50)} → ${indexed || 0} chunks`;
+        }
+        case 'mcp_search': {
+            const mcpQ = (a as Record<string, unknown>)?.query as string || '';
+            const mcpFound = (r as Record<string, unknown>)?.found as number || 0;
+            return `"${mcpQ}" → ${mcpFound} server${mcpFound !== 1 ? 's' : ''}`;
+        }
         default:
             return '';
     }
@@ -418,6 +456,12 @@ function hasExpandableContent(step: ToolStep): boolean {
         case 'conversation_recall': return !!(r.context);
         case 'create_plan': return true;
         case 'get_plan': return !!(r.plan);
+        case 'ctx_execute': return !!(r.stdout || r.stderr);
+        case 'ctx_search': return !!(r.results && Array.isArray(r.results) && (r.results as unknown[]).length > 0);
+        case 'ctx_index': return !!(r.indexed);
+        case 'ctx_batch': return !!(r.executions || r.searches);
+        case 'ctx_stats': return !!(r.context_savings);
+        case 'ctx_fetch': return !!(r.preview);
         default: return false;
     }
 }
@@ -1105,13 +1149,93 @@ function renderExpandedContent(step: ToolStep) {
                 </div>
             );
         }
+        case 'ctx_execute': {
+            const ctxOut = String(r.stdout || '');
+            const ctxErr = String(r.stderr || '');
+            const ctxSav = r.context_savings as string | undefined;
+            const ctxFiltered = r.filtered_by_intent as string | undefined;
+            return (
+                <div className="tool-step-expanded">
+                    {ctxSav && <div className="ctx-savings-badge">{ctxSav}</div>}
+                    {ctxFiltered && <div style={{ padding: '4px 12px', fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>Filtered by intent: {ctxFiltered}</div>}
+                    <div className="tool-step-terminal">
+                        {ctxOut && <pre className="tool-step-stdout">{ctxOut.slice(0, 3000)}</pre>}
+                        {ctxErr && <pre className="tool-step-stderr">{ctxErr.slice(0, 1000)}</pre>}
+                    </div>
+                </div>
+            );
+        }
+        case 'ctx_search': {
+            const ctxResults = (r.results as Array<{ title: string; snippet: string; score: number }>) || [];
+            return (
+                <div className="tool-step-expanded">
+                    {ctxResults.slice(0, 5).map((res, i) => (
+                        <div key={i} style={{ padding: '4px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--accent-primary)', fontWeight: 600 }}>{res.title || 'Untitled'}</div>
+                            <pre style={{ fontSize: '0.7rem', margin: '2px 0', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>{(res.snippet || '').slice(0, 500)}</pre>
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+        case 'ctx_index': {
+            const ctxTerms = String(r.searchable_terms || '');
+            return (
+                <div className="tool-step-expanded">
+                    <div style={{ padding: '6px 12px', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                        {r.chunk_count as number} chunks, {r.bytes_indexed as number} bytes indexed
+                        {ctxTerms && <div style={{ marginTop: 4, color: 'var(--text-tertiary)' }}>Terms: {ctxTerms.slice(0, 200)}</div>}
+                    </div>
+                </div>
+            );
+        }
+        case 'ctx_batch': {
+            const execs = (r.executions as Array<{ label: string; exit_code: number; summary: string; error?: string }>) || [];
+            const searches = (r.searches as Array<{ query: string; results: Array<{ title: string; snippet: string }> }>) || [];
+            return (
+                <div className="tool-step-expanded">
+                    {execs.map((ex, i) => (
+                        <div key={`e${i}`} style={{ padding: '4px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+                            <div style={{ fontSize: '0.72rem', color: ex.error ? 'var(--error)' : 'var(--accent-primary)', fontWeight: 600 }}>{ex.label} (exit: {ex.exit_code})</div>
+                            <pre style={{ fontSize: '0.7rem', margin: '2px 0', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>{(ex.summary || ex.error || '').slice(0, 500)}</pre>
+                        </div>
+                    ))}
+                    {searches.map((s, i) => (
+                        <div key={`s${i}`} style={{ padding: '4px 12px' }}>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>Search: "{s.query}" ({s.results?.length || 0} results)</div>
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+        case 'ctx_stats': {
+            const savings = r.context_savings as Record<string, unknown> | undefined;
+            const kb = r.knowledge_base as Record<string, unknown> | undefined;
+            return (
+                <div className="tool-step-expanded">
+                    <div style={{ padding: '6px 12px', fontSize: '0.72rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                        {savings && <div><strong>{savings.savings_ratio as string}</strong> saved ({savings.bytes_saved as number} bytes), {savings.total_bytes_processed as number} processed</div>}
+                        {kb && <div>{kb.totalSources as number} sources, {kb.totalChunks as number} chunks, {kb.totalVocabulary as number} vocabulary</div>}
+                    </div>
+                </div>
+            );
+        }
+        case 'ctx_fetch': {
+            const ctxPreview = String(r.preview || '');
+            return (
+                <div className="tool-step-expanded">
+                    <div style={{ padding: '4px 12px', fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>{r.bytes_fetched as number} bytes fetched, {r.chunks_indexed as number} chunks indexed</div>
+                    {ctxPreview && <div className="tool-step-terminal"><pre className="tool-step-stdout">{ctxPreview.slice(0, 2000)}</pre></div>}
+                </div>
+            );
+        }
         default:
             return null;
     }
 }
 
 // ── Grouping constants ──
-const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status', 'gh_cli', 'gws_cli', 'create_plan', 'update_plan', 'get_plan']);
+const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status', 'gh_cli', 'gws_cli', 'create_plan', 'update_plan', 'get_plan', 'ctx_execute', 'ctx_batch', 'ctx_stats', 'ctx_fetch']);
 
 const groupLabels: Record<string, { single: string; plural: string }> = {
     create_file: { single: 'Created', plural: 'Created' },

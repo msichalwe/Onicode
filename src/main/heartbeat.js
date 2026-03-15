@@ -630,6 +630,8 @@ function _updateCheckTimestamp(checkId) {
 function _sendNotification(title, body) {
     try {
         new Notification({ title, body }).show();
+        // Notification hook
+        try { const { executeHook } = require('./hooks'); executeHook('Notification', { command: `${title}: ${body}` }); } catch {}
     } catch (err) {
         logger.warn('heartbeat', `Failed to show notification: ${err.message}`);
     }

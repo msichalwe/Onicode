@@ -16,17 +16,19 @@ const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
 const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
 const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval, SUB_AGENT_TOOL_SETS, getActiveToolDefinitions, loadToolCategories, resetLoadedTools, DEFERRED_TOOL_CATEGORIES, getPlanModeState, setPlanModeState, getWorktreeState } = require('./aiTools');
-const { conversationStorage, milestoneStorage, attachmentStorage, conversationPlanStorage, closeDB } = require('./storage');
+const { closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
 const { registerCodeIndexIPC, getCodeIndexToolDefinitions, executeCodeIndexTool } = require('./codeIndex');
 const { registerOrchestratorIPC, setOrchestratorDeps, ORCHESTRATOR_TOOL_DEFINITIONS, executeOrchestratorTool } = require('./orchestrator');
 const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled: connectAllMCP, disconnectAll: disconnectAllMCP } = require('./mcp');
+const { registerCatalogIPC, MCP_SEARCH_TOOL, executeMcpSearch } = require('./mcpCatalog');
 const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
 const { registerKeystoreIPC } = require('./keystore');
 const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setWorkflowCreator: setSchedulerWorkflowCreator, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg, setProviderConfig: setSchedulerProviderConfig } = require('./scheduler');
 const { registerWorkflowIPC, executeWorkflow, createWorkflow, ensureSystemWorkflow, isSystemWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
 const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig, setSendAutomationMessage: setHeartbeatAutomationMsg } = require('./heartbeat');
 const { createTray, destroyTray, updateTrayMenu, hasTray } = require('./tray');
+const { registerChannelsIPC, telegramAutoConnect, telegramDisconnect, stopTelegramPolling, setProviderConfig: setChannelsProviderConfig } = require('./channels');
 
 // ── Extracted modules ──
 const { registerProviderIPC, isOAuthToken, decodeJWT, getAccountId } = require('./ai/providers');
@@ -34,6 +36,7 @@ const { registerMiscIPC } = require('./ipc/misc');
 const { registerDataIPC } = require('./ipc/data');
 const { registerPermissionsIPC, DEFAULT_PERMISSIONS, getActivePermissions, getAgentMode, loadProjectPermissions, setAgentMode, isDangerousProtectionEnabled, isAutoCommitEnabled } = require('./ipc/permissions');
 const { registerPlanModeIPC } = require('./ipc/planMode');
+const { registerContextModeIPC, getContextModeToolDefinitions, executeContextModeTool, onToolComplete: ctxOnToolComplete, onUserMessage: ctxOnUserMessage, onPreCompact: ctxOnPreCompact, onSessionResume: ctxOnSessionResume, setMainWindow: setCtxModeWindow, setSessionId: setCtxModeSessionId, getContextSavings } = require('./contextMode');
 
 let mainWindow = null;
 
@@ -73,6 +76,7 @@ function seedAllProviderConfigs(config) {
     setWorkflowProviderConfig(config);
     setSchedulerProviderConfig(config);
     setHeartbeatProviderConfig(config);
+    setChannelsProviderConfig(config);
 }
 
 // ── Tool definition caching + smart filtering ──
@@ -103,12 +107,13 @@ const TOOL_SETS = {
         'trajectory_search', 'index_project', 'verify_project']),
     automation: new Set(['create_schedule', 'list_schedules', 'delete_schedule',
         'create_workflow', 'run_workflow', 'list_workflows', 'delete_workflow',
-        'configure_heartbeat', 'set_timer']),
+        'configure_heartbeat', 'set_timer', 'show_widget']),
     notebook: new Set(['read_notebook', 'edit_notebook']),
     deploy: new Set(['read_deployment_config', 'deploy_web_app', 'check_deploy_status']),
     memory: new Set(['memory_read', 'memory_write', 'memory_append', 'memory_search', 'memory_save_fact',
         'memory_smart_search', 'memory_get_related', 'memory_hot_list',
         'conversation_search', 'conversation_recall']),
+    context: new Set(['ctx_execute', 'ctx_search', 'ctx_index', 'ctx_batch', 'ctx_stats', 'ctx_fetch']),
 };
 
 function getActiveToolSets() {
@@ -119,8 +124,8 @@ function getActiveToolSets() {
         const hasWebFiles = fs.existsSync(path.join(_currentProjectPath, 'package.json'));
         if (hasWebFiles) sets.push('browser', 'deploy');
     }
-    // Always include workspace, memory, notebook, automation
-    sets.push('workspace', 'memory', 'notebook', 'automation');
+    // Always include workspace, memory, notebook, automation, context
+    sets.push('workspace', 'memory', 'notebook', 'automation', 'context');
     // Include advanced for complex tasks (projects with many files)
     sets.push('advanced');
     return sets;
@@ -146,7 +151,9 @@ function getAllToolDefinitions(options = {}) {
         ...getSchedulerToolDefinitions(),
         ...getWorkflowToolDefinitions(),
         ...getHeartbeatToolDefinitions(),
+        ...getContextModeToolDefinitions(),
         ...mcpTools,
+        MCP_SEARCH_TOOL,
     ];
 
     if (full) {
@@ -179,6 +186,10 @@ function getAllToolDefinitions(options = {}) {
 
 // Route tool calls to the right executor
 async function executeAnyTool(name, args) {
+    // MCP catalog search (special — not a connected server tool)
+    if (name === 'mcp_search') {
+        return executeMcpSearch(args);
+    }
     // MCP tools (prefixed with mcp_)
     if (name.startsWith('mcp_')) {
         return executeMCPTool(name, args);
@@ -204,12 +215,16 @@ async function executeAnyTool(name, args) {
         return executeSchedulerTool(name, args);
     }
     // Workflow tools
-    if (['create_workflow', 'run_workflow', 'list_workflows', 'delete_workflow', 'set_timer'].includes(name)) {
+    if (['create_workflow', 'run_workflow', 'list_workflows', 'delete_workflow', 'set_timer', 'show_widget'].includes(name)) {
         return executeWorkflowTool(name, args);
     }
     // Heartbeat tools
     if (['configure_heartbeat'].includes(name)) {
         return executeHeartbeatTool(name, args);
+    }
+    // Context mode tools
+    if (name.startsWith('ctx_')) {
+        return executeContextModeTool(name, args);
     }
     // Default: aiTools executor
     return executeTool(name, args);
@@ -285,6 +300,7 @@ function createWindow() {
     setAIToolsWindow(mainWindow);
     setMemoryWindow(mainWindow);
     setHooksWindow(mainWindow);
+    setCtxModeWindow(mainWindow);
 
     // Wire orchestrator dependencies
     setOrchestratorDeps({
@@ -335,347 +351,7 @@ ipcMain.handle('open-external', async (_event, url) => {
     if (url) shell.openExternal(url);
 });
 
-// JWT + Token helpers → ./ai/providers.js (isOAuthToken, decodeJWT, getAccountId)
-
-// PKCE + OAuth config + handlers → ./ai/providers.js
-
-ipcMain.handle('codex-oauth-get-auth-url', async () => {
-    const pkce = generatePKCE();
-    const state = generateRandomString(32);
-    pendingOAuth = { verifier: pkce.verifier, state };
-
-    const params = new URLSearchParams({
-        response_type: 'code',
-        client_id: CODEX_OAUTH.clientId,
-        redirect_uri: CODEX_OAUTH.redirectUri,
-        scope: CODEX_OAUTH.scope,
-        audience: CODEX_OAUTH.audience,
-        code_challenge: pkce.challenge,
-        code_challenge_method: 'S256',
-        state,
-        id_token_add_organizations: 'true',
-        codex_cli_simplified_flow: 'true',
-        originator: 'codex_cli_rs',
-    });
-
-    const authUrl = `${CODEX_OAUTH.authorizeEndpoint}?${params.toString()}`;
-    shell.openExternal(authUrl);
-    return { success: true, authUrl };
-});
-
-// ══════════════════════════════════════════
-//  IPC: Codex OAuth — exchange redirect URL for token
-// ══════════════════════════════════════════
-
-ipcMain.handle('codex-oauth-exchange', async (_event, redirectUrl) => {
-    if (!pendingOAuth) return { error: 'No pending OAuth flow. Click "Sign in" first.' };
-
-    try {
-        const url = new URL(redirectUrl.trim());
-        const code = url.searchParams.get('code');
-        const error = url.searchParams.get('error');
-        const errorDesc = url.searchParams.get('error_description');
-
-        if (error) { pendingOAuth = null; return { error: errorDesc || error }; }
-        if (!code) return { error: 'No authorization code in URL. Copy the full URL.' };
-
-        const tokenData = await exchangeCodeForToken(code, pendingOAuth.verifier);
-        pendingOAuth = null;
-        return tokenData;
-    } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Unknown error';
-        if (msg.includes('Invalid URL')) return { error: 'Invalid URL. Paste the full redirect URL.' };
-        return { error: `Token exchange failed: ${msg}` };
-    }
-});
-
-ipcMain.handle('codex-oauth-cancel', async () => { pendingOAuth = null; return { success: true }; });
-
-function exchangeCodeForToken(code, verifier) {
-    return new Promise((resolve, reject) => {
-        const body = new URLSearchParams({
-            grant_type: 'authorization_code',
-            client_id: CODEX_OAUTH.clientId,
-            code,
-            redirect_uri: CODEX_OAUTH.redirectUri,
-            code_verifier: verifier,
-        }).toString();
-
-        const url = new URL(CODEX_OAUTH.tokenEndpoint);
-        const req = https.request({
-            hostname: url.hostname,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': Buffer.byteLength(body),
-            },
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    if (json.access_token) {
-                        resolve({
-                            success: true,
-                            accessToken: json.access_token,
-                            refreshToken: json.refresh_token,
-                            expiresIn: json.expires_in,
-                        });
-                    } else {
-                        resolve({ error: json.error_description || json.error || 'No access token' });
-                    }
-                } catch {
-                    resolve({ error: `Invalid JSON from token endpoint (HTTP ${res.statusCode})` });
-                }
-            });
-        });
-        req.on('error', reject);
-        req.write(body);
-        req.end();
-    });
-}
-
-// ══════════════════════════════════════════
-//  IPC: Test Provider Connection
-// ══════════════════════════════════════════
-
-ipcMain.handle('test-provider', async (_event, providerConfig) => {
-    if (!providerConfig) return { error: 'No provider config' };
-
-    try {
-        if (providerConfig.id === 'openai') {
-            if (!providerConfig.apiKey?.trim()) return { error: 'OpenAI API key is required' };
-            return await testOpenAI(providerConfig.apiKey);
-        } else if (providerConfig.id === 'codex') {
-            if (!providerConfig.apiKey?.trim()) return { error: 'API key is required' };
-
-            if (isOAuthToken(providerConfig.apiKey)) {
-                return await testChatGPTBackend(providerConfig.apiKey);
-            } else {
-                return await testOpenAI(providerConfig.apiKey);
-            }
-        } else if (providerConfig.id === 'anthropic') {
-            if (!providerConfig.apiKey?.trim()) return { error: 'Anthropic API key is required' };
-            return await testAnthropic(providerConfig.apiKey);
-        } else if (providerConfig.id === 'ollama') {
-            return await testOllama(providerConfig.baseUrl);
-        } else {
-            if (!providerConfig.baseUrl?.trim()) return { error: 'Gateway URL is required' };
-            return await testGateway(providerConfig.baseUrl, providerConfig.apiKey);
-        }
-    } catch (err) {
-        return { error: err.message || 'Connection failed' };
-    }
-});
-
-/** Test ChatGPT OAuth token by validating the JWT structure */
-function testChatGPTBackend(accessToken) {
-    const accountId = getAccountId(accessToken);
-    if (!accountId) {
-        return Promise.resolve({ error: 'Could not extract account ID from token. Token may be invalid or expired.' });
-    }
-
-    // Check if the token is expired
-    const payload = decodeJWT(accessToken);
-    if (payload?.exp && payload.exp * 1000 < Date.now()) {
-        return Promise.resolve({ error: 'Token is expired. Sign in again.' });
-    }
-
-    // Token structure is valid — account ID extracted successfully
-    return Promise.resolve({ success: true, modelCount: 0 });
-}
-
-/** Test standard API key against api.openai.com */
-function testOpenAI(apiKey) {
-    return new Promise((resolve) => {
-        const req = https.request({
-            hostname: 'api.openai.com',
-            path: '/v1/models',
-            method: 'GET',
-            headers: { Authorization: `Bearer ${apiKey}` },
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => {
-                if (res.statusCode === 200) {
-                    try {
-                        const json = JSON.parse(data);
-                        const allModels = json.data?.map((m) => m.id).sort() || [];
-                        const excluded = ['image', 'audio', 'realtime', 'tts', 'whisper', 'dall-e', 'sora', 'embed', 'moderation', 'transcribe', 'search-preview', 'chat-latest'];
-                        const relevant = allModels.filter((m) =>
-                            (m.includes('gpt-5') || m.includes('gpt-4') ||
-                            m.includes('o3') || m.includes('o4') || m.includes('codex')) &&
-                            !excluded.some(ex => m.includes(ex))
-                        );
-                        resolve({
-                            success: true,
-                            models: relevant.length > 0 ? relevant : undefined,
-                            modelCount: json.data?.length || 0,
-                        });
-                    } catch {
-                        resolve({ success: true, modelCount: 0 });
-                    }
-                } else if (res.statusCode === 401) {
-                    resolve({ error: 'Authentication failed (401). Check your API key.' });
-                } else {
-                    let msg = `HTTP ${res.statusCode}`;
-                    try { msg = JSON.parse(data).error?.message || msg; } catch { }
-                    resolve({ error: msg });
-                }
-            });
-        });
-        req.on('error', (err) => resolve({ error: err.message }));
-        req.end();
-    });
-}
-
-/** Test Anthropic API key by sending a minimal request */
-function testAnthropic(apiKey) {
-    return new Promise((resolve) => {
-        const bodyStr = JSON.stringify({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 1,
-            messages: [{ role: 'user', content: 'Hi' }],
-        });
-        const req = https.request({
-            hostname: 'api.anthropic.com',
-            path: '/v1/messages',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': apiKey,
-                'anthropic-version': '2023-06-01',
-                'Content-Length': Buffer.byteLength(bodyStr),
-            },
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => {
-                if (res.statusCode === 200) {
-                    resolve({ success: true, modelCount: 5 });
-                } else if (res.statusCode === 401) {
-                    resolve({ error: 'Authentication failed (401). Check your Anthropic API key.' });
-                } else {
-                    let msg = `HTTP ${res.statusCode}`;
-                    try { msg = JSON.parse(data).error?.message || msg; } catch { }
-                    resolve({ error: msg });
-                }
-            });
-        });
-        req.on('error', (err) => resolve({ error: err.message }));
-        req.write(bodyStr);
-        req.end();
-    });
-}
-
-/** Test Ollama connection by listing available models */
-function testOllama(baseUrl) {
-    const base = (baseUrl || 'http://localhost:11434').replace(/\/$/, '');
-    return new Promise((resolve) => {
-        const url = new URL(`${base}/api/tags`);
-        const mod = url.protocol === 'https:' ? https : http;
-
-        const req = mod.request({
-            hostname: url.hostname,
-            port: url.port || undefined,
-            path: url.pathname,
-            method: 'GET',
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    try {
-                        const json = JSON.parse(data);
-                        const models = json.models?.map((m) => m.name) || [];
-                        if (models.length === 0) {
-                            resolve({ error: 'Ollama is running but no models installed. Run: ollama pull llama3.3' });
-                        } else {
-                            resolve({ success: true, models, modelCount: models.length });
-                        }
-                    } catch {
-                        resolve({ success: true, modelCount: 0 });
-                    }
-                } else {
-                    resolve({ error: `HTTP ${res.statusCode} — check Ollama is running` });
-                }
-            });
-        });
-        req.on('error', () => resolve({ error: 'Cannot reach Ollama — is it running? Start with: ollama serve' }));
-        req.end();
-    });
-}
-
-function testGateway(baseUrl, apiKey) {
-    const base = baseUrl.replace(/\/$/, '');
-    return new Promise((resolve) => {
-        const url = new URL(`${base}/v1/models`);
-        const mod = url.protocol === 'https:' ? https : http;
-        const headers = {};
-        if (apiKey?.trim()) headers['Authorization'] = `Bearer ${apiKey}`;
-
-        const req = mod.request({
-            hostname: url.hostname,
-            port: url.port || undefined,
-            path: url.pathname + url.search,
-            method: 'GET',
-            headers,
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    let models, modelCount = 0;
-                    try {
-                        const json = JSON.parse(data);
-                        if (json.data) { modelCount = json.data.length; models = json.data.map((m) => m.id).sort(); }
-                    } catch { }
-                    resolve({ success: true, models: models?.length > 0 ? models : undefined, modelCount });
-                } else {
-                    resolve({ error: `HTTP ${res.statusCode} — check URL and credentials` });
-                }
-            });
-        });
-        req.on('error', () => resolve({ error: 'Cannot reach gateway — check URL' }));
-        req.end();
-    });
-}
-
-// ── Fetch Models IPC ──
-// Fetches available models from any provider's API
-ipcMain.handle('fetch-models', async (_event, providerConfig) => {
-    if (!providerConfig) return { error: 'No provider config' };
-    try {
-        if (providerConfig.id === 'openai') {
-            if (!providerConfig.apiKey?.trim()) return { error: 'API key required' };
-            const result = await testOpenAI(providerConfig.apiKey);
-            if (result.models) return { models: result.models };
-            return { models: ['gpt-5.4', 'gpt-5.4-pro', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'o3', 'o3-mini', 'o4-mini'] };
-        } else if (providerConfig.id === 'codex') {
-            if (!providerConfig.apiKey?.trim()) return { error: 'API key required' };
-            if (isOAuthToken(providerConfig.apiKey)) return { models: ['gpt-5.4', 'gpt-5-codex', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max', 'codex-mini-latest', 'gpt-4o', 'o4-mini'] };
-            const result = await testOpenAI(providerConfig.apiKey);
-            if (result.models) return { models: result.models };
-            return { models: ['gpt-5.4', 'gpt-5-codex', 'codex-mini-latest', 'gpt-4o', 'o4-mini'] };
-        } else if (providerConfig.id === 'anthropic') {
-            // Anthropic doesn't have a list-models endpoint — return known models
-            return { models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku-20241022'] };
-        } else if (providerConfig.id === 'ollama') {
-            const result = await testOllama(providerConfig.baseUrl);
-            if (result.models) return { models: result.models };
-            return { error: result.error || 'No models found' };
-        } else {
-            // Gateway — try /v1/models
-            const result = await testGateway(providerConfig.baseUrl, providerConfig.apiKey);
-            if (result.models) return { models: result.models };
-            return { models: [] };
-        }
-    } catch (err) {
-        return { error: err.message };
-    }
-});
+// OAuth, PKCE, provider testing, model fetching → ./ai/providers.js
 
 // ══════════════════════════════════════════
 //  IPC: AI Chat (Streaming via main process)
@@ -744,6 +420,25 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
         generateSessionTitle(userMsgs[0].content, providerConfig).catch(() => { });
         // SessionStart hook — first message = new session
         try { executeHook('SessionStart', { projectDir: projectPath || '' }); } catch { }
+    }
+
+    // Context mode: track user message + set session ID
+    try {
+        const lastUserMsg = userMsgs[userMsgs.length - 1];
+        if (lastUserMsg) ctxOnUserMessage(lastUserMsg.content, getSessionId());
+        setCtxModeSessionId(getSessionId());
+    } catch {}
+
+    // UserPromptSubmit hook — can block the message from being sent to AI
+    const lastUserMsg = userMsgs[userMsgs.length - 1];
+    if (lastUserMsg) {
+        try {
+            const hookResult = executeHook('UserPromptSubmit', { projectDir: projectPath || '', command: lastUserMsg.content?.slice(0, 500) || '' });
+            if (!hookResult.allowed) {
+                mainWindow?.webContents.send('ai-stream-done', null);
+                return { error: `Message blocked by UserPromptSubmit hook: ${hookResult.reason || 'hook rejected'}` };
+            }
+        } catch {}
     }
 
     // Route based on provider and token type
@@ -1137,8 +832,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
     _lastProviderConfig = provConfig;
     seedAllProviderConfigs(provConfig);
     saveProviderConfigToDisk(provConfig);
-    setPermissions(activePermissions);
-    setAgentModeRef(agentMode);
+    setPermissions(getActivePermissions());
+    setAgentModeRef(getAgentMode());
     setAIStreamingActive(true); // Lock: prevent renderer from wiping tasks (BEFORE startSession)
     startSession(null, projectPath);
 
@@ -1226,6 +921,8 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 const estTokens = totalChars / 4;
                 if (estTokens > 80000) {
                     logger.info('compaction', `ChatGPT backend auto-compact at round ${round}, ~${Math.round(estTokens)} tokens, ${inputItems.length} items`);
+                    // Context mode: save resume snapshot before compaction
+                    try { ctxOnPreCompact(getSessionId()); } catch {}
                     const keepLast = 20;
                     if (inputItems.length > keepLast + 5) {
                         // Extract context from items being removed
@@ -1302,8 +999,18 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 // Triggers when AI used discovery/read tools but hasn't built anything yet
                 const announcesIntent = /\b(I'll|I will|let me|I'm going to|I'm now|on it|working on|starting|proceeding|I need to|I can fix|I'll now|implementing|adding|creating|wiring|building)\b/i.test(aiTextContent)
                     && aiTextContent.length < 500 // Short intent messages, not long explanations
+                    && round > 0 // Never on first response — let greetings/chat complete naturally
                     && round < 10 // Early/mid rounds (AI stalling before building)
                     && !hasBuiltAnything; // Hasn't created files or run commands yet
+
+                // If the AI just showed an interactive widget (poll, checklist, quick-actions),
+                // STOP and let the user interact — don't auto-continue.
+                if (toolsUsed.has('show_widget') || toolsUsed.has('ask_user_question')) {
+                    logger.info('agent-loop', 'Interactive widget/question shown — stopping for user interaction');
+                    sendCompletionSummary(toolsUsed, _taskStartSnapshot);
+                    mainWindow?.webContents.send('ai-stream-done', null);
+                    return { success: true };
+                }
 
                 // If the AI is asking discovery questions after init_project, let the response
                 // end naturally so the user can answer. Don't force auto-continue.
@@ -1442,6 +1149,9 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     toolResult = await executeAnyTool(fn.name, args);
                 }
                 logger.toolResult(fn.name, toolResult, round);
+
+                // Context mode: track tool completion for session events + auto-indexing
+                try { ctxOnToolComplete(fn.name, args, toolResult, getSessionId()); } catch {}
 
                 // Track browser_navigate failures — block AI from calling it again after 3 cumulative failures
                 // (Note: aiTools.js already retries internally up to 3 times with progressive delays)
@@ -2383,6 +2093,7 @@ setMemoryAICall(makeSubAgentAICall);
 setSchedulerAICall(makeSubAgentAICall);
 setWorkflowAICall(makeSubAgentAICall);
 setHeartbeatAICall(makeSubAgentAICall);
+// Channels AI routing goes through ChatView — no direct AI call needed
 
 /**
  * Context compaction — summarize old messages when conversation gets too long.
@@ -2526,8 +2237,8 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
     startSession(null, projectPath);
 
     // Sync permissions to aiTools
-    setPermissions(activePermissions);
-    setAgentModeRef(agentMode);
+    setPermissions(getActivePermissions());
+    setAgentModeRef(getAgentMode());
 
     // Inject project file context at session start so the AI knows what exists
     const initialContext = buildContinueContext();
@@ -2661,6 +2372,9 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             const estTokens = totalChars / 4;
             if (estTokens > 80000) {
                 logger.info('compaction', `Auto-compact triggered at round ${round}, ~${Math.round(estTokens)} tokens`);
+                // PreCompact hook + context mode snapshot
+                try { executeHook('PreCompact', { projectDir: projectPath || '' }); } catch {}
+                try { ctxOnPreCompact(getSessionId()); } catch {}
                 try {
                     conversationMessages = await semanticCompact(conversationMessages);
                 } catch {
@@ -2902,6 +2616,9 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             }
             logger.toolResult(tc.name, toolResult, round);
 
+            // Context mode: track tool completion for session events + auto-indexing
+            try { ctxOnToolComplete(tc.name, args, toolResult, getSessionId()); } catch {}
+
             // Track browser_navigate failures — block AI from calling it again after 3 cumulative failures
             // (Note: aiTools.js already retries internally up to 3 times with progressive delays)
             if (tc.name === 'browser_navigate') {
@@ -3057,144 +2774,9 @@ ipcMain.handle('ai-abort', () => {
     return { success: true };
 });
 
-// ══════════════════════════════════════════
-//  IPC: Ask User Question (Cascade-level)
-// ══════════════════════════════════════════
+// User answers, permissions, agents, files → ./ipc/misc.js
 
-ipcMain.handle('ai-user-answer', (_event, { questionId, answer }) => {
-    resolveUserAnswer(questionId, answer);
-    return { success: true };
-});
-
-ipcMain.handle('ai-permission-response', (_event, { approvalId, approved }) => {
-    resolvePermissionApproval(approvalId, approved);
-    return { success: true };
-});
-
-// ══════════════════════════════════════════
-//  IPC: Chat Activity (for workflow result pipeline)
-// ══════════════════════════════════════════
-
-ipcMain.handle('chat-activity-change', (_event, isActive) => {
-    setWorkflowChatActive(!!isActive);
-    return { success: true };
-});
-
-// ══════════════════════════════════════════
-//  IPC: Agent & Process Runtime
-// ══════════════════════════════════════════
-
-ipcMain.handle('list-agents', () => {
-    return listAgents();
-});
-
-ipcMain.handle('list-background-processes', () => {
-    return getBackgroundProcesses().map(p => ({
-        id: p.id || String(p.pid),
-        command: p.command || 'unknown',
-        status: p.running ? 'running' : (p.exitCode != null ? (p.exitCode === 0 ? 'done' : 'error') : 'done'),
-        pid: p.pid,
-        port: p.port,
-        startedAt: p.startedAt,
-    }));
-});
-
-ipcMain.handle('kill-background-process', async (_event, processId) => {
-    const procs = getBackgroundProcesses();
-    const proc = procs.find(p => p.id === processId);
-    if (!proc) return { error: 'Process not found' };
-    try {
-        if (proc.pid) {
-            // Kill the process group (negative PID) for background spawns
-            try { process.kill(-proc.pid, 'SIGTERM'); } catch {
-                process.kill(proc.pid, 'SIGTERM');
-            }
-        }
-        return { success: true };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('read-file-content', async (_event, filePath) => {
-    const fs = require('fs');
-    try {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const stats = fs.statSync(filePath);
-        return { content, size: stats.size, modified: stats.mtime.toISOString() };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-// Read any file as base64 data URI (for Document Viewer — images, PDFs, etc.)
-ipcMain.handle('read-file-binary', async (_event, filePath) => {
-    try {
-        const data = fs.readFileSync(filePath);
-        const ext = path.extname(filePath).toLowerCase();
-        const mimeMap = {
-            '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-            '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-            '.ico': 'image/x-icon', '.svg': 'image/svg+xml',
-            '.pdf': 'application/pdf',
-            '.mp4': 'video/mp4', '.webm': 'video/webm',
-        };
-        const mime = mimeMap[ext] || 'application/octet-stream';
-        const stats = fs.statSync(filePath);
-        return { dataUri: `data:${mime};base64,${data.toString('base64')}`, size: stats.size };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('read-screenshot-base64', async (_event, filePath) => {
-    try {
-        const home = require('os').homedir();
-        const allowedPrefixes = [
-            path.join(home, '.onicode'),
-            path.join(home, 'OniProjects'),
-        ];
-        if (!allowedPrefixes.some(prefix => filePath.startsWith(prefix))) {
-            return { error: 'Forbidden' };
-        }
-        const data = fs.readFileSync(filePath);
-        const ext = path.extname(filePath).toLowerCase();
-        const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-        const mime = mimeMap[ext] || 'image/png';
-        return { dataUri: `data:${mime};base64,${data.toString('base64')}` };
-    } catch {
-        return { error: 'Not found' };
-    }
-});
-
-// ══════════════════════════════════════════
-//  IPC: Task Management (for UI)
-// ══════════════════════════════════════════
-
-ipcMain.handle('list-project-tasks', async (_event, projectPath) => {
-    try {
-        const { taskStorage } = require('./storage');
-        return taskStorage.getProjectTaskSummary(projectPath);
-    } catch {
-        return { pending: [], inProgress: [], done: [], archived: [], skipped: [] };
-    }
-});
-
-ipcMain.handle('archive-completed-tasks', async () => {
-    try {
-        const { taskStorage } = require('./storage');
-        const sessionId = getSessionId();
-        if (sessionId) taskStorage.archiveCompleted(sessionId);
-        // Also update in-memory tasks
-        taskManager.tasks.forEach(t => {
-            if (t.status === 'done' || t.status === 'skipped') t.status = 'archived';
-        });
-        taskManager._notifyRenderer();
-        return { success: true };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
+// Task management (for UI) → ./ipc/data.js
 
 // ══════════════════════════════════════════
 //  Session Title Auto-Generation
@@ -3492,228 +3074,7 @@ function extractAndSaveMemory(messages, providerConfig) {
     }
 }
 
-// ══════════════════════════════════════════
-//  Permissions System
-// ══════════════════════════════════════════
-
-/**
- * Permission levels for tools: 'allow' | 'ask' | 'deny'
- * Default permissions can be overridden per-project via .onicode/config.json
- */
-const DEFAULT_PERMISSIONS = {
-    read_file: 'allow',
-    edit_file: 'allow',
-    create_file: 'allow',
-    delete_file: 'allow',
-    multi_edit: 'allow',
-    run_command: 'allow',
-    check_terminal: 'allow',
-    list_terminals: 'allow',
-    search_files: 'allow',
-    list_directory: 'allow',
-    glob_files: 'allow',
-    explore_codebase: 'allow',
-    webfetch: 'allow',
-    websearch: 'allow',
-    browser_navigate: 'allow',
-    browser_screenshot: 'allow',
-    browser_evaluate: 'allow',
-    browser_click: 'allow',
-    browser_type: 'allow',
-    browser_console_logs: 'allow',
-    browser_close: 'allow',
-    task_add: 'allow',
-    task_update: 'allow',
-    task_list: 'allow',
-    milestone_create: 'allow',
-    create_plan: 'allow',
-    update_plan: 'allow',
-    get_plan: 'allow',
-    init_project: 'allow',
-    memory_read: 'allow',
-    memory_write: 'allow',
-    memory_append: 'allow',
-    memory_search: 'allow',
-    memory_save_fact: 'allow',
-    memory_smart_search: 'allow',
-    memory_get_related: 'allow',
-    memory_hot_list: 'allow',
-    conversation_search: 'allow',
-    conversation_recall: 'allow',
-    get_context_summary: 'allow',
-    spawn_sub_agent: 'allow',
-    orchestrate: 'allow',
-    spawn_specialist: 'allow',
-    get_orchestration_status: 'allow',
-    get_agent_status: 'allow',
-    verify_project: 'allow',
-    ask_user_question: 'allow',
-    sequential_thinking: 'allow',
-    trajectory_search: 'allow',
-    find_by_name: 'allow',
-    read_url_content: 'allow',
-    view_content_chunk: 'allow',
-    read_notebook: 'allow',
-    edit_notebook: 'allow',
-    read_deployment_config: 'allow',
-    deploy_web_app: 'ask',
-    check_deploy_status: 'allow',
-    get_system_logs: 'allow',
-    get_changelog: 'allow',
-    git_diff: 'allow',
-    git_log: 'allow',
-    git_branches: 'allow',
-    git_checkout: 'allow',
-    git_stash: 'allow',
-    git_pull: 'allow',
-    // LSP tools
-    find_symbol: 'allow',
-    find_references: 'allow',
-    list_symbols: 'allow',
-    get_type_info: 'allow',
-    // Code index tools
-    semantic_search: 'allow',
-    index_codebase: 'allow',
-    // GitHub & Google CLI tools
-    git_create_pr: 'allow',
-    git_list_prs: 'allow',
-    git_publish: 'ask',
-    gh_cli: 'allow',
-    gws_cli: 'allow',
-};
-
-let activePermissions = { ...DEFAULT_PERMISSIONS };
-let agentMode = 'build'; // 'build' (full access) or 'plan' (read-only)
-
-function loadProjectPermissions(projectPath) {
-    try {
-        const configPath = path.join(projectPath, '.onicode', 'config.json');
-        if (fs.existsSync(configPath)) {
-            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-            if (config.permissions) {
-                activePermissions = { ...DEFAULT_PERMISSIONS, ...config.permissions };
-                logger.info('permissions', `Loaded project permissions from ${configPath}`);
-            }
-        }
-    } catch { }
-}
-
-function setAgentMode(mode) {
-    agentMode = mode;
-    if (mode === 'plan') {
-        // Plan mode: deny all writes, ask for commands
-        activePermissions = { ...DEFAULT_PERMISSIONS };
-        activePermissions.edit_file = 'deny';
-        activePermissions.create_file = 'deny';
-        activePermissions.delete_file = 'deny';
-        activePermissions.multi_edit = 'deny';
-        activePermissions.run_command = 'ask';
-        activePermissions.init_project = 'deny';
-    } else if (mode === 'ask-destructive') {
-        // Ask-destructive mode: allow everything except destructive ops
-        activePermissions = { ...DEFAULT_PERMISSIONS };
-        activePermissions.delete_file = 'ask';
-        activePermissions.restore_to_point = 'ask';
-        activePermissions.run_command = 'ask'; // commands checked individually
-    } else {
-        // Auto-allow / build mode: everything allowed
-        activePermissions = { ...DEFAULT_PERMISSIONS };
-    }
-    // Sync permissions to aiTools module
-    setPermissions(activePermissions);
-    setAgentModeRef(mode);
-    mainWindow?.webContents.send('ai-agent-mode', mode);
-    logger.info('agent-mode', `Switched to ${mode} mode`);
-}
-
-function checkPermission(toolName) {
-    return activePermissions[toolName] || 'allow';
-}
-
-// IPC handlers for permissions and agent mode
-ipcMain.handle('agent-set-mode', (_, mode) => {
-    setAgentMode(mode);
-    return { success: true, mode };
-});
-
-ipcMain.handle('agent-get-mode', () => {
-    return { mode: agentMode, permissions: activePermissions };
-});
-
-// ── Settings (persisted to ~/.onicode/settings.json) ──
-
-const SETTINGS_PATH = path.join(os.homedir(), '.onicode', 'settings.json');
-
-// Default settings
-const _settings = {
-    'dangerous-cmd-protection': true,
-    'auto-commit': true,
-    'permission-mode': 'auto-allow',
-    'panel-mode': 'always',
-    'font-size': 13,
-    'chat-history-limit': 50,
-    'default-project-path': path.join(os.homedir(), 'OniProjects'),
-    'show-tool-details': true,
-    'auto-title': true,
-    'send-on-enter': true,
-    'notifications': true,
-    'compact-threshold': 60000,
-    'max-auto-continues': 15,
-};
-
-// Load persisted settings on startup
-try {
-    if (fs.existsSync(SETTINGS_PATH)) {
-        const saved = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
-        Object.assign(_settings, saved);
-        logger.info('settings', `Loaded settings from ${SETTINGS_PATH}`);
-    }
-} catch (err) {
-    logger.warn('settings', `Failed to load settings: ${err.message}`);
-}
-
-function persistSettings() {
-    try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(_settings, null, 2));
-    } catch (err) {
-        logger.warn('settings', `Failed to save settings: ${err.message}`);
-    }
-}
-
-// Backward-compat aliases
-let dangerousCommandProtection = _settings['dangerous-cmd-protection'];
-let autoCommitEnabled = _settings['auto-commit'];
-
-// Restore permission mode on startup
-if (_settings['permission-mode'] && _settings['permission-mode'] !== 'auto-allow') {
-    setAgentMode(_settings['permission-mode'] === 'plan-only' ? 'plan' : _settings['permission-mode']);
-}
-
-ipcMain.handle('set-setting', (_, key, value) => {
-    _settings[key] = value;
-    persistSettings();
-    // Keep backward-compat vars in sync
-    if (key === 'dangerous-cmd-protection') dangerousCommandProtection = !!value;
-    if (key === 'auto-commit') autoCommitEnabled = !!value;
-    if (key === 'permission-mode') {
-        const modeMap = { 'auto-allow': 'build', 'ask-destructive': 'ask-destructive', 'plan-only': 'plan' };
-        setAgentMode(modeMap[value] || 'build');
-    }
-    logger.info('settings', `Setting "${key}" = ${JSON.stringify(value)}`);
-    return { success: true };
-});
-
-ipcMain.handle('get-setting', (_, key) => {
-    return key ? _settings[key] : { ..._settings };
-});
-
-ipcMain.handle('get-all-settings', () => {
-    return { ..._settings };
-});
-
-// Expose to aiTools
-function isDangerousProtectionEnabled() { return _settings['dangerous-cmd-protection']; }
-function isAutoCommitEnabled() { return _settings['auto-commit']; }
+// Permissions + settings → ./ipc/permissions.js
 
 // ══════════════════════════════════════════
 //  Register Terminal & Project IPC
@@ -3734,331 +3095,69 @@ registerCodeIndexIPC(ipcMain);
 registerOrchestratorIPC(ipcMain);
 registerContextEngineIPC(ipcMain);
 registerMCPIPC(ipcMain, () => mainWindow);
+registerCatalogIPC(ipcMain);
+registerChannelsIPC(ipcMain, () => mainWindow);
 registerKeystoreIPC(ipcMain);
 registerSchedulerIPC(ipcMain, () => mainWindow);
 registerWorkflowIPC(ipcMain, () => mainWindow);
 registerHeartbeatIPC(ipcMain, () => mainWindow);
 
-// ── Plan Mode IPC ──
-ipcMain.handle('plan-mode-enter', async (_event, conversationId) => {
-    try {
-        const planId = `plan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const planDir = path.join(os.homedir(), '.onicode', 'plans');
-        if (!fs.existsSync(planDir)) fs.mkdirSync(planDir, { recursive: true });
-        const planPath = path.join(planDir, `${planId}.md`);
-        fs.writeFileSync(planPath, `# Plan\n\n_Created: ${new Date().toISOString()}_\n\n## Goals\n\n## Steps\n\n## Notes\n`);
-        setPlanModeState(true, planId, planPath);
-        // Save to SQLite
-        conversationPlanStorage.save({ id: planId, conversationId, content: '', status: 'drafting' });
-        // Notify renderer
-        if (mainWindow) mainWindow.webContents.send('plan-mode-changed', { active: true, planId, planPath });
-        return { success: true, planId, planPath };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
+// ── Extracted IPC modules ──
+
+// Dependency getter for extracted IPC modules (lazy to avoid init-order issues)
+function getToolsDeps() {
+    return {
+        // For misc.js
+        resolveUserAnswer,
+        resolvePermissionApproval,
+        listAgents,
+        getBackgroundProcesses,
+        // For data.js
+        taskManager,
+        getSessionId,
+        // For planMode.js
+        getPlanModeState,
+        setPlanModeState,
+        getWorktreeState,
+        DEFERRED_TOOL_CATEGORIES,
+        loadToolCategories,
+    };
+}
+
+registerProviderIPC(ipcMain, shell);
+registerPermissionsIPC({
+    ipcMain,
+    syncPermissions: (permissions, mode) => {
+        setPermissions(permissions);
+        setAgentModeRef(mode);
+        mainWindow?.webContents.send('ai-agent-mode', mode);
+    },
 });
-
-ipcMain.handle('plan-mode-exit', async (_event, planId) => {
-    try {
-        const state = getPlanModeState();
-        if (!state.active) return { success: false, error: 'Not in plan mode' };
-        const content = state.planPath && fs.existsSync(state.planPath) ? fs.readFileSync(state.planPath, 'utf-8') : '';
-        setPlanModeState(false, null, null);
-        // Update SQLite
-        conversationPlanStorage.update(planId || state.planId, { content, status: 'completed' });
-        if (mainWindow) mainWindow.webContents.send('plan-mode-changed', { active: false, planId: null });
-        return { success: true, content };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
+registerMiscIPC({
+    ipcMain,
+    getMainWindow: () => mainWindow,
+    getToolsDeps,
+    setWorkflowChatActive,
 });
-
-ipcMain.handle('plan-mode-get', async () => {
-    const state = getPlanModeState();
-    let content = '';
-    if (state.active && state.planPath && fs.existsSync(state.planPath)) {
-        content = fs.readFileSync(state.planPath, 'utf-8');
-    }
-    return { active: state.active, planId: state.planId, planPath: state.planPath, content };
+registerDataIPC({ ipcMain, getToolsDeps });
+registerPlanModeIPC({
+    ipcMain,
+    getMainWindow: () => mainWindow,
+    getToolsDeps,
+    getCurrentProjectPath: () => _currentProjectPath,
+    invalidateToolCache: () => { _allToolsCache = null; _toolsCacheKey = ''; },
 });
-
-ipcMain.handle('plan-mode-update', async (_event, planId, content) => {
-    try {
-        const state = getPlanModeState();
-        if (!state.active) return { success: false, error: 'Not in plan mode' };
-        if (state.planPath) fs.writeFileSync(state.planPath, content);
-        conversationPlanStorage.update(planId || state.planId, { content });
-        return { success: true };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-// ── Worktree IPC ──
-ipcMain.handle('worktree-create', async (_event, name) => {
-    try {
-        const branchName = name || `worktree-${Date.now()}`;
-        const worktreePath = path.join(os.tmpdir(), `onicode-worktree-${branchName}`);
-        const { execSync } = require('child_process');
-        execSync(`git worktree add -b ${branchName} "${worktreePath}"`, { cwd: _currentProjectPath || process.cwd(), encoding: 'utf-8', timeout: 30000 });
-        return { success: true, path: worktreePath, branch: branchName };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('worktree-remove', async (_event, worktreePath, force) => {
-    try {
-        const { execSync } = require('child_process');
-        const forceFlag = force ? ' --force' : '';
-        execSync(`git worktree remove "${worktreePath}"${forceFlag}`, { cwd: _currentProjectPath || process.cwd(), encoding: 'utf-8', timeout: 30000 });
-        return { success: true };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('worktree-list', async () => {
-    try {
-        const { execSync } = require('child_process');
-        const raw = execSync('git worktree list --porcelain', { cwd: _currentProjectPath || process.cwd(), encoding: 'utf-8', timeout: 10000 });
-        const worktrees = [];
-        let current = {};
-        for (const line of raw.split('\n')) {
-            if (line.startsWith('worktree ')) {
-                if (current.path) worktrees.push(current);
-                current = { path: line.slice(9) };
-            } else if (line.startsWith('HEAD ')) {
-                current.head = line.slice(5);
-            } else if (line.startsWith('branch ')) {
-                current.branch = line.slice(7).replace('refs/heads/', '');
-            } else if (line === 'bare' || line === '') {
-                if (current.path) { current.isMain = worktrees.length === 0; worktrees.push(current); current = {}; }
-            }
-        }
-        if (current.path) { current.isMain = worktrees.length === 0; worktrees.push(current); }
-        return { success: true, worktrees };
-    } catch (err) {
-        return { success: true, worktrees: [] };
-    }
-});
-
-ipcMain.handle('worktree-get-current', async () => {
-    const state = getWorktreeState();
-    return { inWorktree: state.active, path: state.path, branch: state.active ? path.basename(state.path || '') : undefined };
-});
-
-// ── Deferred Tool Loading IPC ──
-ipcMain.handle('deferred-tool-categories', async () => {
-    return { categories: DEFERRED_TOOL_CATEGORIES };
-});
-
-ipcMain.handle('load-tool-categories', async (_event, categories) => {
-    const loaded = loadToolCategories(categories);
-    // Invalidate tool cache so next AI call picks up newly loaded tools
-    _allToolsCache = null;
-    _toolsCacheKey = '';
-    return { success: true, loaded };
-});
-
-// Task manager IPC — allows renderer to query current tasks
-ipcMain.handle('tasks-list', async () => {
-    return taskManager.getSummary();
-});
-
-// Load tasks for a project (on project activation / app startup)
-ipcMain.handle('load-project-tasks', async (_event, projectPath) => {
-    if (!projectPath) return { success: false, error: 'No project path' };
-    try {
-        taskManager.loadFromProject(projectPath);
-        return { success: true, summary: taskManager.getSummary() };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-// Manual task CRUD — allows UI to create/update/delete tasks through TaskManager
-ipcMain.handle('task-create', async (_event, { content, priority }) => {
-    try {
-        const task = taskManager.addTask(content, priority || 'medium');
-        return { success: true, task, summary: taskManager.getSummary() };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('task-update', async (_event, { id, updates }) => {
-    try {
-        const result = taskManager.updateTask(id, updates);
-        if (result.error) return { success: false, error: result.error };
-        return { success: true, task: result, summary: taskManager.getSummary() };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('task-delete', async (_event, { id }) => {
-    try {
-        const result = taskManager.removeTask(id);
-        if (result.error) return { success: false, error: result.error };
-        return { success: true, summary: taskManager.getSummary() };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-// ══════════════════════════════════════════
-//  Milestone IPC (SQLite-backed)
-// ══════════════════════════════════════════
-
-ipcMain.handle('milestone-list', async (_event, projectPath) => {
-    try {
-        const milestones = milestoneStorage.getProjectSummary(projectPath);
-        return { success: true, milestones };
-    } catch (err) {
-        return { success: false, error: err.message, milestones: [] };
-    }
-});
-
-ipcMain.handle('milestone-create', async (_event, { milestone, projectId, projectPath }) => {
-    try {
-        milestoneStorage.save(milestone, projectId, projectPath);
-        return { success: true, milestone };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('milestone-update', async (_event, { id, updates }) => {
-    try {
-        milestoneStorage.update(id, updates);
-        return { success: true };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('milestone-delete', async (_event, { id }) => {
-    try {
-        milestoneStorage.delete(id);
-        return { success: true };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-// Assign a task to a milestone
-ipcMain.handle('task-set-milestone', async (_event, { taskId, milestoneId }) => {
-    try {
-        const task = taskManager.getTask(taskId);
-        if (!task) return { success: false, error: 'Task not found' };
-        task.milestoneId = milestoneId || null;
-        taskManager._persistUpdate(taskId, { milestoneId: milestoneId || null });
-        taskManager._notifyRenderer();
-        return { success: true };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-// ══════════════════════════════════════════
-//  Conversation Storage IPC (SQLite)
-// ══════════════════════════════════════════
-
-ipcMain.handle('conversation-save', async (_event, conv) => {
-    try {
-        conversationStorage.save(conv);
-        return { success: true };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('conversation-get', async (_event, id) => {
-    try {
-        const conv = conversationStorage.get(id);
-        return { success: true, conversation: conv };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('conversation-list', async (_event, limit, offset) => {
-    try {
-        const conversations = conversationStorage.listFull(limit || 50);
-        return { success: true, conversations };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('conversation-delete', async (_event, id) => {
-    try {
-        conversationStorage.delete(id);
-        return { success: true };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('conversation-search', async (_event, query) => {
-    try {
-        const results = conversationStorage.search(query);
-        return { success: true, results };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('conversation-migrate', async (_event, conversations) => {
-    try {
-        const result = conversationStorage.migrateFromLocalStorage(conversations);
-        return { success: true, ...result };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-// ══════════════════════════════════════════
-//  Attachment Storage IPC (project-scoped)
-// ══════════════════════════════════════════
-
-ipcMain.handle('attachment-save', async (_event, att) => {
-    try {
-        attachmentStorage.save(att);
-        return { success: true };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('attachment-list', async (_event, projectId) => {
-    try {
-        const attachments = attachmentStorage.listByProject(projectId);
-        return { success: true, attachments };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
-
-ipcMain.handle('attachment-delete', async (_event, id) => {
-    try {
-        attachmentStorage.delete(id);
-        return { success: true };
-    } catch (err) {
-        return { error: err.message };
-    }
-});
+registerContextModeIPC(ipcMain, () => mainWindow);
 
 // ══════════════════════════════════════════
 //  Initialize Permissions Sync
 // ══════════════════════════════════════════
 
 // Sync default permissions to aiTools on startup
-setPermissions(activePermissions);
-setAgentModeRef(agentMode);
-setDangerousProtectionCheck(() => dangerousCommandProtection);
-setAutoCommitCheck(() => autoCommitEnabled);
+setPermissions(getActivePermissions());
+setAgentModeRef(getAgentMode());
+setDangerousProtectionCheck(isDangerousProtectionEnabled);
+setAutoCommitCheck(isAutoCommitEnabled);
 
 // ══════════════════════════════════════════
 //  App Lifecycle
@@ -4171,6 +3270,7 @@ app.whenReady().then(() => {
 
     try { startSchedulerLoop(); } catch (err) { logger.error('main', `startSchedulerLoop failed: ${err.message}`); }
     try { startHeartbeat(); } catch (err) { logger.error('main', `startHeartbeat failed: ${err.message}`); }
+    try { telegramAutoConnect().catch(err => logger.warn('channels', `Telegram auto-connect failed: ${err?.message}`)); } catch {}
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
@@ -4200,6 +3300,7 @@ app.on('before-quit', () => {
     killAllSessions();
     killBackgroundProcesses();
     disconnectAllMCP();
+    stopTelegramPolling();
     stopSchedulerLoop();
     stopHeartbeat();
     stopWatching();

@@ -1572,6 +1572,9 @@ async function executeTool(name, args) {
                     agentResult.IMPORTANT = `Sub-agent completed. READ the "findings" field above — it contains the sub-agent's actual work output. Use these findings to inform your next steps. Do NOT ignore them.`;
                 }
 
+                // SubagentStop hook
+                try { executeHook('SubagentStop', { projectDir: hookContext.projectDir, toolName: 'spawn_sub_agent', command: task?.slice(0, 200) || '' }); } catch {}
+
                 return agentResult;
             }
 

@@ -22,6 +22,7 @@ function registerDataIPC(deps) {
             const { taskManager, getSessionId } = getToolsDeps();
             const sessionId = getSessionId();
             if (sessionId) taskStorage.archiveCompleted(sessionId);
+            // Also update in-memory tasks
             taskManager.tasks.forEach(t => {
                 if (t.status === 'done' || t.status === 'skipped') t.status = 'archived';
             });

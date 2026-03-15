@@ -818,6 +818,8 @@ function executeNotifyStep(step, context) {
         new Notification({ title, body }).show();
         sendToRenderer('workflow-notification', { title, body, timestamp: Date.now() });
         sendAutomationMessage(body, 'workflow', title);
+        // Notification hook
+        try { const { executeHook } = require('./hooks'); executeHook('Notification', { command: `${title}: ${body}` }); } catch {}
         return { success: true, output: `Notification sent: ${title}` };
     } catch (err) {
         return { success: false, error: `Notification failed: ${err.message}` };
@@ -1040,7 +1042,7 @@ const WORKFLOW_TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'set_timer',
-            description: 'Set a one-time timer that fires after a delay. When it fires, it sends a desktop notification and a message in the chat. Use this for reminders, pings, and delayed one-time actions. The timer runs in the background — the user can continue chatting.',
+            description: 'Set a one-time timer that fires after a delay. When it fires, it sends a desktop notification and a message in the chat. The timer runs in the background — the user can continue chatting.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1049,6 +1051,25 @@ const WORKFLOW_TOOL_DEFINITIONS = [
                     title: { type: 'string', description: 'Title for the notification (default: "Onicode Timer")' },
                 },
                 required: ['seconds', 'message'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'show_widget',
+            description: 'Render an interactive widget inline in chat. Pass the widget type and ALL data fields as top-level arguments (do NOT nest under a "data" key). Examples:\n- Poll: { type: "poll", question: "Pick one", options: [{label:"A",votes:0},{label:"B",votes:0}] }\n- Weather: { type: "weather", location: "NYC", temp: 22, condition: "Sunny", icon: "☀️" }\n- Chart: { type: "chart", title: "Sales", labels: ["Q1","Q2"], values: [100,200] }\n- Timeline: { type: "timeline", events: [{date:"2024-01",title:"Launch"}] }\n- Kanban: { type: "kanban", columns: [{name:"Todo",items:[{id:"1",title:"Task"}]}] }',
+            parameters: {
+                type: 'object',
+                properties: {
+                    type: {
+                        type: 'string',
+                        description: 'Widget type',
+                        enum: ['weather', 'system-stats', 'quick-actions', 'timer', 'progress', 'git-card', 'poll', 'checklist', 'link-preview', 'chart', 'image-gallery', 'contact-card', 'calendar-event', 'code-run', 'file-card', 'mermaid', 'flowchart', 'timeline', 'kanban', 'mindmap', 'dashboard', 'svg-chart'],
+                    },
+                },
+                required: ['type'],
+                additionalProperties: true,
             },
         },
     },
@@ -1136,6 +1157,32 @@ async function executeWorkflowTool(toolName, args) {
                 body: args.message,
             });
             return { message: `Timer set! Will fire in ${args.seconds} seconds.`, timerId: result.timerId };
+        }
+
+        case 'show_widget': {
+            const widgetId = 'w_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+            // AI may send data in two ways:
+            // 1. { type: "poll", data: { question, options } }  — correct
+            // 2. { type: "poll", question: "...", options: [...] } — flattened (common with streaming)
+            // Handle both by merging everything except 'type' into the data object
+            let widgetData = {};
+            if (args.data && typeof args.data === 'object' && Object.keys(args.data).length > 0) {
+                widgetData = args.data;
+            } else if (args.data && typeof args.data === 'string') {
+                try { widgetData = JSON.parse(args.data); } catch { widgetData = {}; }
+            }
+            // If data is empty, treat all other args as the data (flattened mode)
+            if (Object.keys(widgetData).length === 0) {
+                const { type: _t, ...rest } = args;
+                widgetData = rest;
+            }
+            logger.info('workflows', `show_widget: type=${args.type}, dataKeys=${Object.keys(widgetData).join(',')}, raw=${JSON.stringify(widgetData).slice(0, 300)}`);
+            sendToRenderer('ai-widget', {
+                id: widgetId,
+                type: args.type,
+                data: widgetData,
+            });
+            return { message: `Widget rendered: ${args.type}`, widget_id: widgetId, _widget: { id: widgetId, type: args.type, data: widgetData } };
         }
 
         default:
@@ -1326,6 +1373,13 @@ function sendAutomationMessage(content, source, title) {
         timestamp: Date.now(),
     });
     logger.info('workflows', `Automation message sent [${source}]: ${(title || '').slice(0, 40)} — ${(content || '').slice(0, 80)}`);
+
+    // Forward to connected channels (Telegram, etc.)
+    try {
+        const { _broadcastToTelegram } = require('./channels');
+        const msg = title ? `*${title}*\n${content}` : content;
+        _broadcastToTelegram(msg);
+    } catch { /* channels not ready */ }
 }
 
 // ══════════════════════════════════════════

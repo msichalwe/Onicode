@@ -46,6 +46,12 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('ai-tool-result', handler);
     },
 
+    onWidget: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-widget', handler);
+        return () => ipcRenderer.removeListener('ai-widget', handler);
+    },
+
     // Open external URL or file path
     openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
@@ -393,6 +399,37 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('mcp-server-status', handler);
     },
 
+    // ── MCP Catalog ──
+    mcpCatalogList: (category) => ipcRenderer.invoke('mcp-catalog-list', category),
+    mcpCatalogSearch: (query, maxResults) => ipcRenderer.invoke('mcp-catalog-search', query, maxResults),
+    mcpCatalogEntry: (id) => ipcRenderer.invoke('mcp-catalog-entry', id),
+
+    // ── Channels ──
+    channelsList: () => ipcRenderer.invoke('channels-list'),
+    channelTelegramValidate: (token) => ipcRenderer.invoke('channel-telegram-validate', token),
+    channelTelegramConnect: (token, allowedChatIds) => ipcRenderer.invoke('channel-telegram-connect', token, allowedChatIds),
+    channelTelegramDisconnect: () => ipcRenderer.invoke('channel-telegram-disconnect'),
+    channelTelegramStats: () => ipcRenderer.invoke('channel-telegram-stats'),
+    channelTelegramSetAllowed: (chatIds) => ipcRenderer.invoke('channel-telegram-set-allowed', chatIds),
+    channelTelegramSend: (chatId, text) => ipcRenderer.invoke('channel-telegram-send', chatId, text),
+    channelTelegramLog: () => ipcRenderer.invoke('channel-telegram-log'),
+    onChannelStatus: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('channel-status', handler);
+        return () => ipcRenderer.removeListener('channel-status', handler);
+    },
+    channelRespond: (chatId, text) => ipcRenderer.invoke('channel-respond', chatId, text),
+    onChannelIncoming: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('channel-incoming', handler);
+        return () => ipcRenderer.removeListener('channel-incoming', handler);
+    },
+    onChannelMessage: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('channel-message', handler);
+        return () => ipcRenderer.removeListener('channel-message', handler);
+    },
+
     // ── Scheduler ──
     schedulerList: () => ipcRenderer.invoke('scheduler-list'),
     schedulerGet: (id) => ipcRenderer.invoke('scheduler-get', id),
@@ -515,6 +552,20 @@ contextBridge.exposeInMainWorld('onicode', {
         const handler = () => callback();
         ipcRenderer.on('tray-new-chat', handler);
         return () => ipcRenderer.removeListener('tray-new-chat', handler);
+    },
+
+    // ── Context Mode ──
+    ctxStats: () => ipcRenderer.invoke('ctx-stats'),
+    ctxSearch: (queries, limit, source) => ipcRenderer.invoke('ctx-search', queries, limit, source),
+    ctxSources: () => ipcRenderer.invoke('ctx-sources'),
+    ctxClearSession: () => ipcRenderer.invoke('ctx-clear-session'),
+    ctxEventList: (limit) => ipcRenderer.invoke('ctx-event-list', limit),
+    ctxSnapshot: () => ipcRenderer.invoke('ctx-snapshot'),
+    ctxSavings: () => ipcRenderer.invoke('ctx-savings'),
+    onCtxSavingsUpdate: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ctx-savings-update', handler);
+        return () => ipcRenderer.removeListener('ctx-savings-update', handler);
     },
 
     // Platform

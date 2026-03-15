@@ -161,7 +161,6 @@ function emptyStep(): WorkflowStep {
 // ══════════════════════════════════════════
 
 export default function WorkflowsView({ isVisible = true }: { isVisible?: boolean }) {
-    console.log('[WorkflowsView] render, isElectron:', isElectron);
     const [activeTab, setActiveTab] = useState<WVTab>('workflows');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

@@ -78,23 +78,38 @@ const DEFAULT_PERMISSIONS = {
     git_checkout: 'allow',
     git_stash: 'allow',
     git_pull: 'allow',
+    // LSP tools
     find_symbol: 'allow',
     find_references: 'allow',
     list_symbols: 'allow',
     get_type_info: 'allow',
+    // Code index tools
     semantic_search: 'allow',
     index_codebase: 'allow',
+    // GitHub & Google CLI tools
     git_create_pr: 'allow',
     git_list_prs: 'allow',
     git_publish: 'ask',
     gh_cli: 'allow',
     gws_cli: 'allow',
+    // Context mode tools
+    ctx_execute: 'allow',
+    ctx_search: 'allow',
+    ctx_index: 'allow',
+    ctx_batch: 'allow',
+    ctx_stats: 'allow',
+    ctx_fetch: 'allow',
+    // MCP catalog
+    mcp_search: 'allow',
+    // Widgets
+    show_widget: 'allow',
 };
 
 let activePermissions = { ...DEFAULT_PERMISSIONS };
-let agentMode = 'build';
-let dangerousCommandProtection = true;
-let autoCommitEnabled = true;
+let agentMode = 'build'; // 'build' (full access) or 'plan' (read-only)
+
+// Sync callback — set during registration so setAgentMode can push changes
+let _syncPermissions = null;
 
 function loadProjectPermissions(projectPath) {
     try {
@@ -106,41 +121,38 @@ function loadProjectPermissions(projectPath) {
                 logger.info('permissions', `Loaded project permissions from ${configPath}`);
             }
         }
-    } catch (err) {
-        logger.warn('permissions', `Failed to load project permissions: ${err.message}`);
-    }
+    } catch { }
 }
 
 function setAgentMode(mode) {
     agentMode = mode;
     if (mode === 'plan') {
-        const readOnlyPerms = { ...DEFAULT_PERMISSIONS };
-        Object.keys(readOnlyPerms).forEach(tool => {
-            if (!['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase',
-                'task_list', 'get_plan', 'memory_read', 'memory_search', 'conversation_search',
-                'conversation_recall', 'get_context_summary', 'ask_user_question',
-                'sequential_thinking', 'trajectory_search', 'find_by_name',
-                'read_url_content', 'view_content_chunk', 'read_notebook',
-                'get_system_logs', 'get_changelog', 'git_diff', 'git_log', 'git_branches',
-                'find_symbol', 'find_references', 'list_symbols', 'get_type_info',
-                'semantic_search', 'index_codebase', 'memory_smart_search',
-                'memory_get_related', 'memory_hot_list',
-            ].includes(tool)) {
-                readOnlyPerms[tool] = 'deny';
-            }
-        });
-        activePermissions = readOnlyPerms;
+        // Plan mode: deny all writes, ask for commands
+        activePermissions = { ...DEFAULT_PERMISSIONS };
+        activePermissions.edit_file = 'deny';
+        activePermissions.create_file = 'deny';
+        activePermissions.delete_file = 'deny';
+        activePermissions.multi_edit = 'deny';
+        activePermissions.run_command = 'ask';
+        activePermissions.init_project = 'deny';
+    } else if (mode === 'ask-destructive') {
+        // Ask-destructive mode: allow everything except destructive ops
+        activePermissions = { ...DEFAULT_PERMISSIONS };
+        activePermissions.delete_file = 'ask';
+        activePermissions.restore_to_point = 'ask';
+        activePermissions.run_command = 'ask'; // commands checked individually
     } else {
+        // Auto-allow / build mode: everything allowed
         activePermissions = { ...DEFAULT_PERMISSIONS };
     }
+    // Sync to aiTools module + notify renderer
+    if (_syncPermissions) _syncPermissions(activePermissions, mode);
+    logger.info('agent-mode', `Switched to ${mode} mode`);
 }
 
 function checkPermission(toolName) {
     return activePermissions[toolName] || 'allow';
 }
-
-function isDangerousProtectionEnabled() { return dangerousCommandProtection; }
-function isAutoCommitEnabled() { return autoCommitEnabled; }
 
 // ══════════════════════════════════════════
 //  Settings
@@ -148,31 +160,33 @@ function isAutoCommitEnabled() { return autoCommitEnabled; }
 
 const SETTINGS_PATH = path.join(os.homedir(), '.onicode', 'settings.json');
 
+// Default settings
 const _settings = {
-    'permission-mode': 'auto-allow',
     'dangerous-cmd-protection': true,
     'auto-commit': true,
+    'permission-mode': 'auto-allow',
+    'panel-mode': 'always',
     'font-size': 13,
     'chat-history-limit': 50,
-    'default-project-path': '~/OniProjects',
+    'default-project-path': path.join(os.homedir(), 'OniProjects'),
     'show-tool-details': true,
     'auto-title': true,
     'send-on-enter': true,
     'notifications': true,
-    'max-auto-continues': 15,
     'compact-threshold': 60000,
-    'panel-mode': 'always',
+    'max-auto-continues': 15,
 };
 
-// Load persisted settings from disk
+// Load persisted settings on startup
 try {
     if (fs.existsSync(SETTINGS_PATH)) {
         const saved = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
         Object.assign(_settings, saved);
-        dangerousCommandProtection = _settings['dangerous-cmd-protection'];
-        autoCommitEnabled = _settings['auto-commit'];
+        logger.info('settings', `Loaded settings from ${SETTINGS_PATH}`);
     }
-} catch {}
+} catch (err) {
+    logger.warn('settings', `Failed to load settings: ${err.message}`);
+}
 
 function persistSettings() {
     try {
@@ -184,17 +198,29 @@ function persistSettings() {
     }
 }
 
+// Backward-compat aliases
+let dangerousCommandProtection = _settings['dangerous-cmd-protection'];
+let autoCommitEnabled = _settings['auto-commit'];
+
+function isDangerousProtectionEnabled() { return dangerousCommandProtection; }
+function isAutoCommitEnabled() { return autoCommitEnabled; }
+
 // ══════════════════════════════════════════
 //  IPC Registration
 // ══════════════════════════════════════════
 
 function registerPermissionsIPC(deps) {
     const { ipcMain, syncPermissions } = deps;
+    _syncPermissions = syncPermissions;
+
+    // Restore permission mode on startup (now that syncPermissions is available)
+    if (_settings['permission-mode'] && _settings['permission-mode'] !== 'auto-allow') {
+        setAgentMode(_settings['permission-mode'] === 'plan-only' ? 'plan' : _settings['permission-mode']);
+    }
 
     ipcMain.handle('agent-set-mode', (_, mode) => {
         setAgentMode(mode);
-        syncPermissions();
-        return { success: true, mode: agentMode };
+        return { success: true, mode };
     });
 
     ipcMain.handle('agent-get-mode', () => {
@@ -202,18 +228,21 @@ function registerPermissionsIPC(deps) {
     });
 
     ipcMain.handle('set-setting', (_, key, value) => {
-        if (key in _settings) {
-            _settings[key] = value;
-            persistSettings();
-            if (key === 'dangerous-cmd-protection') dangerousCommandProtection = !!value;
-            if (key === 'auto-commit') autoCommitEnabled = !!value;
-            return { success: true };
+        _settings[key] = value;
+        persistSettings();
+        // Keep backward-compat vars in sync
+        if (key === 'dangerous-cmd-protection') dangerousCommandProtection = !!value;
+        if (key === 'auto-commit') autoCommitEnabled = !!value;
+        if (key === 'permission-mode') {
+            const modeMap = { 'auto-allow': 'build', 'ask-destructive': 'ask-destructive', 'plan-only': 'plan' };
+            setAgentMode(modeMap[value] || 'build');
         }
-        return { error: `Unknown setting: ${key}` };
+        logger.info('settings', `Setting "${key}" = ${JSON.stringify(value)}`);
+        return { success: true };
     });
 
     ipcMain.handle('get-setting', (_, key) => {
-        return { value: _settings[key] };
+        return key ? _settings[key] : { ..._settings };
     });
 
     ipcMain.handle('get-all-settings', () => {
@@ -224,8 +253,6 @@ function registerPermissionsIPC(deps) {
 module.exports = {
     registerPermissionsIPC,
     DEFAULT_PERMISSIONS,
-    activePermissions,
-    agentMode,
     loadProjectPermissions,
     setAgentMode,
     checkPermission,

@@ -12,6 +12,24 @@ export default function HooksTab({
     addHook, removeHook, applyPreset, testHook,
 }: HooksTabProps) {
     const totalHooks = Object.values(hooks).reduce((sum, arr) => sum + arr.length, 0);
+    const systemCount = Object.values(hooks).reduce((sum, arr) => sum + arr.filter(h => h._system).length, 0);
+    const userCount = totalHooks - systemCount;
+
+    // Separate system hooks from user hooks for display
+    const systemHookEntries: Array<{ hookType: string; hook: typeof hooks[string][number]; blocking: boolean }> = [];
+    const userHookEntries: Array<{ hookType: string; hook: typeof hooks[string][number]; idx: number; blocking: boolean }> = [];
+
+    for (const [type, hooksArr] of Object.entries(hooks)) {
+        const typeInfo = Object.values(HOOK_CATEGORIES).flatMap(c => c.types).find(t => t.type === type);
+        const blocking = typeInfo?.blocking ?? false;
+        hooksArr.forEach((hook, idx) => {
+            if (hook._system) {
+                systemHookEntries.push({ hookType: type, hook, blocking });
+            } else {
+                userHookEntries.push({ hookType: type, hook, idx, blocking });
+            }
+        });
+    }
 
     return (
         <div className="settings-tab-content">
@@ -19,47 +37,96 @@ export default function HooksTab({
                 <h3>Lifecycle Hooks <span className="hook-total-badge">{totalHooks} registered</span></h3>
                 <p className="settings-section-desc">Shell commands that execute at lifecycle events. Blocking hooks (marked with a shield) can prevent operations when they exit non-zero.</p>
 
-                {/* Registered hooks grouped by category */}
-                {Object.entries(HOOK_CATEGORIES).map(([catId, cat]) => {
-                    const catHooks = cat.types.filter(t => hooks[t.type]?.length > 0);
-                    if (catHooks.length === 0) return null;
-                    return (
-                        <div key={catId} className="hook-category">
-                            <div className="hook-category-header">{cat.label}</div>
-                            {catHooks.map(hookType => (
-                                hooks[hookType.type]?.map((hook, idx) => (
-                                    <div key={`${hookType.type}-${idx}`} className="hook-item">
-                                        <div className="hook-item-header">
-                                            <span className={`hook-type-badge ${hookType.blocking ? 'hook-blocking' : ''}`}>
-                                                {hookType.blocking && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{marginRight: 3, verticalAlign: -1}}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>}
-                                                {hookType.type}
-                                            </span>
-                                            {hook.matcher && <span className="hook-matcher">/{hook.matcher}/</span>}
-                                        </div>
-                                        <code className="hook-command">{hook.command}</code>
-                                        <button
-                                            className="hook-test-btn"
-                                            onClick={() => testHook(hook.command, hookType.type)}
-                                            disabled={testingHook === hook.command}
-                                            title="Test this hook"
-                                        >
-                                            {testingHook === hook.command ? '...' : (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                                    <polygon points="5 3 19 12 5 21 5 3" />
-                                                </svg>
-                                            )}
-                                        </button>
-                                        <button className="hook-remove" onClick={() => removeHook(hookType.type, idx)} title="Remove">
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                                            </svg>
-                                        </button>
-                                    </div>
-                                ))
-                            ))}
+                {/* System hooks section */}
+                {systemCount > 0 && (
+                    <div className="hook-system-section">
+                        <div className="hook-system-header">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{verticalAlign: -2}}>
+                                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                            </svg>
+                            <span>System Hooks</span>
+                            <span className="hook-system-count">{systemCount}</span>
                         </div>
-                    );
-                })}
+                        <p className="hook-system-desc">Essential guardrails auto-applied by Onicode — safety gates, post-edit validation, git quality checks, secret file protection, and AI behavior guards.</p>
+                        {systemHookEntries.map((entry, i) => (
+                            <div key={`sys-${i}`} className="hook-item hook-item-system">
+                                <div className="hook-item-header">
+                                    <span className={`hook-type-badge hook-type-system ${entry.blocking ? 'hook-blocking' : ''}`}>
+                                        {entry.blocking && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{marginRight: 3, verticalAlign: -1}}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>}
+                                        {entry.hookType}
+                                    </span>
+                                    <span className="hook-system-badge">system</span>
+                                    {entry.hook.matcher && <span className="hook-matcher">/{entry.hook.matcher}/</span>}
+                                </div>
+                                <code className="hook-command">{entry.hook.command}</code>
+                                <button
+                                    className="hook-test-btn"
+                                    onClick={() => testHook(entry.hook.command, entry.hookType)}
+                                    disabled={testingHook === entry.hook.command}
+                                    title="Test this hook"
+                                >
+                                    {testingHook === entry.hook.command ? '...' : (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <polygon points="5 3 19 12 5 21 5 3" />
+                                        </svg>
+                                    )}
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* User hooks grouped by category */}
+                {userCount > 0 && (
+                    <div className="hook-user-section">
+                        {systemCount > 0 && (
+                            <div className="hook-user-header">Custom Hooks <span className="hook-system-count">{userCount}</span></div>
+                        )}
+                        {Object.entries(HOOK_CATEGORIES).map(([catId, cat]) => {
+                            const catHooks = cat.types.filter(t => hooks[t.type]?.some(h => !h._system));
+                            if (catHooks.length === 0) return null;
+                            return (
+                                <div key={catId} className="hook-category">
+                                    <div className="hook-category-header">{cat.label}</div>
+                                    {catHooks.map(hookType => (
+                                        hooks[hookType.type]?.map((hook, idx) => {
+                                            if (hook._system) return null;
+                                            return (
+                                                <div key={`${hookType.type}-${idx}`} className="hook-item">
+                                                    <div className="hook-item-header">
+                                                        <span className={`hook-type-badge ${hookType.blocking ? 'hook-blocking' : ''}`}>
+                                                            {hookType.blocking && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{marginRight: 3, verticalAlign: -1}}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>}
+                                                            {hookType.type}
+                                                        </span>
+                                                        {hook.matcher && <span className="hook-matcher">/{hook.matcher}/</span>}
+                                                    </div>
+                                                    <code className="hook-command">{hook.command}</code>
+                                                    <button
+                                                        className="hook-test-btn"
+                                                        onClick={() => testHook(hook.command, hookType.type)}
+                                                        disabled={testingHook === hook.command}
+                                                        title="Test this hook"
+                                                    >
+                                                        {testingHook === hook.command ? '...' : (
+                                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                                <polygon points="5 3 19 12 5 21 5 3" />
+                                                            </svg>
+                                                        )}
+                                                    </button>
+                                                    <button className="hook-remove" onClick={() => removeHook(hookType.type, idx)} title="Remove">
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                            );
+                                        })
+                                    ))}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
 
                 {totalHooks === 0 && (
                     <div className="hook-empty">

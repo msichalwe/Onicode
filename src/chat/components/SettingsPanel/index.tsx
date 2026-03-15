@@ -12,6 +12,7 @@ import SkillsTab from './SkillsTab';
 import ConnectorsTab from './ConnectorsTab';
 import HooksTab from './HooksTab';
 import McpTab from './McpTab';
+import ChannelsTab from './ChannelsTab';
 import MemoryTab from './MemoryTab';
 import DataTab from './DataTab';
 
@@ -244,7 +245,7 @@ export default function SettingsPanel() {
         if (!isElectron) return;
         try {
             const hooksRes = await window.onicode!.hooksList();
-            const loadedHooks = (hooksRes as Record<string, unknown>).merged || hooksRes.hooks;
+            const loadedHooks = hooksRes.merged;
             if (loadedHooks) setHooks(loadedHooks as Record<string, HookDefinition[]>);
         } catch { /* hooks module may not be ready */ }
         try {
@@ -312,6 +313,17 @@ export default function SettingsPanel() {
         setMcpName(''); setMcpCommand(''); setMcpArgs(''); setMcpEnv('');
         loadMCPServers();
     }, [mcpName, mcpCommand, mcpArgs, mcpEnv, loadMCPServers]);
+
+    const installFromCatalog = useCallback(async (entry: MCPCatalogEntry) => {
+        if (!isElectron) return;
+        await window.onicode!.mcpAddServer(entry.id, {
+            command: entry.command,
+            args: entry.args,
+            env: entry.env || {},
+            enabled: true,
+        });
+        loadMCPServers();
+    }, [loadMCPServers]);
 
     const addHook = useCallback(async () => {
         if (!newHookCmd.trim()) return;
@@ -521,8 +533,11 @@ export default function SettingsPanel() {
                     mcpLoading={mcpLoading}
                     handleMCPConnect={handleMCPConnect} handleMCPDisconnect={handleMCPDisconnect}
                     handleMCPRemove={handleMCPRemove} handleMCPAdd={handleMCPAdd}
+                    installFromCatalog={installFromCatalog}
                 />
             )}
+
+            {activeTab === 'channels' && <ChannelsTab />}
 
             {activeTab === 'memory' && (
                 <MemoryTab

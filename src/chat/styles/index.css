@@ -16,6 +16,7 @@
 @import './chat/attachments.css';
 @import './chat/question.css';
 @import './chat/history.css';
+@import './chat/widgets.css';
 
 /* ── Settings ── */
 @import './settings/settings.css';

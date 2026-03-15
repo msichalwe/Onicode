@@ -164,6 +164,89 @@ const HOOK_PRESETS = {
     },
 };
 
+// System hooks — auto-applied on first launch for safety and quality
+// These are the essential guardrails that keep the AI from making dumb mistakes.
+// 11 hooks across 6 categories: safety, validation, git, security, testing, behavior.
+const SYSTEM_HOOKS = {
+    // ── Safety: block destructive commands ──
+    OnDangerousCommand: [
+        { command: 'echo "BLOCKED: Dangerous command detected — $ONICODE_COMMAND" >&2 && exit 1', _system: true },
+    ],
+
+    // ── Validation: catch errors immediately after edits ──
+    PostEdit: [
+        // TypeScript / JavaScript — syntax check after every edit
+        {
+            command: 'EXT="${ONICODE_FILE_PATH##*.}"; if [ "$EXT" = "ts" ] || [ "$EXT" = "tsx" ]; then npx tsc --noEmit --pretty 2>&1 | head -15; elif [ "$EXT" = "js" ] || [ "$EXT" = "jsx" ]; then node --check "$ONICODE_FILE_PATH" 2>&1; fi',
+            matcher: '\\.(tsx?|jsx?)$',
+            _system: true,
+        },
+        // JSON — validate structure after editing config/package files
+        {
+            command: 'node -e "JSON.parse(require(\'fs\').readFileSync(\'$ONICODE_FILE_PATH\',\'utf8\'))" 2>&1 || echo "INVALID JSON: $ONICODE_FILE_PATH"',
+            matcher: '\\.json$',
+            _system: true,
+        },
+        // Python — syntax check after editing .py files
+        {
+            command: 'if command -v python3 >/dev/null 2>&1; then python3 -m py_compile "$ONICODE_FILE_PATH" 2>&1; fi',
+            matcher: '\\.py$',
+            _system: true,
+        },
+    ],
+
+    // ── Git: quality gates before committing ──
+    PreCommit: [
+        // Run project lint if available
+        {
+            command: 'if [ -f package.json ] && grep -q "\"lint\"" package.json 2>/dev/null; then npm run lint --silent 2>&1 | tail -5; fi',
+            _system: true,
+        },
+    ],
+    PostCommit: [
+        // Verify clean working tree after commit — warns if uncommitted files remain
+        {
+            command: 'DIRTY=$(git status --porcelain 2>/dev/null | head -5); if [ -n "$DIRTY" ]; then echo "[post-commit] Warning: uncommitted changes remain:"; echo "$DIRTY"; fi',
+            _system: true,
+        },
+    ],
+
+    // ── Security: prevent editing secrets and sensitive files ──
+    PreEdit: [
+        // Block edits to .env, private keys, credentials — exit 1 = BLOCK
+        {
+            command: 'echo "BLOCKED: Refusing to edit sensitive file — $ONICODE_FILE_PATH" >&2 && exit 1',
+            matcher: '(\\.env(\\.local|\\.prod|\\.staging)?$|\\.pem$|\\.key$|credentials\\.json|id_rsa|id_ed25519|\\.secret)',
+            _system: true,
+        },
+    ],
+
+    // ── Testing: track failures for pattern analysis ──
+    OnTestFailure: [
+        {
+            command: 'echo "[test-failure] Command: $ONICODE_COMMAND | Exit: $ONICODE_EXIT_CODE" >> "$HOME/.onicode/test-failures.log"',
+            _system: true,
+        },
+    ],
+
+    // ── Behavioral: guard AI tool usage quality ──
+    PreToolUse: [
+        // Prevent create_file from overwriting existing files — the AI should use edit_file instead
+        {
+            command: 'if [ "$ONICODE_TOOL_NAME" = "create_file" ]; then FILE=$(echo "$ONICODE_TOOL_INPUT" | node -e "try{const d=JSON.parse(require(\'fs\').readFileSync(\'/dev/stdin\',\'utf8\'));process.stdout.write(d.file_path||d.path||\'\')}catch{}"); if [ -n "$FILE" ] && [ -f "$FILE" ]; then echo "BLOCKED: File already exists — use edit_file instead of create_file for $FILE" >&2 && exit 1; fi; fi',
+            matcher: 'create_file',
+            _system: true,
+        },
+    ],
+    PreCommand: [
+        // Block piping untrusted URLs directly into shell execution
+        {
+            command: 'case "$ONICODE_COMMAND" in *"curl "*."|"*sh*|*"curl "*."|"*bash*|*"wget "*."|"*sh*|*"wget "*."|"*bash*) echo "BLOCKED: Refusing to pipe remote content into shell — $ONICODE_COMMAND" >&2 && exit 1;; esac',
+            _system: true,
+        },
+    ],
+};
+
 const DEFAULT_TIMEOUT = 10000; // 10 seconds
 
 // ══════════════════════════════════════════
@@ -220,10 +303,52 @@ function notifyHookExecution(hookType, result, context) {
 // ══════════════════════════════════════════
 
 /**
+ * Ensure system hooks exist in the global hooks file.
+ * Called on first launch (when hooks.json doesn't exist) or when system hooks are missing.
+ * System hooks are marked with _system: true so the UI can distinguish them.
+ */
+function ensureSystemHooks() {
+    let existing = {};
+    let needsWrite = false;
+
+    if (fs.existsSync(GLOBAL_HOOKS_FILE)) {
+        existing = readHooksFile(GLOBAL_HOOKS_FILE);
+    } else {
+        // First launch — install all system hooks
+        needsWrite = true;
+    }
+
+    const merged = { ...existing };
+
+    for (const [type, entries] of Object.entries(SYSTEM_HOOKS)) {
+        if (!merged[type]) merged[type] = [];
+        for (const entry of entries) {
+            // Check if this system hook already exists (by command content)
+            const isDuplicate = merged[type].some(e => e.command === entry.command);
+            if (!isDuplicate) {
+                merged[type].push(entry);
+                needsWrite = true;
+            }
+        }
+    }
+
+    if (needsWrite) {
+        writeHooksFile(GLOBAL_HOOKS_FILE, merged);
+        const { logger } = require('./logger');
+        logger.info('hooks', 'System hooks installed/updated');
+    }
+
+    return merged;
+}
+
+/**
  * Load and merge global + project hooks.
  * Call this on app start and whenever the active project changes.
  */
 function loadHooks(projectPath) {
+    // Ensure system hooks exist on every load (idempotent)
+    ensureSystemHooks();
+
     const globalHooks = readHooksFile(GLOBAL_HOOKS_FILE);
 
     let projectHooks = {};

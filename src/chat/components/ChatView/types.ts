@@ -23,6 +23,192 @@ export interface Message {
     questionsAnswered?: boolean;
     questionAnswers?: Record<number, string[]>;
     isError?: boolean;
+    channel?: 'telegram' | 'discord' | 'slack';
+    channelFrom?: string;
+    widgets?: ChatWidget[];
+}
+
+// ── Chat Widgets ──
+
+export type ChatWidgetType =
+    | 'weather'
+    | 'system-stats'
+    | 'quick-actions'
+    | 'timer'
+    | 'progress'
+    | 'git-card'
+    | 'poll'
+    | 'checklist'
+    | 'link-preview'
+    | 'chart'
+    | 'image-gallery'
+    | 'contact-card'
+    | 'calendar-event'
+    | 'code-run'
+    | 'file-card'
+    | 'mermaid'
+    | 'flowchart'
+    | 'timeline'
+    | 'kanban'
+    | 'mindmap'
+    | 'dashboard'
+    | 'svg-chart';
+
+export interface ChatWidget {
+    id: string;
+    type: ChatWidgetType;
+    data: Record<string, unknown>;
+}
+
+export interface WeatherData {
+    location: string;
+    temp: number;
+    unit: 'C' | 'F';
+    condition: string;
+    icon: string; // emoji
+    humidity?: number;
+    wind?: string;
+    forecast?: Array<{ day: string; temp: number; icon: string }>;
+}
+
+export interface SystemStatsData {
+    cpu: number;
+    memory: { used: number; total: number };
+    disk: { used: number; total: number };
+    uptime?: string;
+}
+
+export interface QuickActionsData {
+    title?: string;
+    actions: Array<{ label: string; command: string; icon?: string }>;
+}
+
+export interface TimerData {
+    label: string;
+    endsAt: number; // unix ms
+    duration: number; // seconds
+}
+
+export interface ProgressData {
+    label: string;
+    current: number;
+    total: number;
+    unit?: string;
+    items?: Array<{ label: string; done: boolean }>;
+}
+
+export interface GitCardData {
+    branch: string;
+    status: string;
+    ahead?: number;
+    behind?: number;
+    changed?: number;
+    recentCommits?: Array<{ hash: string; message: string; time: string }>;
+}
+
+export interface PollData {
+    question: string;
+    options: Array<{ label: string; votes: number }>;
+    voted?: number;
+}
+
+export interface ChecklistData {
+    title: string;
+    items: Array<{ id: string; label: string; done: boolean }>;
+}
+
+export interface LinkPreviewData {
+    url: string;
+    title: string;
+    description?: string;
+    image?: string;
+    domain: string;
+}
+
+export interface ChartData {
+    title: string;
+    type: 'bar' | 'line' | 'pie';
+    labels: string[];
+    values: number[];
+    color?: string;
+}
+
+export interface ImageGalleryData {
+    images: Array<{ src: string; alt?: string }>;
+}
+
+export interface ContactCardData {
+    name: string;
+    role?: string;
+    email?: string;
+    phone?: string;
+    avatar?: string;
+}
+
+export interface CalendarEventData {
+    title: string;
+    date: string;
+    time?: string;
+    location?: string;
+    description?: string;
+}
+
+export interface CodeRunData {
+    language: string;
+    code: string;
+    output?: string;
+    exitCode?: number;
+}
+
+export interface FileCardData {
+    name: string;
+    path: string;
+    size?: string;
+    language?: string;
+    preview?: string;
+}
+
+export interface MermaidData {
+    code: string;
+    title?: string;
+}
+
+export interface FlowchartData {
+    title?: string;
+    nodes: Array<{ id: string; label: string; type?: 'start' | 'end' | 'process' | 'decision' | 'io' }>;
+    edges: Array<{ from: string; to: string; label?: string }>;
+}
+
+export interface TimelineData {
+    title?: string;
+    events: Array<{ date: string; title: string; description?: string; icon?: string; color?: string }>;
+}
+
+export interface KanbanData {
+    title?: string;
+    columns: Array<{ name: string; color?: string; items: Array<{ id: string; title: string; tag?: string }> }>;
+}
+
+export interface MindmapData {
+    root: MindmapNode;
+}
+
+export interface MindmapNode {
+    label: string;
+    children?: MindmapNode[];
+    color?: string;
+}
+
+export interface DashboardData {
+    title?: string;
+    widgets: Array<{ type: string; data: Record<string, unknown>; span?: number }>;
+}
+
+export interface SVGChartData {
+    title?: string;
+    type: 'line' | 'area' | 'scatter' | 'radar' | 'donut';
+    labels: string[];
+    datasets: Array<{ label: string; values: number[]; color?: string }>;
 }
 
 export interface Attachment {

@@ -117,6 +117,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const mentionMenuRef = useRef<HTMLDivElement>(null);
     const activeProjectRef = useRef(activeProject);
     const toolStepsRef = useRef<ToolStep[]>([]);
+    const pendingWidgetsRef = useRef<Array<{ id: string; type: string; data: Record<string, unknown> }>>([]);
+    const pendingChannelRef = useRef<{ chatId: number; channel: string } | null>(null);
 
     // Keep ref in sync with prop so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
@@ -564,24 +566,33 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         const removeMessageBreakListener = window.onicode!.onMessageBreak(() => {
             const currentContent = streamContentRef.current;
             const currentSteps = [...toolStepsRef.current];
-            if (currentContent.trim()) {
+            const currentWidgets = [...pendingWidgetsRef.current];
+            if (currentContent.trim() || currentWidgets.length > 0) {
                 setMessages((prev) => [...prev, {
                     id: generateId(), role: 'ai' as const,
                     content: currentContent,
                     timestamp: Date.now(),
                     toolSteps: currentSteps.length > 0 ? currentSteps : undefined,
+                    widgets: currentWidgets.length > 0 ? currentWidgets as import('./types').ChatWidget[] : undefined,
                 }]);
                 streamContentRef.current = '';
                 toolStepsRef.current = [];
+                pendingWidgetsRef.current = [];
                 setStreamingContent('');
                 setActiveToolSteps([]);
             }
         });
 
+        const removeWidgetListener = window.onicode!.onWidget?.((data) => {
+            console.log('[ChatView] Widget event received:', data.type, JSON.stringify(data.data).slice(0, 200));
+            pendingWidgetsRef.current = [...pendingWidgetsRef.current, { id: data.id, type: data.type, data: data.data }];
+        }) || (() => { console.warn('[ChatView] onWidget not available in preload'); });
+
         const removeDoneListener = window.onicode!.onStreamDone((error: string | null) => {
             removeChunkListener();
             removeDoneListener();
             removeToolCallListener();
+            removeWidgetListener();
             removeToolResultListener();
             removeMessageBreakListener();
             cleanupRef.current = null;
@@ -589,10 +600,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
             const finalContent = streamContentRef.current;
             const finalToolSteps = [...toolStepsRef.current];
+            const finalWidgets = [...pendingWidgetsRef.current];
             setStreamingContent('');
             streamContentRef.current = '';
             setActiveToolSteps([]);
             toolStepsRef.current = [];
+            pendingWidgetsRef.current = [];
             sendingRef.current = false;
 
             if (error) {
@@ -604,21 +617,32 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
                 }]);
                 onNewMessage?.();
-            } else if (finalContent.trim() || finalToolSteps.length > 0) {
+            } else if (finalContent.trim() || finalToolSteps.length > 0 || finalWidgets.length > 0) {
+                if (finalWidgets.length > 0) {
+                    console.log('[ChatView] Attaching widgets to message:', finalWidgets.length, finalWidgets.map(w => `${w.type}:${JSON.stringify(w.data).slice(0, 100)}`));
+                }
                 setMessages((prev) => [...prev, {
                     id: generateId(), role: 'ai' as const,
                     content: finalContent || '',
                     timestamp: Date.now(),
                     toolSteps: finalToolSteps.length > 0 ? finalToolSteps : undefined,
+                    widgets: finalWidgets.length > 0 ? finalWidgets as import('./types').ChatWidget[] : undefined,
                 }]);
                 onNewMessage?.();
+            }
+
+            // ── Channel bridge: send AI response back to the channel ──
+            if (pendingChannelRef.current && finalContent.trim()) {
+                const { chatId } = pendingChannelRef.current;
+                pendingChannelRef.current = null;
+                window.onicode?.channelRespond(chatId, finalContent.trim()).catch(() => {});
             }
         });
 
         cleanupRef.current = () => {
             removeChunkListener(); removeDoneListener();
             removeToolCallListener(); removeToolResultListener();
-            removeMessageBreakListener();
+            removeMessageBreakListener(); removeWidgetListener();
         };
 
         const result = await window.onicode!.sendMessage(apiMessages as Array<{ role: string; content: string }>, {
@@ -837,10 +861,11 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         let customCommandsSummary: string | undefined;
         if (isElectron) {
             try {
-                const hooksRes = await window.onicode!.hooksList();
-                if (hooksRes.hooks && Object.keys(hooksRes.hooks).length > 0) {
+                const hooksRes = await window.onicode!.hooksList(currentProject?.path);
+                const mergedHooks = hooksRes.merged || {};
+                if (Object.keys(mergedHooks).length > 0) {
                     const lines: string[] = [];
-                    for (const [type, hookList] of Object.entries(hooksRes.hooks)) {
+                    for (const [type, hookList] of Object.entries(mergedHooks)) {
                         for (const hook of hookList as HookDefinition[]) {
                             lines.push(`- **${type}**${hook.matcher ? ` (match: /${hook.matcher}/)` : ''}: \`${hook.command}\``);
                         }
@@ -952,6 +977,55 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             await sendViaFetch(apiMessages, provider);
         }
     }, [sendViaIPC, sendViaFetch]);
+
+    // ── Channel Bridge: Telegram and other channels feed into this ChatView ──
+    useEffect(() => {
+        if (!isElectron || !window.onicode?.onChannelIncoming) return;
+        const cleanup = window.onicode!.onChannelIncoming((data) => {
+            const { channel, chatId, from, text, action } = data;
+
+            if (action === 'new_session') {
+                // /new or /clear from channel — just reset would happen in a dedicated conv
+                return;
+            }
+
+            // Inject the message into ChatView's pipeline
+            // Tag the pending channel so stream-done sends response back
+            pendingChannelRef.current = { chatId, channel };
+
+            const channelTag = `[${channel}:${from}] `;
+            const userMsg: Message = {
+                id: generateId(), role: 'user',
+                content: text,
+                timestamp: Date.now(),
+                channel: channel as 'telegram',
+                channelFrom: from,
+            };
+
+            // If AI is currently busy, queue it
+            if (sendingRef.current || isTyping) {
+                setMessageQueue(prev => [...prev, {
+                    id: generateId(), type: 'user' as const,
+                    content: channelTag + text,
+                    timestamp: Date.now(),
+                    editable: false,
+                }]);
+                // Still need to resolve the channel — but queued messages will resolve later
+                // For now, resolve immediately with a "queued" response
+                window.onicode?.channelRespond(chatId, 'Your message is queued — I\'m currently processing another request. I\'ll get to it shortly.').catch(() => {});
+                pendingChannelRef.current = null;
+                return;
+            }
+
+            // Add user message and trigger AI — same as pressing Enter
+            setMessages(prev => {
+                const updated = [...prev, userMsg];
+                sendToAI(text, prev);
+                return updated;
+            });
+        });
+        return cleanup;
+    }, [sendToAI, isTyping]);
 
     // ── Auto-dequeue ──
     useEffect(() => {

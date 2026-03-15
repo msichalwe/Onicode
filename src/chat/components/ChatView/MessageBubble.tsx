@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import QuestionDialog, { parseQuestions, isQuestionMessage } from '../QuestionDialog';
 import { generateId } from '../../utils';
 import ToolStepRenderer from './ToolStepRenderer';
+import WidgetRenderer from './WidgetRenderer';
 import type { MessageBubbleProps, Message } from './types';
 
 export default function MessageBubble({
@@ -61,6 +62,17 @@ export default function MessageBubble({
                     </div>
                 ) : (
                     <div className="message-bubble">{renderMessageContent(message.content)}</div>
+                )}
+                {message.widgets && message.widgets.length > 0 && (
+                    <div className="message-widgets">
+                        {message.widgets.map(w => (
+                            <WidgetRenderer
+                                key={w.id}
+                                widget={w}
+                                onAction={(cmd) => sendToAI(cmd, allMessages)}
+                            />
+                        ))}
+                    </div>
                 )}
                 {message.isError && !isTyping && (
                     <button

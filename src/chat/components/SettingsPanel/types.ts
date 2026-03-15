@@ -6,7 +6,7 @@ import type { Skill } from '../../commands/skills';
 //  Tab Definitions
 // ══════════════════════════════════════════
 
-export type SettingsTab = 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'connectors' | 'memory' | 'data';
+export type SettingsTab = 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'channels' | 'connectors' | 'memory' | 'data';
 
 export const TABS: { id: SettingsTab; label: string }[] = [
     { id: 'general', label: 'General' },
@@ -15,6 +15,7 @@ export const TABS: { id: SettingsTab; label: string }[] = [
     { id: 'skills', label: 'Skills' },
     { id: 'hooks', label: 'Hooks' },
     { id: 'mcp', label: 'MCP' },
+    { id: 'channels', label: 'Channels' },
     { id: 'connectors', label: 'Connectors' },
     { id: 'memory', label: 'Memory' },
     { id: 'data', label: 'Data' },
@@ -196,6 +197,7 @@ export interface McpTabProps {
     handleMCPDisconnect: (name: string) => void;
     handleMCPRemove: (name: string) => void;
     handleMCPAdd: () => void;
+    installFromCatalog: (entry: MCPCatalogEntry) => void;
 }
 
 export interface ConnectorsTabProps {
@@ -239,6 +241,10 @@ export interface MemoryTabProps {
     saveMemoryFile: (filename: string, content: string) => void;
     deleteMemoryFile: (filename: string) => void;
     searchMemories: (query: string) => void;
+}
+
+export interface ChannelsTabProps {
+    // Channels tab manages its own state internally via useState + IPC
 }
 
 export interface DataTabProps {

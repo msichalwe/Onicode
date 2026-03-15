@@ -5,6 +5,52 @@ interface FileTreeItem {
     children?: FileTreeItem[];
 }
 
+interface ContextSearchResult {
+    title: string;
+    snippet: string;
+    source: string;
+    score: number;
+    sourceId: number;
+}
+
+interface ContextSource {
+    id: number;
+    label: string;
+    source: string;
+    sessionId: string;
+    chunkCount: number;
+    indexedAt: string;
+}
+
+interface ContextEvent {
+    id: number;
+    session_id: string;
+    type: string;
+    category: string;
+    priority: number;
+    data: string;
+    source_hook: string;
+    created_at: string;
+}
+
+interface ContextModeStats {
+    success?: boolean;
+    context_savings: {
+        total_bytes_processed: number;
+        total_bytes_in_context: number;
+        savings_ratio: string;
+        bytes_saved: number;
+    };
+    knowledge_base: {
+        totalSources: number;
+        totalChunks: number;
+        totalVocabulary: number;
+    };
+    per_tool: Record<string, { calls: number; bytesIn: number; bytesOut: number }>;
+    session_id: string;
+    search_calls_this_session: number;
+}
+
 interface ProjectMeta {
     id: string;
     name: string;
@@ -50,6 +96,7 @@ interface OnicodeAPI {
     // AI Agentic Events
     onToolCall: (callback: (data: { id: string; name: string; args: Record<string, unknown>; round: number }) => void) => () => void;
     onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;
+    onWidget: (callback: (data: { id: string; type: string; data: Record<string, unknown> }) => void) => () => void;
     onAgentStep: (callback: (data: { round: number; status: string; agentId?: string; task?: string; toolSet?: string; role?: string; orchestrationId?: string }) => void) => () => void;
     onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
 
@@ -383,7 +430,7 @@ interface OnicodeAPI {
     gitGithubStatus: () => Promise<{ connected: boolean; username?: string; avatarUrl?: string; name?: string }>;
 
     // Hooks
-    hooksList: (projectPath?: string) => Promise<{ hooks: Record<string, HookDefinition[]> }>;
+    hooksList: (projectPath?: string) => Promise<{ global: Record<string, HookDefinition[]>; project: Record<string, HookDefinition[]>; merged: Record<string, HookDefinition[]>; hookTypes: string[]; descriptions: Record<string, string> }>;
     hooksSave: (hooks: Record<string, HookDefinition[]>, scope?: string, projectPath?: string) => Promise<{ success: boolean; error?: string }>;
     hooksTest: (hookType: string, context: Record<string, unknown>, command?: string) => Promise<{ success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string }>;
     hooksPresets: () => Promise<Array<{ id: string; name: string; description: string; hookTypes: string[] }>>;
@@ -422,6 +469,24 @@ interface OnicodeAPI {
     mcpRemoveServer: (name: string) => Promise<{ success: boolean; error?: string }>;
     mcpGetToolsForPrompt: () => Promise<{ tools: MCPToolInfo[] }>;
     onMcpServerStatus: (callback: (data: { name: string; status: string; toolCount?: number; error?: string }) => void) => () => void;
+
+    // MCP Catalog
+    mcpCatalogList: (category?: string) => Promise<{ servers: MCPCatalogEntry[]; categories: Array<{ name: string; count: number }> }>;
+    mcpCatalogSearch: (query: string, maxResults?: number) => Promise<{ servers: MCPCatalogEntry[] }>;
+    mcpCatalogEntry: (id: string) => Promise<{ server: MCPCatalogEntry | null }>;
+
+    // Channels
+    channelsList: () => Promise<{ channels: ChannelInfo[] }>;
+    channelTelegramValidate: (token: string) => Promise<{ success: boolean; botInfo?: TelegramBotInfo; error?: string }>;
+    channelTelegramConnect: (token: string, allowedChatIds?: number[]) => Promise<{ success: boolean; botInfo?: TelegramBotInfo; error?: string }>;
+    channelTelegramDisconnect: () => Promise<{ success: boolean }>;
+    channelTelegramStats: () => Promise<{ connected: boolean; botInfo: TelegramBotInfo | null; activeChats: number; chatIds: number[]; polling: boolean }>;
+    channelTelegramSetAllowed: (chatIds: number[]) => Promise<{ success: boolean }>;
+    channelTelegramSend: (chatId: number, text: string) => Promise<{ success: boolean; error?: string }>;
+    channelRespond: (chatId: number, text: string) => Promise<{ success: boolean }>;
+    onChannelStatus: (callback: (data: { channel: string; status: string; botInfo?: TelegramBotInfo; error?: string }) => void) => () => void;
+    onChannelIncoming: (callback: (data: { channel: string; chatId: number; from: string; text: string; action: string; timestamp: number }) => void) => () => void;
+    onChannelMessage: (callback: (data: { channel: string; direction: string; chatId: number; from?: string; text: string; timestamp: number }) => void) => () => void;
 
     // Scheduler
     schedulerList: () => Promise<{ success: boolean; schedules?: ScheduleDef[]; error?: string }>;
@@ -487,6 +552,16 @@ interface OnicodeAPI {
     // System Tray events
     onTrayNewChat: (callback: () => void) => () => void;
 
+    // Context Mode
+    ctxStats: () => Promise<ContextModeStats>;
+    ctxSearch: (queries: string[], limit?: number, source?: string) => Promise<{ success?: boolean; results: ContextSearchResult[]; error?: string }>;
+    ctxSources: () => Promise<{ success?: boolean; sources: ContextSource[]; error?: string }>;
+    ctxClearSession: () => Promise<{ success?: boolean; error?: string }>;
+    ctxEventList: (limit?: number) => Promise<{ success?: boolean; events: ContextEvent[]; error?: string }>;
+    ctxSnapshot: () => Promise<{ success?: boolean; snapshot?: string; eventCount?: number; error?: string }>;
+    ctxSavings: () => Promise<{ success?: boolean; totalBytesIn: number; totalBytesOut: number; bytesSaved: number; savingsPercent: number; perTool: Record<string, { calls: number; bytesIn: number; bytesOut: number }>; error?: string }>;
+    onCtxSavingsUpdate: (callback: (data: { tool: string; bytesIn: number; bytesOut: number; savingsPercent: number }) => void) => () => void;
+
     platform: string;
 
     getEnvironment: () => Promise<{
@@ -530,10 +605,38 @@ declare global {
         description: string;
     }
 
+    interface TelegramBotInfo {
+        id: number;
+        firstName: string;
+        username: string;
+    }
+
+    interface ChannelInfo {
+        id: string;
+        name: string;
+        connected: boolean;
+        botInfo: TelegramBotInfo | null;
+        allowedChatIds: number[];
+        activeChats: number;
+        savedConfig: boolean;
+    }
+
+    interface MCPCatalogEntry {
+        id: string;
+        name: string;
+        category: string;
+        description: string;
+        command: string;
+        args: string[];
+        env?: Record<string, string>;
+        tags: string[];
+    }
+
     interface HookDefinition {
         matcher?: string;
         command: string;
         timeout?: number;
+        _system?: boolean;
     }
 
     interface CustomCommand {
