@@ -52,6 +52,12 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
     return (
         <aside className="sidebar">
             <nav className="sidebar-nav">
+                {/* New Chat — always visible, above Chat */}
+                <button className="sidebar-btn sidebar-btn-new" onClick={() => { onViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-new-chat')); }} title="New chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                    New Chat
+                </button>
+
                 {/* Chat — always visible */}
                 <button className={`sidebar-btn ${currentView === 'chat' ? 'active' : ''}`} onClick={() => onViewChange('chat')} title="Chat">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
@@ -59,7 +65,7 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
                     {unreadChatCount > 0 && <span className="sidebar-badge">{unreadChatCount > 99 ? '99+' : unreadChatCount}</span>}
                 </button>
 
-                {/* Projects — visible in projects mode; opens project picker, not ProjectsView */}
+                {/* Projects — projects mode only */}
                 {mode === 'projects' && (
                     <button className={`sidebar-btn ${currentView === 'projects' ? 'active' : ''}`} onClick={() => onViewChange('projects')} title="Projects">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
@@ -67,7 +73,7 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
                     </button>
                 )}
 
-                {/* Files — workmate + projects */}
+                {/* Files — workpal + projects */}
                 {mode !== 'onichat' && (
                     <button className={`sidebar-btn ${currentView === 'attachments' ? 'active' : ''}`} onClick={() => onViewChange('attachments')} title="Files">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
@@ -90,21 +96,10 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
                         Tasks
                     </button>
                 )}
-
-                {/* Workflows — workmate + projects */}
-                {mode !== 'onichat' && (
-                    <button className={`sidebar-btn ${currentView === 'workflows' ? 'active' : ''}`} onClick={() => onViewChange('workflows')} title="Workflows & Schedules">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" /><circle cx="12" cy="12" r="4" /></svg>
-                        Workflows
-                        {automationCount > 0 && <span className="sidebar-badge">{automationCount}</span>}
-                    </button>
-                )}
             </nav>
 
             {/* ── Recents: per-mode chat history (max 15) ── */}
             <RecentChats mode={mode} onViewChange={onViewChange} />
-
-            <div className="sidebar-spacer" />
 
             <div className="sidebar-bottom">
                 <button
@@ -140,66 +135,34 @@ const MAX_RECENTS = 15;
 
 function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
     const [chats, setChats] = useState<RecentChat[]>([]);
-    const [hasMore, setHasMore] = useState(false);
-    const sentinelRef = useRef<HTMLDivElement>(null);
-    const pageRef = useRef(0);
-    const loadingRef = useRef(false);
 
-    const filterByMode = useCallback((conversations: RecentChat[]) => {
-        return conversations.filter(c => {
-            if (mode === 'projects') return c.project_name || c.scope === 'project';
-            if (mode === 'workpal') return c.scope === 'workpal';
-            return !c.project_name && c.scope !== 'project' && c.scope !== 'workpal';
-        });
-    }, [mode]);
-
-    const loadChats = useCallback(async (reset = false) => {
-        if (!isElectron || !window.onicode?.conversationList || loadingRef.current) return;
-        loadingRef.current = true;
-        const offset = reset ? 0 : pageRef.current * 30;
+    const loadChats = useCallback(async () => {
+        if (!isElectron || !window.onicode?.conversationList) return;
         try {
-            const res = await window.onicode.conversationList(30, offset);
+            const res = await window.onicode.conversationList(50, 0);
             if (res.success && res.conversations) {
-                const filtered = filterByMode(res.conversations as RecentChat[]);
-                if (reset) {
-                    setChats(filtered.slice(0, MAX_RECENTS));
-                    pageRef.current = 1;
-                } else {
-                    setChats(prev => {
-                        const ids = new Set(prev.map(c => c.id));
-                        const newOnes = filtered.filter(c => !ids.has(c.id));
-                        return [...prev, ...newOnes].slice(0, MAX_RECENTS);
-                    });
-                    pageRef.current++;
-                }
-                setHasMore(filtered.length >= 5 && (reset ? filtered.length : chats.length + filtered.length) < MAX_RECENTS);
+                const all = res.conversations as RecentChat[];
+                // Filter by mode — lenient: no scope = onichat
+                const filtered = all.filter(c => {
+                    if (mode === 'projects') return !!(c.project_name || c.scope === 'project');
+                    if (mode === 'workpal') return c.scope === 'workpal';
+                    // OniChat: everything without explicit project/workpal scope
+                    return c.scope !== 'project' && c.scope !== 'workpal' && !c.project_name;
+                });
+                setChats(filtered.slice(0, MAX_RECENTS));
             }
         } catch { /* ignore */ }
-        loadingRef.current = false;
-    }, [mode, filterByMode, chats.length]);
+    }, [mode]);
 
-    useEffect(() => { loadChats(true); }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => { loadChats(); }, [loadChats]);
 
-    // Refresh on new chat events
+    // Refresh on events (new chat, save, delete, history clear)
     useEffect(() => {
-        const handler = () => setTimeout(() => loadChats(true), 500);
-        window.addEventListener('onicode-new-chat', handler);
-        window.addEventListener('onicode-conversation-saved', handler);
-        return () => {
-            window.removeEventListener('onicode-new-chat', handler);
-            window.removeEventListener('onicode-conversation-saved', handler);
-        };
+        const handler = () => setTimeout(loadChats, 300);
+        const events = ['onicode-new-chat', 'onicode-conversation-saved', 'onicode-conversation-deleted', 'onicode-conversations-cleared'];
+        events.forEach(e => window.addEventListener(e, handler));
+        return () => events.forEach(e => window.removeEventListener(e, handler));
     }, [loadChats]);
-
-    // Lazy load: intersection observer on sentinel
-    useEffect(() => {
-        if (!hasMore || !sentinelRef.current) return;
-        const observer = new IntersectionObserver(([entry]) => {
-            if (entry.isIntersecting) loadChats(false);
-        }, { threshold: 0.5 });
-        observer.observe(sentinelRef.current);
-        return () => observer.disconnect();
-    }, [hasMore, loadChats]);
 
     const handleClick = (chatId: string) => {
         onViewChange('chat');
@@ -241,7 +204,6 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
                         </div>
                     </button>
                 ))}
-                {hasMore && <div ref={sentinelRef} className="sidebar-recents-sentinel" />}
             </div>
         </div>
     );

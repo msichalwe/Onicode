@@ -433,15 +433,15 @@ function AppContent() {
                             <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
                         </svg>
                     </button>
+                    <button className="app-header-btn" onClick={() => handleViewChange('workflows')} title="Workflows & Schedules">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" /><circle cx="12" cy="12" r="4" />
+                        </svg>
+                    </button>
                     <button className="app-header-btn" onClick={togglePanel} title={panel.widget ? 'Close panel' : 'Open panel'}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <rect x="3" y="3" width="18" height="18" rx="2" />
                             <line x1="15" y1="3" x2="15" y2="21" />
-                        </svg>
-                    </button>
-                    <button className="app-header-btn app-header-new" onClick={newChatFromHeader} title="New chat">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                         </svg>
                     </button>
                 </div>

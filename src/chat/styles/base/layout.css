@@ -94,6 +94,18 @@
   stroke: var(--accent);
 }
 
+.sidebar-btn-new {
+  border: 1px dashed var(--border-light) !important;
+  color: var(--text-tertiary) !important;
+  margin-bottom: 4px;
+}
+
+.sidebar-btn-new:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  border-style: solid !important;
+}
+
 .sidebar-badge {
   font-size: 9px;
   font-weight: 700;
@@ -225,16 +237,15 @@
   flex-shrink: 0;
 }
 
-.sidebar-spacer {
-  flex: 0 0 8px;
-}
-
 .sidebar-bottom {
-  padding: 0 8px 16px;
+  padding: 4px 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   width: 100%;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-light);
+  margin-top: auto;
 }
 
 /* ── Search Modal (⌘K) ── */

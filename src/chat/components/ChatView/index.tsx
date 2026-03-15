@@ -1331,6 +1331,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         saveConversationsCache(convs); setConversations(convs);
         deleteFromSQLite(convId);
         if (activeConvId === convId) newChat();
+        window.dispatchEvent(new CustomEvent('onicode-conversation-deleted'));
     }, [activeConvId, newChat]);
 
     // ── Listen for external load-conversation signal (from sidebar recents / search modal) ──
