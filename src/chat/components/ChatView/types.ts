@@ -68,7 +68,8 @@ export type ChatWidgetType =
     | 'floor-plan'
     | 'equation'
     | 'video'
-    | 'document';
+    | 'document'
+    | 'artifact';
 
 export interface ChatWidget {
     id: string;

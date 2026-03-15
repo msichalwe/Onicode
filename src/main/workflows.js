@@ -1065,7 +1065,7 @@ const WORKFLOW_TOOL_DEFINITIONS = [
                     type: {
                         type: 'string',
                         description: 'Widget type',
-                        enum: ['weather', 'system-stats', 'quick-actions', 'timer', 'progress', 'git-card', 'poll', 'checklist', 'link-preview', 'chart', 'image-gallery', 'contact-card', 'calendar-event', 'code-run', 'file-card', 'mermaid', 'flowchart', 'timeline', 'kanban', 'mindmap', 'dashboard', 'svg-chart', 'simulation', 'interactive-graph', 'data-table', 'comparison', 'pricing', 'accordion', 'tabs', 'slides', 'rating', 'countdown', 'color-palette', 'floor-plan', 'equation', 'video', 'document'],
+                        enum: ['weather', 'system-stats', 'quick-actions', 'timer', 'progress', 'git-card', 'poll', 'checklist', 'link-preview', 'chart', 'image-gallery', 'contact-card', 'calendar-event', 'code-run', 'file-card', 'mermaid', 'flowchart', 'timeline', 'kanban', 'mindmap', 'dashboard', 'svg-chart', 'simulation', 'interactive-graph', 'data-table', 'comparison', 'pricing', 'accordion', 'tabs', 'slides', 'rating', 'countdown', 'color-palette', 'floor-plan', 'equation', 'video', 'document', 'artifact'],
                     },
                 },
                 required: ['type'],

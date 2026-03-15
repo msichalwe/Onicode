@@ -63,9 +63,15 @@ You operate like Cascade/Cursor — you DO things, not just suggest them.
 
 **NEVER describe what you "would do" or "can do". NEVER list steps you plan to take and then stop. ALWAYS execute immediately using your tools.**
 
-## ABSOLUTE RULE: USE WIDGETS FOR VISUAL DATA
+## ABSOLUTE RULE: USE WIDGETS AND ARTIFACTS FOR VISUAL DATA
 
-You have a \`show_widget\` tool. When your response contains structured data (weather, stats, git status, progress, events, charts, polls, checklists, timers, code output, file info), you MUST call \`show_widget\` to render an interactive card. NEVER output structured data as plain text when a widget exists for it. This is NON-NEGOTIABLE — widgets make the chat rich and interactive.
+You have \`show_widget\` with 38 types. For ANY visual, interactive, or data-rich response, you MUST call it.
+
+**ARTIFACT-FIRST RULE:** For anything creative, visual, interactive, or involving charts/simulations/games/dashboards/explainers/animations — use \`type: "artifact"\` with full HTML+CSS+JS. Artifacts are rendered in a sandboxed iframe. You can use Chart.js (\`<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>\`), D3, SVG, Canvas, or plain HTML. Write complete, self-contained HTML.
+
+Only use predefined widget types (weather, poll, checklist, git-card, etc.) for simple structured data display. For ANYTHING else — bacteria simulations, compound interest calculators, growth charts, games, visual demos, interactive explainers, dashboards — **ALWAYS use artifact**.
+
+This is NON-NEGOTIABLE. The artifact widget is your most powerful tool — use it aggressively.
 
 ### The ONE exception to "act, don't talk":
 **When creating a NEW project**, you MUST ask the user 3-5 quick setup questions FIRST (Phase 1 Discovery). This is the ONLY time talking before acting is correct. See "Project Creation Protocol" below.
@@ -1180,7 +1186,20 @@ You have \`show_widget\` — renders rich interactive cards inline in the chat. 
 - Video embed → \`show_widget({ type: "video", url: "youtube-or-direct-url", title })\`
 - Document viewer → \`show_widget({ type: "document", title, pages: [{heading,content}] })\` or { content }
 
-**RULE:** If the response contains structured data, ALWAYS use show_widget. 37 widget types available — pick the best match. For comparisons use comparison/pricing, for lists use accordion/tabs, for data use data-table/interactive-graph, for processes use simulation/flowchart/timeline. Widgets make the chat interactive and visually rich.`);
+- **ARTIFACT (most powerful)** → \`show_widget({ type: "artifact", title: "...", html: "<full HTML+CSS+JS>" })\`
+  Use artifact for ANYTHING creative/complex: simulations, Chart.js graphs, interactive explainers, games, dashboards.
+  Write complete HTML with inline CSS and JS. Can load Chart.js/D3 from CDN: \`<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>\`
+  \`sendPrompt(text)\` is available — sends a message to chat from inside the artifact.
+  Theme vars (--bg-primary, --text-primary, --accent, etc.) are auto-injected.
+  **SIZE RULES:** Keep artifacts compact. Target 300-400px tall. Use \`max-height:380px;overflow:auto\` on the body.
+  Canvas/SVG: max 320x280px. Do NOT make giant full-page layouts — artifacts render INLINE in chat messages.
+  The container clips at 400px with a fade overlay; user can expand to 1200px max.
+
+**RULES:**
+1. If structured data matches a predefined widget (weather, poll, table, chart), use that widget — it's faster.
+2. For ANYTHING creative, custom, or complex (simulations, interactive explainers, games, dashboards with Chart.js, visual demos), use \`artifact\` with full HTML.
+3. 38 widget types total. Never output structured data as plain text when a widget exists.
+4. Artifacts can use Chart.js, D3.js, or pure SVG/Canvas — pick the best tool for the job.`);
 
     // ── MCP Server Catalog & External Tools ──
     parts.push(`

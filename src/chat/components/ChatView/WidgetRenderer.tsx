@@ -13,6 +13,7 @@ import {
     SlidesWidget, RatingWidget, CountdownWidget, ColorPaletteWidget,
     FloorPlanWidget, EquationWidget, VideoWidget, DocumentWidget,
 } from './InteractiveWidgets';
+import ArtifactWidget from './ArtifactWidget';
 
 interface WidgetRendererProps {
     widget: ChatWidget;
@@ -63,6 +64,7 @@ export default function WidgetRenderer({ widget, onAction, onUpdate }: WidgetRen
         case 'equation': return <EquationWidget data={widget.data} />;
         case 'video': return <VideoWidget data={widget.data} />;
         case 'document': return <DocumentWidget data={widget.data} />;
+        case 'artifact': return <ArtifactWidget data={widget.data} onAction={onAction} />;
         default: return null;
     }
 }

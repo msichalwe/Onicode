@@ -130,3 +130,18 @@
 .cw-doc-nav button { padding: 3px 12px; border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg-primary); color: var(--text-secondary); cursor: pointer; font-family: inherit; font-size: 11px; }
 .cw-doc-nav button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .cw-doc-nav button:disabled { opacity: 0.3; }
+
+/* ══════════════════════════════════════════
+   Artifact (sandboxed iframe)
+   ══════════════════════════════════════════ */
+
+.cw-artifact { padding: 0; overflow: hidden; }
+.cw-artifact-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-light); }
+.cw-artifact-actions { display: flex; gap: 4px; }
+.cw-artifact-btn { font-size: 9px; padding: 2px 8px; border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg-primary); color: var(--text-tertiary); cursor: pointer; font-family: inherit; transition: all 0.15s; }
+.cw-artifact-btn:hover { border-color: var(--accent); color: var(--accent); }
+.cw-artifact-container { position: relative; transition: height 0.3s ease; }
+.cw-artifact-frame { width: 100%; border: none; display: block; background: transparent; min-height: 80px; }
+.cw-artifact-fade { position: absolute; bottom: 0; left: 0; right: 0; height: 60px; background: linear-gradient(transparent, var(--bg-secondary)); cursor: pointer; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; font-size: 10px; color: var(--accent); font-weight: 500; }
+.cw-artifact-fade::after { content: 'Click to expand'; }
+.cw-artifact-fade:hover { color: var(--text-primary); }
