@@ -35,16 +35,19 @@ import InputArea from './InputArea';
 export type { ToolStep, Message, Attachment, Conversation } from './types';
 
 export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage, mode = 'onichat', workpalFolder }: ChatViewProps) {
+    // Per-mode conversation key — each mode has its own active conversation
+    const modeConvKey = `${ACTIVE_CONV_KEY}-${mode}`;
+
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
     const [activeConvId, setActiveConvId] = useState<string | null>(() => {
-        return localStorage.getItem(ACTIVE_CONV_KEY) || null;
+        return localStorage.getItem(modeConvKey) || null;
     });
     const [showHistory, setShowHistory] = useState(false);
 
     // ── Message state ──
     const [messages, setMessages] = useState<Message[]>(() => {
-        const id = localStorage.getItem(ACTIVE_CONV_KEY);
+        const id = localStorage.getItem(modeConvKey);
         if (id) {
             const convs = loadConversationsFromCache();
             const conv = convs.find((c) => c.id === id);
@@ -147,7 +150,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         loadConversationsFromSQLite().then(sqliteConvs => {
             if (!sqliteConvs) return;
             setConversations(sqliteConvs);
-            const activeId = localStorage.getItem(ACTIVE_CONV_KEY);
+            const activeId = localStorage.getItem(modeConvKey);
             if (activeId) {
                 const conv = sqliteConvs.find(c => c.id === activeId);
                 if (conv) setMessages(conv.messages);
@@ -211,7 +214,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         saveConversationsCache(convs);
         setConversations(convs);
-        localStorage.setItem(ACTIVE_CONV_KEY, id);
+        localStorage.setItem(modeConvKey, id);
         if (convToSave) persistConversationToSQLite(convToSave);
         // Notify sidebar
         window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
@@ -992,7 +995,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // ── Channel Bridge: Telegram and other channels feed into this ChatView ──
     useEffect(() => {
-        if (!isElectron || !window.onicode?.onChannelIncoming) return;
+        // Only OniChat mode handles Telegram messages
+        if (!isElectron || !window.onicode?.onChannelIncoming || mode !== 'onichat') return;
         const cleanup = window.onicode!.onChannelIncoming((data) => {
             const { channel, chatId, from, text, action } = data;
 
@@ -1194,15 +1198,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         setMessages([]); setInput(''); setIsTyping(false); setStreamingContent('');
         streamContentRef.current = ''; sendingRef.current = false;
         setActiveConvId(null); setMessageQueue([]);
-        localStorage.removeItem(ACTIVE_CONV_KEY); setAttachments([]);
+        localStorage.removeItem(modeConvKey); setAttachments([]);
     }, []);
 
-    // ── Listen for external new-chat signal ──
+    // ── Listen for external new-chat signal (mode-specific) ──
     useEffect(() => {
-        const handler = () => newChat();
+        // Listen for both global and mode-specific new-chat events
+        const handler = (e: Event) => {
+            const targetMode = (e as CustomEvent).detail;
+            // Only respond if: no target mode specified (from New Chat button in this mode's sidebar),
+            // OR target mode matches this ChatView's mode
+            if (!targetMode || targetMode === mode) newChat();
+        };
         window.addEventListener('onicode-new-chat', handler);
         return () => window.removeEventListener('onicode-new-chat', handler);
-    }, [newChat]);
+    }, [newChat, mode]);
 
     // ── Execute slash commands ──
     const handleCommand = useCallback(async (cmd: string): Promise<boolean> => {
@@ -1328,7 +1338,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         newChat();
         setTimeout(() => {
             setMessages(conv.messages); setActiveConvId(conv.id);
-            localStorage.setItem(ACTIVE_CONV_KEY, conv.id); setShowHistory(false);
+            localStorage.setItem(modeConvKey, conv.id); setShowHistory(false);
         }, 0);
     }, [newChat]);
 
@@ -1340,11 +1350,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         window.dispatchEvent(new CustomEvent('onicode-conversation-deleted'));
     }, [activeConvId, newChat]);
 
-    // ── Listen for external load-conversation signal (from sidebar recents / search modal) ──
+    // ── Listen for external load-conversation signal (mode-specific) ──
     useEffect(() => {
         const handler = (e: Event) => {
-            const convId = (e as CustomEvent).detail as string;
+            const detail = (e as CustomEvent).detail;
+            // Support both string (legacy) and { id, mode } format
+            const convId = typeof detail === 'string' ? detail : detail?.id;
+            const targetMode = typeof detail === 'string' ? undefined : detail?.mode;
             if (!convId) return;
+            // Only respond if no target mode specified or it matches this ChatView
+            if (targetMode && targetMode !== mode) return;
             const cached = loadConversationsFromCache().find(c => c.id === convId);
             if (cached) { loadConversation(cached); return; }
             if (isElectron && window.onicode?.conversationGet) {
@@ -1356,7 +1371,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         };
         window.addEventListener('onicode-load-conversation', handler);
         return () => window.removeEventListener('onicode-load-conversation', handler);
-    }, [loadConversation]);
+    }, [loadConversation, mode]);
 
     // ── Toggle expanded step ──
     const toggleStepExpand = useCallback((stepId: string, event?: React.MouseEvent) => {

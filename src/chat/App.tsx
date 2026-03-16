@@ -65,6 +65,7 @@ function AppContent() {
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [showExitWarning, setShowExitWarning] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
+    const [activeModes, setActiveModes] = useState<Set<OnicodeMode>>(new Set());
     const [projectDropdown, setProjectDropdown] = useState(false);
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const [unreadChatCount, setUnreadChatCount] = useState(0);
@@ -184,15 +185,25 @@ function AppContent() {
         });
     }, []);
 
+    // Track which modes have active AI streaming
+    useEffect(() => {
+        if (!isElectron) return;
+        const onChunk = () => { setActiveModes(prev => { const n = new Set(prev); n.add(mode); return n; }); };
+        const onDone = () => { setActiveModes(prev => { const n = new Set(prev); n.delete(mode); return n; }); };
+        const c1 = window.onicode?.onStreamChunk?.(onChunk);
+        const c2 = window.onicode?.onStreamDone?.(onDone);
+        return () => { c1?.(); c2?.(); };
+    }, [mode]);
+
     // ── Mode switching ──
     const switchMode = useCallback(async (newMode: OnicodeMode) => {
         if (newMode === mode) return;
 
-        // Workmate: prompt for folder if none selected
+        // Workpal: prompt for folder if none selected
         if (newMode === 'workpal' && !workpalFolder) {
             if (isElectron && window.onicode?.selectFolder) {
                 const result = await window.onicode.selectFolder();
-                if (!result.success || !result.path) return; // cancelled
+                if (!result.success || !result.path) return;
                 const folder = { path: result.path, name: result.name || result.path.split('/').pop() || 'folder' };
                 setWorkpalFolder(folder);
                 localStorage.setItem('onicode-workpal-folder', JSON.stringify(folder));
@@ -211,17 +222,12 @@ function AppContent() {
         setMode(newMode);
         localStorage.setItem('onicode-mode', newMode);
 
-        // Derive scope from mode
         const newScope: ChatScope = newMode === 'onichat' ? 'general' : newMode === 'workpal' ? 'workpal' : 'project';
         setChatScope(newScope);
         localStorage.setItem('onicode-chat-scope', newScope);
 
-        // Open terminal if panel is closed on mode switch
-        if (!panel.widget) setPanel({ widget: 'terminal' });
-
-        // Switch to chat view and start fresh conversation for new mode
+        // Just switch to chat view — each mode has its own mounted ChatView
         handleViewChange('chat');
-        window.dispatchEvent(new CustomEvent('onicode-new-chat'));
     }, [mode, workpalFolder, activeProject, panel.widget, handleViewChange]);
 
     // Change workmate folder
@@ -382,6 +388,7 @@ function AppContent() {
                 <div className="mode-switcher">
                     {Object.values(MODE_CONFIGS).map(m => (
                         <button key={m.id} className={`mode-btn ${mode === m.id ? 'active' : ''}`} onClick={() => switchMode(m.id)} title={`${m.label} (${m.shortcut})`}>
+                            {activeModes.has(m.id) && mode !== m.id && <span className="mode-btn-dot" />}
                             <span className="mode-btn-label">{m.label}</span>
                         </button>
                     ))}
@@ -465,14 +472,31 @@ function AppContent() {
             <div className="app-body">
                 <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} mode={mode} />
                 <div className={`main-content ${panel.widget ? 'with-panel' : ''}`}>
-                    <div className={`view-layer ${currentView === 'chat' ? 'view-active' : 'view-hidden'}`}>
+                    {/* 3 ChatView instances — one per mode, always mounted, shown/hidden */}
+                    <div className={`view-layer ${currentView === 'chat' && mode === 'onichat' ? 'view-active' : 'view-hidden'}`}>
                         <ChatView
-                            scope={chatScope}
+                            scope="general"
+                            onChangeScope={changeChatScope}
+                            onNewMessage={handleNewChatMessage}
+                            mode="onichat"
+                        />
+                    </div>
+                    <div className={`view-layer ${currentView === 'chat' && mode === 'workpal' ? 'view-active' : 'view-hidden'}`}>
+                        <ChatView
+                            scope="workpal"
+                            onChangeScope={changeChatScope}
+                            onNewMessage={handleNewChatMessage}
+                            mode="workpal"
+                            workpalFolder={workpalFolder}
+                        />
+                    </div>
+                    <div className={`view-layer ${currentView === 'chat' && mode === 'projects' ? 'view-active' : 'view-hidden'}`}>
+                        <ChatView
+                            scope="project"
                             activeProject={activeProject}
                             onChangeScope={changeChatScope}
                             onNewMessage={handleNewChatMessage}
-                            mode={mode}
-                            workpalFolder={workpalFolder}
+                            mode="projects"
                         />
                     </div>
                     {/* Keep heavy views mounted to preserve state across tab switches */}

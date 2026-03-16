@@ -53,7 +53,7 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
         <aside className="sidebar">
             <nav className="sidebar-nav">
                 {/* New Chat — always visible, above Chat */}
-                <button className="sidebar-btn sidebar-btn-new" onClick={() => { onViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-new-chat')); }} title="New chat">
+                <button className="sidebar-btn sidebar-btn-new" onClick={() => { onViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-new-chat', { detail: mode })); }} title="New chat">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
                     New Chat
                 </button>
@@ -182,7 +182,7 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
 
     const handleClick = (chatId: string) => {
         onViewChange('chat');
-        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chatId }));
+        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: { id: chatId, mode } }));
     };
 
     const timeAgo = (ts: number) => {

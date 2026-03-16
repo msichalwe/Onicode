@@ -480,6 +480,20 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
+.mode-btn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+  animation: mode-dot-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes mode-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 .mode-context {
   display: flex;
   align-items: center;
