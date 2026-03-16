@@ -402,8 +402,6 @@
 /* ── Main Content ── */
 .main-content {
   flex: 1;
-  display: flex;
-  flex-direction: column;
   position: relative;
   overflow: hidden;
 }
@@ -645,22 +643,26 @@
 }
 
 
-/* ── View Layers (keep ChatView mounted) ── */
+/* ── View Layers (stacked, only active one visible) ── */
 
 .view-layer {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
+  overflow: hidden;
 }
 
 .view-layer.view-hidden {
-  display: none;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .view-layer.view-active {
-  display: flex;
-  flex: 1;
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
 }
 
 /* ── Scope Tag Bar ── */
