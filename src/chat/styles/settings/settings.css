@@ -218,11 +218,30 @@
   font-size: 9px;
   font-weight: 600;
   color: var(--accent);
-  background: rgba(var(--accent-rgb, 168, 130, 82), 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   padding: 1px 6px;
   border-radius: 4px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+.skill-system-badge {
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.skill-item.skill-system {
+  border-left: 2px solid color-mix(in srgb, var(--success) 40%, transparent);
+}
+
+.skill-category-system {
+  color: var(--success) !important;
 }
 
 .skill-item-desc {

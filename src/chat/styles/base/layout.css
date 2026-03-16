@@ -255,6 +255,14 @@
   font-style: italic;
 }
 
+.sidebar-recent-workpal {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
 .sidebar-recent-time {
   margin-left: auto;
   flex-shrink: 0;
