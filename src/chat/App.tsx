@@ -472,31 +472,15 @@ function AppContent() {
             <div className="app-body">
                 <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} mode={mode} />
                 <div className={`main-content ${panel.widget ? 'with-panel' : ''}`}>
-                    {/* 3 ChatView instances — one per mode, always mounted, shown/hidden */}
-                    <div className={`view-layer ${currentView === 'chat' && mode === 'onichat' ? 'view-active' : 'view-hidden'}`}>
+                    {/* Single ChatView — mode passed as prop, state managed per-mode internally */}
+                    <div className={`view-layer ${currentView === 'chat' ? 'view-active' : 'view-hidden'}`}>
                         <ChatView
-                            scope="general"
-                            onChangeScope={changeChatScope}
-                            onNewMessage={handleNewChatMessage}
-                            mode="onichat"
-                        />
-                    </div>
-                    <div className={`view-layer ${currentView === 'chat' && mode === 'workpal' ? 'view-active' : 'view-hidden'}`}>
-                        <ChatView
-                            scope="workpal"
-                            onChangeScope={changeChatScope}
-                            onNewMessage={handleNewChatMessage}
-                            mode="workpal"
-                            workpalFolder={workpalFolder}
-                        />
-                    </div>
-                    <div className={`view-layer ${currentView === 'chat' && mode === 'projects' ? 'view-active' : 'view-hidden'}`}>
-                        <ChatView
-                            scope="project"
+                            scope={chatScope}
                             activeProject={activeProject}
                             onChangeScope={changeChatScope}
                             onNewMessage={handleNewChatMessage}
-                            mode="projects"
+                            mode={mode}
+                            workpalFolder={workpalFolder}
                         />
                     </div>
                     {/* Keep heavy views mounted to preserve state across tab switches */}

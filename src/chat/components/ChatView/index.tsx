@@ -35,8 +35,9 @@ import InputArea from './InputArea';
 export type { ToolStep, Message, Attachment, Conversation } from './types';
 
 export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage, mode = 'onichat', workpalFolder }: ChatViewProps) {
-    // Per-mode conversation key — each mode has its own active conversation
+    // Per-mode conversation key
     const modeConvKey = `${ACTIVE_CONV_KEY}-${mode}`;
+    const prevModeRef = useRef(mode);
 
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
@@ -55,6 +56,37 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
         return [];
     });
+
+    // ── MODE SWITCH: save current state, load new mode's state ──
+    useEffect(() => {
+        if (prevModeRef.current === mode) return;
+        const prevMode = prevModeRef.current;
+        prevModeRef.current = mode;
+
+        // Save current conversation for the PREVIOUS mode (don't abort AI)
+        const prevKey = `${ACTIVE_CONV_KEY}-${prevMode}`;
+        if (activeConvId) {
+            localStorage.setItem(prevKey, activeConvId);
+        }
+
+        // Load the NEW mode's conversation
+        const newKey = `${ACTIVE_CONV_KEY}-${mode}`;
+        const newConvId = localStorage.getItem(newKey);
+        if (newConvId) {
+            const convs = loadConversationsFromCache();
+            const conv = convs.find(c => c.id === newConvId);
+            if (conv) {
+                setMessages(conv.messages);
+                setActiveConvId(newConvId);
+                setInput('');
+                return;
+            }
+        }
+        // No saved conversation for this mode — start empty
+        setMessages([]);
+        setActiveConvId(null);
+        setInput('');
+    }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
@@ -156,7 +188,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 if (conv) setMessages(conv.messages);
             }
         });
-    }, []);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Sync active provider to main process so automation/workflows work independently ──
     useEffect(() => {
