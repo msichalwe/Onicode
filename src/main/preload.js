@@ -256,6 +256,7 @@ contextBridge.exposeInMainWorld('onicode', {
     conversationSave: (conv) => ipcRenderer.invoke('conversation-save', conv),
     conversationGet: (id) => ipcRenderer.invoke('conversation-get', id),
     conversationList: (limit, offset) => ipcRenderer.invoke('conversation-list', limit, offset),
+    conversationListFull: (limit) => ipcRenderer.invoke('conversation-list-full', limit),
     conversationDelete: (id) => ipcRenderer.invoke('conversation-delete', id),
     conversationSearch: (query) => ipcRenderer.invoke('conversation-search', query),
     conversationMigrate: (conversations) => ipcRenderer.invoke('conversation-migrate', conversations),

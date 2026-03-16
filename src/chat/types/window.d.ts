@@ -351,6 +351,9 @@ interface OnicodeAPI {
     }) => Promise<{ success?: boolean; error?: string }>;
     conversationGet: (id: string) => Promise<{ success?: boolean; conversation?: unknown; error?: string }>;
     conversationList: (limit?: number, offset?: number) => Promise<{ success?: boolean; conversations?: Array<{
+        id: string; title: string; scope?: string; project_id?: string; project_name?: string; created_at: number; updated_at: number;
+    }>; error?: string }>;
+    conversationListFull: (limit?: number) => Promise<{ success?: boolean; conversations?: Array<{
         id: string; title: string; messages: unknown[]; scope?: string; project_id?: string; project_name?: string; created_at: number; updated_at: number;
     }>; error?: string }>;
     conversationDelete: (id: string) => Promise<{ success?: boolean; error?: string }>;

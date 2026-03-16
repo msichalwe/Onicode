@@ -76,9 +76,12 @@ export function deleteFromSQLite(convId: string) {
  * If SQLite is empty, migrates from localStorage and returns the migrated data.
  */
 export async function loadConversationsFromSQLite(): Promise<Conversation[] | null> {
-    if (!isElectron || !window.onicode?.conversationList) return null;
+    if (!isElectron) return null;
+    // Use conversationListFull (with messages) for state restoration
+    const fetcher = window.onicode?.conversationListFull || window.onicode?.conversationList;
+    if (!fetcher) return null;
     try {
-        const res = await window.onicode.conversationList(200, 0);
+        const res = await fetcher(200);
         if (!res.success || !res.conversations) return null;
 
         // Map SQLite rows to Conversation type
@@ -96,12 +99,12 @@ export async function loadConversationsFromSQLite(): Promise<Conversation[] | nu
         // If SQLite is empty but localStorage has data, migrate
         if (convs.length === 0) {
             const cached = loadConversationsFromCache();
-            if (cached.length > 0 && window.onicode.conversationMigrate) {
-                const migRes = await window.onicode.conversationMigrate(cached);
+            if (cached.length > 0 && window.onicode?.conversationMigrate) {
+                const migRes = await window.onicode!.conversationMigrate(cached);
                 if (migRes.success && migRes.migrated && migRes.migrated > 0) {
                     console.log(`[Onicode] Migrated ${migRes.migrated} conversations to SQLite`);
                     // Re-load from SQLite to get proper format
-                    const reloaded = await window.onicode.conversationList(200, 0);
+                    const reloaded = await window.onicode!.conversationListFull(200);
                     if (reloaded.success && reloaded.conversations) {
                         convs = reloaded.conversations.map((c: Record<string, unknown>) => ({
                             id: c.id as string,

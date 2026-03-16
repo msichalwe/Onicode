@@ -933,21 +933,57 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             try { environment = await window.onicode!.getEnvironment(); } catch { /* not available */ }
         }
 
-        let recentConversations: Array<{ title: string; date: string; project?: string }> | undefined;
+        // Recent conversations with scope info
+        let recentConversations: Array<{ title: string; date: string; project?: string; scope?: string }> | undefined;
         if (isElectron) {
             try {
                 const convRes = await window.onicode!.conversationList(10, 0);
                 if (convRes.success && convRes.conversations) {
                     recentConversations = convRes.conversations
-                        .filter((c: { id: string; title: string }) => c.id !== activeConvId)
+                        .filter((c: { id: string }) => c.id !== activeConvId)
                         .slice(0, 8)
-                        .map((c: { title: string; updated_at: number; project_name?: string }) => ({
+                        .map((c: { title: string; updated_at: number; project_name?: string; scope?: string }) => ({
                             title: c.title || 'Untitled',
                             date: c.updated_at ? new Date(c.updated_at).toISOString().slice(0, 10) : 'unknown',
                             project: c.project_name || undefined,
+                            scope: c.scope || 'general',
                         }));
                 }
-            } catch { /* conversation list failed */ }
+            } catch {}
+        }
+
+        // Active schedules, workflows, tasks, channels
+        let systemState: string | undefined;
+        if (isElectron) {
+            const parts: string[] = [];
+            try {
+                const schRes = await window.onicode!.schedulerList();
+                if (schRes.success && schRes.schedules && schRes.schedules.length > 0) {
+                    const active = schRes.schedules.filter((s: { enabled: boolean }) => s.enabled);
+                    if (active.length > 0) parts.push(`Active schedules: ${active.map((s: { name: string }) => s.name).join(', ')}`);
+                }
+            } catch {}
+            try {
+                const wfRes = await window.onicode!.workflowList();
+                if (wfRes.success && wfRes.workflows && wfRes.workflows.length > 0) {
+                    parts.push(`Workflows: ${wfRes.workflows.map((w: { name: string }) => w.name).join(', ')}`);
+                }
+            } catch {}
+            try {
+                const taskRes = await window.onicode!.tasksList();
+                if (taskRes.tasks && taskRes.tasks.length > 0) {
+                    const pending = taskRes.tasks.filter((t: { status: string }) => t.status !== 'done' && t.status !== 'archived');
+                    if (pending.length > 0) parts.push(`Active tasks: ${pending.map((t: { id: number; content: string; status: string }) => `#${t.id} ${t.content} (${t.status})`).join('; ')}`);
+                }
+            } catch {}
+            try {
+                const chRes = await window.onicode!.channelsList();
+                if (chRes.channels) {
+                    const connected = chRes.channels.filter(c => c.connected);
+                    if (connected.length > 0) parts.push(`Connected channels: ${connected.map(c => `${c.name} (@${c.botInfo?.username || '?'})`).join(', ')}`);
+                }
+            } catch {}
+            if (parts.length > 0) systemState = parts.join('\n');
         }
 
         const customPrompt = localStorage.getItem('onicode-custom-system-prompt') || undefined;
@@ -966,6 +1002,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             mcpTools,
             recentConversations,
             environment: environment as AIContext['environment'],
+            systemState,
         });
 
         // Auto-compact if context is getting large

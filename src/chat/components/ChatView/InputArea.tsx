@@ -401,68 +401,56 @@ export default function InputArea({
                     </button>
                     {showAttachMenu && (
                         <div className="attach-menu">
+                            {/* Upload Files */}
                             <button className="attach-menu-item" onClick={() => { onSetShowAttachMenu(false); fileInputRef.current?.click(); }}>
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
                                 <div className="attach-menu-text"><span className="attach-menu-label">Upload Files</span><span className="attach-menu-desc">Images, code, documents</span></div>
                             </button>
+
+                            {/* Clone Repository — sets input for AI to handle */}
                             <button className="attach-menu-item" onClick={() => {
                                 onSetShowAttachMenu(false);
-                                const url = prompt('Paste a URL to attach:');
-                                if (url?.trim()) {
-                                    const trimmed = url.trim();
-                                    if (/^https?:\/\/\S+$/.test(trimmed)) {
-                                        try {
-                                            onSetAttachments(prev => [...prev, { type: 'link', name: new URL(trimmed).hostname, url: trimmed }]);
-                                        } catch { onSetAttachments(prev => [...prev, { type: 'link', name: trimmed.slice(0, 40), url: trimmed }]); }
+                                setInput('Clone this repository and set it up as a new project: ');
+                                textareaRef.current?.focus();
+                            }}>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg>
+                                <div className="attach-menu-text"><span className="attach-menu-label">Clone Repository</span><span className="attach-menu-desc">Paste a repo URL after this</span></div>
+                            </button>
+
+                            {/* Browse Files — native folder picker (this works) */}
+                            <button className="attach-menu-item" onClick={async () => {
+                                onSetShowAttachMenu(false);
+                                if (window.onicode?.selectFolder) {
+                                    const result = await window.onicode.selectFolder();
+                                    if (result.success && result.path) {
+                                        window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: 'workpal' }));
+                                        setInput(`Working on folder: ${result.path}`);
+                                        textareaRef.current?.focus();
                                     }
                                 }
                             }}>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
-                                <div className="attach-menu-text"><span className="attach-menu-label">Paste URL</span><span className="attach-menu-desc">Attach a web link</span></div>
-                            </button>
-                            <button className="attach-menu-item" onClick={() => {
-                                onSetShowAttachMenu(false);
-                                const repoUrl = prompt('Git repository URL to clone:');
-                                if (repoUrl?.trim() && window.onicode?.gitClone) {
-                                    const targetPath = prompt('Clone destination (leave empty for default):');
-                                    window.onicode.gitClone(repoUrl.trim(), targetPath?.trim() || '').then((r: unknown) => {
-                                        const res = r as { success?: boolean; path?: string; error?: string };
-                                        if (res?.success) {
-                                            setInput(prev => prev + (prev ? ' ' : '') + `Cloned ${repoUrl.trim()} to ${res.path || 'project folder'}`);
-                                        } else {
-                                            setInput(prev => prev + (prev ? ' ' : '') + `Clone failed: ${res?.error || 'unknown error'}`);
-                                        }
-                                    });
-                                }
-                            }}>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 012 2v7" /><line x1="6" y1="9" x2="6" y2="21" /></svg>
-                                <div className="attach-menu-text"><span className="attach-menu-label">Clone Repository</span><span className="attach-menu-desc">Clone a Git repo</span></div>
-                            </button>
-                            <button className="attach-menu-item" onClick={() => {
-                                onSetShowAttachMenu(false);
-                                requestPanel('files');
-                            }}>
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
-                                <div className="attach-menu-text"><span className="attach-menu-label">Browse Files</span><span className="attach-menu-desc">Open file viewer panel</span></div>
+                                <div className="attach-menu-text"><span className="attach-menu-label">Browse Files</span><span className="attach-menu-desc">Open a folder to work on</span></div>
                             </button>
+
+                            {/* Open Project — navigates to projects view */}
                             <button className="attach-menu-item" onClick={() => {
                                 onSetShowAttachMenu(false);
-                                if (onChangeScope) onChangeScope('project');
-                                requestPanel('project');
+                                window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: 'projects' }));
+                                window.dispatchEvent(new CustomEvent('onicode-navigate', { detail: 'projects' }));
                             }}>
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
-                                <div className="attach-menu-text"><span className="attach-menu-label">Open Project</span><span className="attach-menu-desc">Switch to project mode</span></div>
+                                <div className="attach-menu-text"><span className="attach-menu-label">Open Project</span><span className="attach-menu-desc">Browse and select a project</span></div>
                             </button>
+
+                            {/* Deep Research — prefills input */}
                             <button className="attach-menu-item" onClick={() => {
                                 onSetShowAttachMenu(false);
-                                const query = prompt('What do you want to research?');
-                                if (query?.trim()) {
-                                    setInput(prev => (prev ? prev + '\n' : '') + `Deep research: ${query.trim()}`);
-                                    textareaRef.current?.focus();
-                                }
+                                setInput('Deep research the following topic. Produce a comprehensive report and save it as Markdown + PDF with sources, key findings, and actionable insights.\n\nTopic: ');
+                                textareaRef.current?.focus();
                             }}>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg>
-                                <div className="attach-menu-text"><span className="attach-menu-label">Deep Research</span><span className="attach-menu-desc">AI-powered web research</span></div>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+                                <div className="attach-menu-text"><span className="attach-menu-label">Deep Research</span><span className="attach-menu-desc">AI research with report output</span></div>
                             </button>
                         </div>
                     )}

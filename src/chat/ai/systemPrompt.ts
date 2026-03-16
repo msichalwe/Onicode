@@ -37,7 +37,8 @@ export interface AIContext {
     };
     autoCommitEnabled?: boolean;
     mcpTools?: MCPToolInfo[];
-    recentConversations?: Array<{ title: string; date: string; project?: string }>;
+    recentConversations?: Array<{ title: string; date: string; project?: string; scope?: string }>;
+    systemState?: string; // active schedules, workflows, tasks, channels
     environment?: {
         platform?: string;
         arch?: string;
@@ -1431,12 +1432,18 @@ Path: \`${context.activeProjectPath}\`
         }
     }
 
-    // ── Recent Conversations (so you can reference past work) ──
+    // ── Recent Conversations (with scope/mode info) ──
     if (context.recentConversations && context.recentConversations.length > 0) {
-        const convLines = context.recentConversations.slice(0, 10).map(c =>
-            `- "${c.title}" (${c.date}${c.project ? `, project: ${c.project}` : ''})`
-        ).join('\n');
-        parts.push(`\n## Recent Conversations\nYou had these recent conversations. If the user references past work, use \`conversation_search\` to find it and \`conversation_recall\` to load context:\n${convLines}`);
+        const convLines = context.recentConversations.slice(0, 10).map(c => {
+            const modeTag = c.project ? '[Project]' : c.scope === 'workpal' || c.scope === 'workmate' ? '[Workpal]' : '[Chat]';
+            return `- ${modeTag} "${c.title}" (${c.date}${c.project ? ` — ${c.project}` : ''})`;
+        }).join('\n');
+        parts.push(`\n## Recent Conversations\nThese are the user's recent conversations across all modes. Use \`conversation_search\` to find specific past work:\n${convLines}`);
+    }
+
+    // ── System State (live app context) ──
+    if (context.systemState) {
+        parts.push(`\n## Live System State\nCurrent app state — be aware of these when responding:\n${context.systemState}`);
     }
 
     // ── Custom Instructions ──
@@ -1529,6 +1536,7 @@ function hashContext(ctx: AIContext): string {
         autoCommitEnabled: ctx.autoCommitEnabled,
         mcpToolCount: ctx.mcpTools?.length || 0,
         recentConvCount: ctx.recentConversations?.length || 0,
+        systemState: ctx.systemState?.length || 0,
     });
     // Simple hash
     let hash = 0;

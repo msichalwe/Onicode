@@ -1235,7 +1235,7 @@ function renderExpandedContent(step: ToolStep) {
 }
 
 // ── Grouping constants ──
-const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'get_orchestration_status', 'browser_navigate', 'browser_screenshot', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_log', 'git_checkout', 'git_pull', 'git_branches', 'git_merge', 'git_reset', 'git_tag', 'git_show', 'git_remotes', 'git_stage', 'git_unstage', 'index_codebase', 'detect_project', 'impact_analysis', 'prepare_edit_context', 'verify_project', 'ask_user_question', 'sequential_thinking', 'trajectory_search', 'read_url_content', 'read_notebook', 'read_deployment_config', 'deploy_web_app', 'check_deploy_status', 'gh_cli', 'gws_cli', 'create_plan', 'update_plan', 'get_plan', 'ctx_execute', 'ctx_batch', 'ctx_stats', 'ctx_fetch']);
+const alwaysSingle = new Set(['run_command', 'init_project', 'spawn_sub_agent', 'orchestrate', 'spawn_specialist', 'ask_user_question', 'sequential_thinking', 'show_widget', 'deploy_web_app', 'configure_heartbeat']);
 
 const groupLabels: Record<string, { single: string; plural: string }> = {
     create_file: { single: 'Created', plural: 'Created' },
@@ -1258,9 +1258,65 @@ const groupLabels: Record<string, { single: string; plural: string }> = {
     find_implementation: { single: 'Found', plural: 'Found' },
     smart_read: { single: 'Smart Read', plural: 'Smart Read' },
     batch_search: { single: 'Batch Search', plural: 'Batch Search' },
+    // Git operations
+    git_commit: { single: 'Committed', plural: 'Committed' },
+    git_push: { single: 'Pushed', plural: 'Pushed' },
+    git_status: { single: 'Git Status', plural: 'Git Status' },
+    git_diff: { single: 'Diff', plural: 'Diffs' },
+    git_log: { single: 'Log', plural: 'Logs' },
+    git_checkout: { single: 'Checkout', plural: 'Checkouts' },
+    git_pull: { single: 'Pull', plural: 'Pulls' },
+    git_branches: { single: 'Branch', plural: 'Branches' },
+    git_merge: { single: 'Merged', plural: 'Merged' },
+    git_reset: { single: 'Reset', plural: 'Reset' },
+    git_tag: { single: 'Tag', plural: 'Tags' },
+    git_show: { single: 'Show', plural: 'Show' },
+    git_remotes: { single: 'Remotes', plural: 'Remotes' },
+    git_stage: { single: 'Staged', plural: 'Staged' },
+    git_unstage: { single: 'Unstaged', plural: 'Unstaged' },
+    // CLI tools
+    gh_cli: { single: 'GitHub', plural: 'GitHub' },
+    gws_cli: { single: 'Workspace', plural: 'Workspace' },
+    // Context engine
+    ctx_execute: { single: 'Executed', plural: 'Executed' },
+    ctx_batch: { single: 'Batch', plural: 'Batched' },
+    ctx_stats: { single: 'Context Stats', plural: 'Context Stats' },
+    ctx_fetch: { single: 'Fetched', plural: 'Fetched' },
+    // Browser
+    browser_navigate: { single: 'Browser', plural: 'Browser' },
+    browser_screenshot: { single: 'Screenshot', plural: 'Screenshots' },
+    browser_click: { single: 'Clicked', plural: 'Clicked' },
+    browser_type: { single: 'Typed', plural: 'Typed' },
+    browser_evaluate: { single: 'Browser JS', plural: 'Browser JS' },
+    // Other
+    get_orchestration_status: { single: 'Orchestration', plural: 'Orchestration' },
+    index_codebase: { single: 'Index', plural: 'Indexed' },
+    detect_project: { single: 'Detected', plural: 'Detected' },
+    impact_analysis: { single: 'Impact', plural: 'Impact' },
+    prepare_edit_context: { single: 'Context', plural: 'Context' },
+    verify_project: { single: 'Verified', plural: 'Verified' },
+    trajectory_search: { single: 'History Search', plural: 'History Search' },
+    read_url_content: { single: 'Web Fetch', plural: 'Web Fetch' },
+    read_notebook: { single: 'Notebook', plural: 'Notebooks' },
+    read_deployment_config: { single: 'Deploy Config', plural: 'Deploy Config' },
+    check_deploy_status: { single: 'Deploy Status', plural: 'Deploy Status' },
+    mcp_search: { single: 'MCP Search', plural: 'MCP Search' },
+    memory_write: { single: 'Memory', plural: 'Memory' },
+    memory_append: { single: 'Memory', plural: 'Memory' },
+    memory_search: { single: 'Memory Search', plural: 'Memory Search' },
+    webfetch: { single: 'Fetched', plural: 'Fetched' },
+    websearch: { single: 'Searched', plural: 'Searched' },
 };
 
-function groupKey(name: string) { return name === 'multi_edit' ? 'edit_file' : name; }
+function groupKey(name: string) {
+    if (name === 'multi_edit') return 'edit_file';
+    // Group MCP tools by server prefix (mcp_servername__toolname → mcp_servername)
+    if (name.startsWith('mcp_')) {
+        const sep = name.indexOf('__');
+        if (sep > 0) return name.slice(0, sep);
+    }
+    return name;
+}
 
 // ── Main Component ──
 export default function ToolStepRenderer({ steps, expandedSteps, onToggleStepExpand }: ToolStepRendererProps) {
@@ -1288,7 +1344,10 @@ export default function ToolStepRenderer({ steps, expandedSteps, onToggleStepExp
                 // Multi-item group -- accordion style
                 if (group.count > 1) {
                     const status = group.anyRunning ? 'running' : group.anyError ? 'error' : group.allDone ? 'done' : 'running';
-                    const label = groupLabels[group.key] || { single: toolIcon(group.name), plural: toolIcon(group.name) };
+                    const label = groupLabels[group.key] || groupLabels[group.name]
+                        || (group.key.startsWith('mcp_')
+                            ? { single: group.key.slice(4).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()), plural: group.key.slice(4).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) }
+                            : { single: toolIcon(group.name), plural: toolIcon(group.name) });
                     const isGroupExpanded = expandedSteps.has(`group-${gi}`);
                     return (
                         <div key={gi} className={`tool-step tool-step-${status}`}>

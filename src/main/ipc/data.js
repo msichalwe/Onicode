@@ -171,8 +171,19 @@ function registerDataIPC(deps) {
     ipcMain.handle('conversation-list', async (_event, limit, offset) => {
         try {
             const { conversationStorage } = require('../storage');
-            // Use light list (no messages) for sidebar/search — much faster
+            // Light list (no messages) for sidebar/search
             const conversations = conversationStorage.list(limit || 50, offset || 0);
+            return { success: true, conversations };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
+    ipcMain.handle('conversation-list-full', async (_event, limit) => {
+        try {
+            const { conversationStorage } = require('../storage');
+            // Full list WITH messages for ChatView state restoration
+            const conversations = conversationStorage.listFull(limit || 50);
             return { success: true, conversations };
         } catch (err) {
             return { error: err.message };
