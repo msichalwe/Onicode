@@ -150,6 +150,7 @@ interface OnicodeAPI {
     // Task Management (extended)
     listProjectTasks: (projectPath: string) => Promise<{ pending: Array<unknown>; inProgress: Array<unknown>; done: Array<unknown>; archived: Array<unknown>; skipped: Array<unknown> }>;
     archiveCompletedTasks: () => Promise<{ success?: boolean; error?: string }>;
+    clearAllTasks: () => Promise<{ success?: boolean; error?: string }>;
 
     onTerminalSession: (callback: (data: {
         id: string;

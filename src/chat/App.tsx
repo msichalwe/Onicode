@@ -65,6 +65,8 @@ function AppContent() {
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [showExitWarning, setShowExitWarning] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
+    const [pendingModeSwitch, setPendingModeSwitch] = useState<OnicodeMode | null>(null);
+    const [dontAskModeSwitch, setDontAskModeSwitch] = useState(() => localStorage.getItem('onicode-dont-ask-mode-switch') === 'true');
     const [projectDropdown, setProjectDropdown] = useState(false);
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const [unreadChatCount, setUnreadChatCount] = useState(0);
@@ -185,9 +187,8 @@ function AppContent() {
     }, []);
 
     // ── Mode switching ──
-    const switchMode = useCallback(async (newMode: OnicodeMode) => {
-        if (newMode === mode) return;
-
+    // Actually perform the mode switch (called directly or after confirmation)
+    const doSwitchMode = useCallback(async (newMode: OnicodeMode) => {
         // Workpal: prompt for folder if none selected
         if (newMode === 'workpal' && !workpalFolder) {
             if (isElectron && window.onicode?.selectFolder) {
@@ -203,9 +204,15 @@ function AppContent() {
         if (newMode === 'projects' && !activeProject) {
             setMode('projects');
             localStorage.setItem('onicode-mode', 'projects');
-            setChatScope('general');
-            handleViewChange('projects');
+            setChatScope('project');
+            handleViewChange('chat');
             return;
+        }
+
+        // Exit project mode if switching away
+        if (mode === 'projects' && newMode !== 'projects') {
+            setActiveProject(null);
+            localStorage.removeItem('onicode-active-project');
         }
 
         setMode(newMode);
@@ -215,9 +222,35 @@ function AppContent() {
         setChatScope(newScope);
         localStorage.setItem('onicode-chat-scope', newScope);
 
-        // Just switch to chat view — each mode has its own mounted ChatView
         handleViewChange('chat');
-    }, [mode, workpalFolder, activeProject, panel.widget, handleViewChange]);
+        // Clear stale tasks and start fresh chat in the new mode
+        if (isElectron && window.onicode?.clearAllTasks) window.onicode.clearAllTasks().catch(() => {});
+        window.dispatchEvent(new CustomEvent('onicode-new-chat'));
+    }, [mode, workpalFolder, activeProject, handleViewChange]);
+
+    const switchMode = useCallback(async (newMode: OnicodeMode) => {
+        if (newMode === mode) return;
+
+        // If leaving a contextual mode (projects/workpal), show confirmation
+        const leavingContextual = (mode === 'projects' && activeProject) || (mode === 'workpal' && workpalFolder);
+        if (leavingContextual && !dontAskModeSwitch) {
+            setPendingModeSwitch(newMode);
+            return;
+        }
+
+        await doSwitchMode(newMode);
+    }, [mode, activeProject, workpalFolder, dontAskModeSwitch, doSwitchMode]);
+
+    const confirmModeSwitch = useCallback(() => {
+        if (pendingModeSwitch) {
+            doSwitchMode(pendingModeSwitch);
+            setPendingModeSwitch(null);
+        }
+    }, [pendingModeSwitch, doSwitchMode]);
+
+    const cancelModeSwitch = useCallback(() => {
+        setPendingModeSwitch(null);
+    }, []);
 
     // Change workmate folder
     const changeWorkpalFolder = useCallback(async () => {
@@ -449,6 +482,24 @@ function AppContent() {
                         <div className="exit-warning-actions">
                             <button className="exit-warning-cancel" onClick={() => setShowExitWarning(false)}>Cancel</button>
                             <button className="exit-warning-confirm" onClick={confirmExitProject}>Exit Project</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Mode Switch Confirmation */}
+            {pendingModeSwitch && (
+                <div className="exit-warning-overlay" onClick={cancelModeSwitch}>
+                    <div className="exit-warning-dialog" onClick={(e) => e.stopPropagation()}>
+                        <h3>Switch to {pendingModeSwitch === 'onichat' ? 'OniChat' : pendingModeSwitch === 'workpal' ? 'Workpal' : 'Projects'}?</h3>
+                        <p>Your current {mode === 'projects' ? 'project' : 'workpal'} chat will be saved. We&apos;ll start a fresh session in <strong>{pendingModeSwitch === 'onichat' ? 'OniChat' : pendingModeSwitch === 'workpal' ? 'Workpal' : 'Projects'}</strong> mode.</p>
+                        <label className="mode-switch-dont-ask" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8, cursor: 'pointer' }}>
+                            <input type="checkbox" checked={dontAskModeSwitch} onChange={(e) => { setDontAskModeSwitch(e.target.checked); localStorage.setItem('onicode-dont-ask-mode-switch', String(e.target.checked)); }} />
+                            Don&apos;t show this again
+                        </label>
+                        <div className="exit-warning-actions">
+                            <button className="exit-warning-cancel" onClick={cancelModeSwitch}>Cancel</button>
+                            <button className="exit-warning-confirm" onClick={confirmModeSwitch}>Switch Mode</button>
                         </div>
                     </div>
                 </div>

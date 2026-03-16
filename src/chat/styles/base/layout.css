@@ -94,6 +94,12 @@
   stroke: var(--accent);
 }
 
+.sidebar-divider {
+  height: 1px;
+  background: var(--border-light);
+  margin: 4px 0;
+}
+
 .sidebar-btn-new {
   border: 1px dashed var(--border-light) !important;
   color: var(--text-tertiary) !important;
@@ -200,8 +206,9 @@
 
 .sidebar-recent-item {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
   padding: 6px 8px;
   border: none;
   background: transparent;
@@ -216,9 +223,38 @@
   overflow: hidden;
 }
 
+.sidebar-recent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sidebar-recent-dot-general { background: var(--text-tertiary); }
+.sidebar-recent-dot-project { background: var(--accent); }
+.sidebar-recent-dot-workpal { background: var(--success); }
+
+.sidebar-recent-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+}
+
 .sidebar-recent-item:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.sidebar-recent-active {
+  background: var(--accent-light) !important;
+  color: var(--accent) !important;
+}
+
+.sidebar-recent-active .sidebar-recent-title {
+  font-weight: 600;
 }
 
 .sidebar-recent-title {

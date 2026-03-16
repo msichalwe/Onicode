@@ -33,6 +33,16 @@ function registerDataIPC(deps) {
         }
     });
 
+    ipcMain.handle('tasks-clear-all', async () => {
+        try {
+            const { taskManager } = getToolsDeps();
+            taskManager.clear();
+            return { success: true };
+        } catch (err) {
+            return { error: err.message };
+        }
+    });
+
     // ── Task Manager IPC ──
     ipcMain.handle('tasks-list', async () => {
         const { taskManager } = getToolsDeps();

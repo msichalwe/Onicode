@@ -52,16 +52,10 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
     return (
         <aside className="sidebar">
             <nav className="sidebar-nav">
-                {/* New Chat — always visible, above Chat */}
-                <button className="sidebar-btn sidebar-btn-new" onClick={() => { onViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-new-chat', { detail: mode })); }} title="New chat">
+                {/* New Chat */}
+                <button className="sidebar-btn sidebar-btn-new" onClick={() => { onViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-new-chat')); }} title="New chat">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
                     New Chat
-                </button>
-
-                {/* Chat — always visible */}
-                <button className={`sidebar-btn ${currentView === 'chat' ? 'active' : ''}`} onClick={() => onViewChange('chat')} title="Chat">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-                    Chat
                     {unreadChatCount > 0 && <span className="sidebar-badge">{unreadChatCount > 99 ? '99+' : unreadChatCount}</span>}
                 </button>
 
@@ -73,29 +67,17 @@ export default function Sidebar({ currentView, onViewChange, unreadChatCount = 0
                     </button>
                 )}
 
-                {/* Files — workpal + projects */}
-                {mode !== 'onichat' && (
-                    <button className={`sidebar-btn ${currentView === 'attachments' ? 'active' : ''}`} onClick={() => onViewChange('attachments')} title="Files">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
-                        Files
-                    </button>
-                )}
+                {/* Files */}
+                <button className={`sidebar-btn ${currentView === 'attachments' ? 'active' : ''}`} onClick={() => onViewChange('attachments')} title="Files">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
+                    Files
+                </button>
 
-                {/* Agents — projects only */}
-                {mode === 'projects' && (
-                    <button className={`sidebar-btn ${currentView === 'memories' ? 'active' : ''}`} onClick={() => onViewChange('memories')} title="Agents">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg>
-                        Agents
-                    </button>
-                )}
-
-                {/* Tasks — projects only */}
-                {mode === 'projects' && (
-                    <button className={`sidebar-btn ${currentView === 'todo' ? 'active' : ''}`} onClick={() => onViewChange('todo')} title="Tasks">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>
-                        Tasks
-                    </button>
-                )}
+                {/* Tasks */}
+                <button className={`sidebar-btn ${currentView === 'todo' ? 'active' : ''}`} onClick={() => onViewChange('todo')} title="Tasks">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>
+                    Tasks
+                </button>
             </nav>
 
             {/* ── Recents: per-mode chat history (max 15) ── */}
@@ -133,6 +115,7 @@ interface CachedConv {
     scope?: string;
     projectName?: string;
     projectId?: string;
+    projectPath?: string;
     messages?: unknown[];
 }
 
@@ -169,9 +152,29 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
         return () => { events.forEach(e => window.removeEventListener(e, handler)); clearInterval(iv); };
     }, []);
 
-    const handleClick = (chatId: string) => {
+    // Track active conversation for highlighting
+    const activeConvId = (() => {
+        try {
+            return localStorage.getItem(`onicode-active-conversation-${mode}`) || null;
+        } catch { return null; }
+    })();
+
+    const handleClick = (chat: CachedConv) => {
         onViewChange('chat');
-        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chatId }));
+        // If it's a project chat, activate that project
+        if (chat.scope === 'project' && chat.projectName) {
+            window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: 'projects' }));
+            if (chat.projectId) {
+                window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                    detail: { id: chat.projectId, name: chat.projectName, path: chat.projectPath || '' }
+                }));
+            }
+        }
+        // If it's a workpal chat, switch to workpal mode
+        if (chat.scope === 'workpal' || (chat.scope as string) === 'workmate') {
+            window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: 'workpal' }));
+        }
+        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chat.id }));
     };
 
     const timeAgo = (ts: number) => {
@@ -196,12 +199,21 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
                 <button className="sidebar-recents-all" onClick={openFullHistory} title="View all chats">All</button>
             </div>
             <div className="sidebar-recents-list">
-                {chats.map(c => (
-                    <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Chat'}>
-                        <div className="sidebar-recent-title">{c.title || (c.messages && Array.isArray(c.messages) && c.messages.length > 0 ? String((c.messages[0] as Record<string, unknown>)?.content || '').slice(0, 40) : 'Chat')}</div>
-                        <span className="sidebar-recent-time">{timeAgo(c.updatedAt || c.createdAt || 0)}</span>
-                    </button>
-                ))}
+                {chats.map(c => {
+                    const chatMode = c.projectName || c.scope === 'project' ? 'project'
+                        : c.scope === 'workpal' || (c.scope as string) === 'workmate' ? 'workpal'
+                        : 'general';
+                    const title = c.title || (c.messages && Array.isArray(c.messages) && c.messages.length > 0 ? String((c.messages[0] as Record<string, unknown>)?.content || '').slice(0, 40) : 'Chat');
+                    return (
+                        <button key={c.id} className={`sidebar-recent-item ${c.id === activeConvId ? 'sidebar-recent-active' : ''}`} onClick={() => handleClick(c)} title={title}>
+                            <span className={`sidebar-recent-dot sidebar-recent-dot-${chatMode}`} />
+                            <div className="sidebar-recent-body">
+                                <div className="sidebar-recent-title">{title}</div>
+                                <span className="sidebar-recent-time">{timeAgo(c.updatedAt || c.createdAt || 0)}</span>
+                            </div>
+                        </button>
+                    );
+                })}
             </div>
         </div>
     );

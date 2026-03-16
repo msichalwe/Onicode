@@ -153,6 +153,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         loadConversationsFromSQLite().then(sqliteConvs => {
             if (!sqliteConvs) return;
             setConversations(sqliteConvs);
+            // Sync to localStorage cache so sidebar can read it
+            saveConversationsCache(sqliteConvs);
+            window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
             const activeId = localStorage.getItem(modeConvKey);
             if (activeId) {
                 const conv = sqliteConvs.find(c => c.id === activeId);
@@ -1221,7 +1224,25 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         streamContentRef.current = ''; sendingRef.current = false;
         setActiveConvId(null); setMessageQueue([]);
         localStorage.removeItem(modeConvKey); setAttachments([]);
+        // Clear stale tasks from previous conversation
+        if (isElectron && window.onicode?.clearAllTasks) window.onicode.clearAllTasks().catch(() => {});
     }, []);
+
+    // ── Save conversation on close/reload ──
+    const messagesRef = useRef(messages);
+    const activeConvIdRef = useRef(activeConvId);
+    useEffect(() => { messagesRef.current = messages; }, [messages]);
+    useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+
+    useEffect(() => {
+        const handler = () => {
+            if (messagesRef.current.length > 0) {
+                persistConversation(messagesRef.current, activeConvIdRef.current);
+            }
+        };
+        window.addEventListener('beforeunload', handler);
+        return () => window.removeEventListener('beforeunload', handler);
+    }, [persistConversation]);
 
     // ── Listen for external new-chat signal ──
     useEffect(() => {
@@ -1351,10 +1372,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // ── Load conversation ──
     const loadConversation = useCallback((conv: Conversation) => {
+        // Clear current state (including tasks) and load the conversation
         newChat();
         setTimeout(() => {
             setMessages(conv.messages); setActiveConvId(conv.id);
             localStorage.setItem(modeConvKey, conv.id); setShowHistory(false);
+            // Notify sidebar that conversation changed
+            window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
         }, 0);
     }, [newChat]);
 

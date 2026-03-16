@@ -110,6 +110,7 @@ contextBridge.exposeInMainWorld('onicode', {
     // Task management (extends existing tasksList + onTasksUpdated)
     listProjectTasks: (projectPath) => ipcRenderer.invoke('list-project-tasks', projectPath),
     archiveCompletedTasks: () => ipcRenderer.invoke('archive-completed-tasks'),
+    clearAllTasks: () => ipcRenderer.invoke('tasks-clear-all'),
 
     onPanelOpen: (callback) => {
         const handler = (_event, data) => callback(data);
