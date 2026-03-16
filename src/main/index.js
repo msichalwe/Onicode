@@ -361,14 +361,34 @@ ipcMain.handle('open-external', async (_event, url) => {
 // ══════════════════════════════════════════
 
 let currentAIRequest = null;
+let currentRequestId = null;
+
+// Stream helpers — tag all events with requestId
+function streamChunk(chunk, requestId) {
+    mainWindow?.webContents.send('ai-stream-chunk', chunk, requestId || currentRequestId);
+}
+function streamDone(error, requestId) {
+    const rid = requestId || currentRequestId;
+    mainWindow?.webContents.send('ai-stream-done', error, rid);
+    currentAIRequest = null;
+}
+function streamToolCall(data, requestId) {
+    mainWindow?.webContents.send('ai-tool-call', { ...data, requestId: requestId || currentRequestId });
+}
+function streamToolResult(data, requestId) {
+    mainWindow?.webContents.send('ai-tool-result', { ...data, requestId: requestId || currentRequestId });
+}
 
 ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
-    // Ollama doesn't need an API key; all others do
     if (!providerConfig?.apiKey && providerConfig?.id !== 'ollama') return { error: 'No API key configured' };
+
+    // Generate unique request ID for this stream
+    const requestId = providerConfig.requestId || `req_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    currentRequestId = requestId;
 
     // Abort any in-flight request
     if (currentAIRequest) {
-        try { currentAIRequest.destroy(); } catch { }
+        try { currentAIRequest.destroy?.() || currentAIRequest.abort?.(); } catch {}
         currentAIRequest = null;
     }
 
@@ -436,7 +456,7 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
         try {
             const hookResult = executeHook('UserPromptSubmit', { projectDir: projectPath || '', command: lastUserMsg.content?.slice(0, 500) || '' });
             if (!hookResult.allowed) {
-                mainWindow?.webContents.send('ai-stream-done', null);
+                streamDone( null);
                 return { error: `Message blocked by UserPromptSubmit hook: ${hookResult.reason || 'hook rejected'}` };
             }
         } catch {}
@@ -543,7 +563,7 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
                 // Text delta
                 if (json.type === 'response.output_text.delta' && json.delta) {
                     textContent += json.delta;
-                    mainWindow?.webContents.send('ai-stream-chunk', json.delta);
+                    streamChunk( json.delta);
                 }
 
                 // Function call started
@@ -575,7 +595,7 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
                 if (json.choices?.[0]?.delta?.content) {
                     const chunk = json.choices[0].delta.content;
                     textContent += chunk;
-                    mainWindow?.webContents.send('ai-stream-chunk', chunk);
+                    streamChunk( chunk);
                 }
             } catch { }
         }
@@ -803,7 +823,7 @@ function sendCompletionSummary(toolsUsed, startSnapshot) {
         // Break into a new message bubble so the summary is separate from AI text
         sendMessageBreak();
         const summaryText = parts.join(' ');
-        mainWindow?.webContents.send('ai-stream-chunk', summaryText);
+        streamChunk( summaryText);
     }
 }
 
@@ -820,7 +840,7 @@ function sendMessageBreak() {
 async function streamChatGPTBackend(messages, accessToken, selectedModel, projectPath, reasoningEffort = 'medium') {
     const accountId = getAccountId(accessToken);
     if (!accountId) {
-        mainWindow?.webContents.send('ai-stream-done', 'Cannot extract account ID from token. Sign in again.');
+        streamDone( 'Cannot extract account ID from token. Sign in again.');
         return { error: 'Invalid token' };
     }
 
@@ -982,7 +1002,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     if (!isTransient || attempt === MAX_RETRIES_CGP) throw retryErr; // Re-throw to outer catch
                     const delay = (attempt + 1) * 3000;
                     logger.warn('agent-loop', `Transient error "${errMsg}" — retrying in ${delay/1000}s (attempt ${attempt + 1}/${MAX_RETRIES_CGP})`);
-                    mainWindow?.webContents.send('ai-stream-chunk', `\n*[Network error — retrying in ${delay/1000}s...]*\n`);
+                    streamChunk( `\n*[Network error — retrying in ${delay/1000}s...]*\n`);
                     await new Promise(r => setTimeout(r, delay));
                 }
             }
@@ -1009,7 +1029,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 if (toolsUsed.has('show_widget') || toolsUsed.has('ask_user_question')) {
                     logger.info('agent-loop', 'Interactive widget/question shown — stopping for user interaction');
                     sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-                    mainWindow?.webContents.send('ai-stream-done', null);
+                    streamDone( null);
                     return { success: true };
                 }
 
@@ -1019,7 +1039,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 if (justInitProject && looksLikeDiscoveryQuestions(aiTextContent) && !userWantsToSkipQuestions(inputItems)) {
                     logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
                     sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-                    mainWindow?.webContents.send('ai-stream-done', null);
+                    streamDone( null);
                     return { success: true };
                 }
 
@@ -1039,7 +1059,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                             }
                         }
                         sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-                        mainWindow?.webContents.send('ai-stream-done', null);
+                        streamDone( null);
                         return { success: true };
                     }
 
@@ -1088,10 +1108,10 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
                 if (hasPendingTasks) {
                     logger.warn('agent-loop', `Max auto-continues (${MAX_AUTO_CONTINUES}) reached with ${summary.pending} tasks still pending`);
-                    mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
+                    streamChunk( `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
                 }
                 sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-                mainWindow?.webContents.send('ai-stream-done', null);
+                streamDone( null);
                 return { success: true };
             }
 
@@ -1120,7 +1140,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
 
                 toolsUsed.add(fn.name);
 
-                mainWindow?.webContents.send('ai-tool-call', {
+                streamToolCall( {
                     id: fn.call_id,
                     name: fn.name,
                     args,
@@ -1168,7 +1188,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     }
                 }
 
-                mainWindow?.webContents.send('ai-tool-result', {
+                streamToolResult( {
                     id: fn.call_id,
                     name: fn.name,
                     result: toolResult,
@@ -1220,7 +1240,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 const summary = taskManager.getSummary();
                 const taskStatus = summary.total > 0 ? ` (${summary.done}/${summary.total} tasks done)` : '';
                 sendMessageBreak();
-                mainWindow?.webContents.send('ai-stream-chunk', parts.join(', ') + '.' + taskStatus);
+                streamChunk( parts.join(', ') + '.' + taskStatus);
                 sendMessageBreak();
                 _toolOnlyRounds = 0;
                 _roundToolNames.length = 0;
@@ -1276,7 +1296,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
         if (finalSummary.pending > 0 || finalSummary.inProgress > 0) {
             const remaining = finalSummary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
             const remainingNames = remaining.map(t => `"${t.content}"`).join(', ');
-            mainWindow?.webContents.send('ai-stream-chunk', `\n\n---\n**Session complete** — ${finalSummary.done}/${finalSummary.total} tasks done.\n${remaining.length > 0 ? `Remaining: ${remainingNames}\nSend another message to continue where I left off.` : ''}`);
+            streamChunk( `\n\n---\n**Session complete** — ${finalSummary.done}/${finalSummary.total} tasks done.\n${remaining.length > 0 ? `Remaining: ${remainingNames}\nSend another message to continue where I left off.` : ''}`);
             // Auto-close in_progress tasks since we're stopping
             for (const t of finalSummary.tasks) {
                 if (t.status === 'in_progress') {
@@ -1285,7 +1305,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             }
         }
         sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-        mainWindow?.webContents.send('ai-stream-done', null);
+        streamDone( null);
         try { extractAndSaveMemory(conversationMessages, { accessToken, selectedModel }); } catch {}
         return { success: true };
 
@@ -1293,7 +1313,7 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
         currentAIRequest = null;
         if (err.name === 'AbortError') {
             sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-            mainWindow?.webContents.send('ai-stream-done', null);
+            streamDone( null);
             try { extractAndSaveMemory(conversationMessages, { accessToken, selectedModel }); } catch {}
             return { success: true };
         }
@@ -1302,10 +1322,10 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
         const summary = taskManager.getSummary();
         if (summary.inProgress > 0 || summary.pending > 0) {
             const taskStatus = `${summary.done}/${summary.total} tasks done, ${summary.pending} pending`;
-            mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Connection lost — ${taskStatus}. Send another message to continue where you left off.]*`);
+            streamChunk( `\n\n*[Connection lost — ${taskStatus}. Send another message to continue where you left off.]*`);
             sendCompletionSummary(toolsUsed, _taskStartSnapshot);
         }
-        mainWindow?.webContents.send('ai-stream-done', err.message);
+        streamDone( err.message);
         try { extractAndSaveMemory(conversationMessages, { accessToken, selectedModel }); } catch {}
         return { error: err.message };
     } finally {
@@ -1412,7 +1432,7 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
                         // Text content — stream to renderer
                         if (delta.content) {
                             textContent += delta.content;
-                            mainWindow?.webContents.send('ai-stream-chunk', delta.content);
+                            streamChunk( delta.content);
                         }
 
                         // Tool calls — accumulate
@@ -1640,7 +1660,7 @@ function streamAnthropicSingle(messages, providerConfig, includeTools = true) {
                             const delta = json.delta;
                             if (delta.type === 'text_delta') {
                                 textContent += delta.text;
-                                mainWindow?.webContents.send('ai-stream-chunk', delta.text);
+                                streamChunk( delta.text);
                             } else if (delta.type === 'input_json_delta') {
                                 if (toolUseBlocks[json.index]) {
                                     toolUseBlocks[json.index].arguments += delta.partial_json;
@@ -2407,7 +2427,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             if (!isTransient || attempt === MAX_RETRIES) break;
             const delay = (attempt + 1) * 3000; // 3s, 6s
             logger.warn('agent-loop', `Transient error "${result.error}" — retrying in ${delay/1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
-            mainWindow?.webContents.send('ai-stream-chunk', `\n*[Network error — retrying in ${delay/1000}s...]*\n`);
+            streamChunk( `\n*[Network error — retrying in ${delay/1000}s...]*\n`);
             await new Promise(r => setTimeout(r, delay));
         }
 
@@ -2416,10 +2436,10 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             const errSummary = taskManager.getSummary();
             if (errSummary.inProgress > 0 || errSummary.pending > 0) {
                 const taskStatus = `${errSummary.done}/${errSummary.total} tasks done, ${errSummary.pending} pending`;
-                mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Connection lost — ${taskStatus}. Send another message to continue where you left off.]*`);
+                streamChunk( `\n\n*[Connection lost — ${taskStatus}. Send another message to continue where you left off.]*`);
                 sendCompletionSummary(toolsUsed, _taskStartSnapshot);
             }
-            mainWindow?.webContents.send('ai-stream-done', result.error);
+            streamDone( result.error);
             return { error: result.error };
         }
 
@@ -2455,7 +2475,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
                 logger.info('agent-loop', 'AI is asking discovery questions after init_project — pausing for user input');
                 currentAIRequest = null;
                 sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-                mainWindow?.webContents.send('ai-stream-done', null);
+                streamDone( null);
                 try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
                 return { success: true };
             }
@@ -2480,7 +2500,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
                     }
                     currentAIRequest = null;
                     sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-                    mainWindow?.webContents.send('ai-stream-done', null);
+                    streamDone( null);
                     try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
                     return { success: true };
                 }
@@ -2538,11 +2558,11 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             if (hasPendingTasks) {
                 // Reached MAX_AUTO_CONTINUES with tasks still pending — notify user
                 logger.warn('agent-loop', `Max auto-continues (${MAX_AUTO_CONTINUES}) reached with ${summary.pending} tasks still pending`);
-                mainWindow?.webContents.send('ai-stream-chunk', `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
+                streamChunk( `\n\n*[Agent paused — ${summary.pending} tasks still pending. Send another message to continue.]*`);
             }
             currentAIRequest = null;
             sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-            mainWindow?.webContents.send('ai-stream-done', null);
+            streamDone( null);
             // Post-response hooks and memory extraction (background, non-blocking)
             try { executeHook('AIResponse', { projectDir: projectPath || '' }); } catch {}
             try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
@@ -2585,7 +2605,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             toolsUsed.add(tc.name);
 
             // Notify renderer: tool call starting
-            mainWindow?.webContents.send('ai-tool-call', {
+            streamToolCall( {
                 id: tc.id,
                 name: tc.name,
                 args,
@@ -2635,7 +2655,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             }
 
             // Notify renderer: tool result
-            mainWindow?.webContents.send('ai-tool-result', {
+            streamToolResult( {
                 id: tc.id,
                 name: tc.name,
                 result: toolResult,
@@ -2680,7 +2700,7 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             const synthSummary = taskManager.getSummary();
             const taskStatus = synthSummary.total > 0 ? ` (${synthSummary.done}/${synthSummary.total} tasks done)` : '';
             sendMessageBreak();
-            mainWindow?.webContents.send('ai-stream-chunk', parts.join(', ') + '.' + taskStatus);
+            streamChunk( parts.join(', ') + '.' + taskStatus);
             sendMessageBreak();
             _toolOnlyRounds = 0;
             _roundToolNames.length = 0;
@@ -2738,9 +2758,9 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
         const remaining = finalSummary.tasks.filter(t => t.status !== 'done' && t.status !== 'skipped');
         if (remaining.length > 0) {
             const remainingNames = remaining.map(t => `"${t.content}"`).join(', ');
-            mainWindow?.webContents.send('ai-stream-chunk', `\n\n---\n**Session complete** — ${finalSummary.done}/${finalSummary.total} tasks done.\nRemaining: ${remainingNames}\nSend another message to continue where I left off.`);
+            streamChunk( `\n\n---\n**Session complete** — ${finalSummary.done}/${finalSummary.total} tasks done.\nRemaining: ${remainingNames}\nSend another message to continue where I left off.`);
         } else {
-            mainWindow?.webContents.send('ai-stream-chunk', `\n\n---\n**All ${finalSummary.total} tasks complete.**`);
+            streamChunk( `\n\n---\n**All ${finalSummary.total} tasks complete.**`);
         }
         // Auto-close in_progress tasks since we're stopping
         for (const t of finalSummary.tasks) {
@@ -2749,10 +2769,10 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             }
         }
     } else {
-        mainWindow?.webContents.send('ai-stream-chunk', '\n\n*[Reached maximum rounds. Send another message to continue.]*');
+        streamChunk( '\n\n*[Reached maximum rounds. Send another message to continue.]*');
     }
     sendCompletionSummary(toolsUsed, _taskStartSnapshot);
-    mainWindow?.webContents.send('ai-stream-done', null);
+    streamDone( null);
     try { executeHook('Stop', { projectDir: projectPath || '' }); } catch {}
     try { extractAndSaveMemory(conversationMessages, providerConfig); } catch {}
     currentAIRequest = null;
@@ -2766,10 +2786,9 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
 ipcMain.handle('ai-abort', () => {
     if (currentAIRequest) {
         try {
-            // AbortController (fetch-based) or raw request (https-based)
             if (typeof currentAIRequest.abort === 'function') currentAIRequest.abort();
             else if (typeof currentAIRequest.destroy === 'function') currentAIRequest.destroy();
-        } catch { }
+        } catch {}
         currentAIRequest = null;
     }
     return { success: true };

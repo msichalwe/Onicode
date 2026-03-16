@@ -65,7 +65,6 @@ function AppContent() {
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [showExitWarning, setShowExitWarning] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
-    const [activeModes, setActiveModes] = useState<Set<OnicodeMode>>(new Set());
     const [projectDropdown, setProjectDropdown] = useState(false);
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const [unreadChatCount, setUnreadChatCount] = useState(0);
@@ -184,16 +183,6 @@ function AppContent() {
             }
         });
     }, []);
-
-    // Track which modes have active AI streaming
-    useEffect(() => {
-        if (!isElectron) return;
-        const onChunk = () => { setActiveModes(prev => { const n = new Set(prev); n.add(mode); return n; }); };
-        const onDone = () => { setActiveModes(prev => { const n = new Set(prev); n.delete(mode); return n; }); };
-        const c1 = window.onicode?.onStreamChunk?.(onChunk);
-        const c2 = window.onicode?.onStreamDone?.(onDone);
-        return () => { c1?.(); c2?.(); };
-    }, [mode]);
 
     // ── Mode switching ──
     const switchMode = useCallback(async (newMode: OnicodeMode) => {
@@ -388,7 +377,6 @@ function AppContent() {
                 <div className="mode-switcher">
                     {Object.values(MODE_CONFIGS).map(m => (
                         <button key={m.id} className={`mode-btn ${mode === m.id ? 'active' : ''}`} onClick={() => switchMode(m.id)} title={`${m.label} (${m.shortcut})`}>
-                            {activeModes.has(m.id) && mode !== m.id && <span className="mode-btn-dot" />}
                             <span className="mode-btn-label">{m.label}</span>
                         </button>
                     ))}

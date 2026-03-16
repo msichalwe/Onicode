@@ -28,7 +28,6 @@ export function getApiEndpoint(provider: ProviderConfig): string {
 
 /**
  * Load conversations from localStorage (sync, used for initial render).
- * After mount, SQLite becomes the primary source via async load.
  */
 export function loadConversationsFromCache(): Conversation[] {
     try {

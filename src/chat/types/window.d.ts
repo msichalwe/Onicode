@@ -83,11 +83,13 @@ interface OnicodeAPI {
             selectedModel?: string;
             projectPath?: string;
             reasoningEffort?: string;
+            requestId?: string;
+            mode?: string;
         }
     ) => Promise<{ success?: boolean; error?: string }>;
-    onStreamChunk: (callback: (chunk: string) => void) => () => void;
-    onStreamDone: (callback: (error: string | null) => void) => () => void;
-    abortAI: () => Promise<{ success: boolean }>;
+    onStreamChunk: (callback: (chunk: string, requestId?: string) => void) => () => void;
+    onStreamDone: (callback: (error: string | null, requestId?: string) => void) => () => void;
+    abortAI: (requestId?: string) => Promise<{ success: boolean }>;
     openExternal: (url: string) => Promise<void>;
 
     // Message break — finalize current bubble, start new one

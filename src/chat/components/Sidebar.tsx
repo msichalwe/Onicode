@@ -148,23 +148,12 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
     const [chats, setChats] = useState<CachedConv[]>([]);
     const [tick, setTick] = useState(0);
 
-    // Read from cache, filter by mode
+    // Read from cache — each mode has its own pool, no filtering needed
     useEffect(() => {
         const all = readFromCache();
         const withMessages = all.filter(c => c.messages && Array.isArray(c.messages) && c.messages.length > 0);
 
-        // Filter by mode using scope field
-        const filtered = withMessages.filter(c => {
-            const scope = c.scope || 'general';
-            const hasProject = !!(c.projectName || c.projectId);
-
-            if (mode === 'projects') return hasProject || scope === 'project';
-            if (mode === 'workpal') return scope === 'workpal' || scope === 'workmate';
-            // OniChat: general scope without project
-            return (scope === 'general' || !scope) && !hasProject;
-        });
-
-        const sorted = filtered
+        const sorted = withMessages
             .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
             .slice(0, MAX_RECENTS);
         setChats(sorted);
@@ -182,7 +171,7 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
 
     const handleClick = (chatId: string) => {
         onViewChange('chat');
-        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: { id: chatId, mode } }));
+        window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chatId }));
     };
 
     const timeAgo = (ts: number) => {

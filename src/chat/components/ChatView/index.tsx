@@ -37,7 +37,6 @@ export type { ToolStep, Message, Attachment, Conversation } from './types';
 export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage, mode = 'onichat', workpalFolder }: ChatViewProps) {
     // Per-mode conversation key
     const modeConvKey = `${ACTIVE_CONV_KEY}-${mode}`;
-    const prevModeRef = useRef(mode);
 
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
@@ -57,36 +56,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         return [];
     });
 
-    // ── MODE SWITCH: save current state, load new mode's state ──
-    useEffect(() => {
-        if (prevModeRef.current === mode) return;
-        const prevMode = prevModeRef.current;
-        prevModeRef.current = mode;
-
-        // Save current conversation for the PREVIOUS mode (don't abort AI)
-        const prevKey = `${ACTIVE_CONV_KEY}-${prevMode}`;
-        if (activeConvId) {
-            localStorage.setItem(prevKey, activeConvId);
-        }
-
-        // Load the NEW mode's conversation
-        const newKey = `${ACTIVE_CONV_KEY}-${mode}`;
-        const newConvId = localStorage.getItem(newKey);
-        if (newConvId) {
-            const convs = loadConversationsFromCache();
-            const conv = convs.find(c => c.id === newConvId);
-            if (conv) {
-                setMessages(conv.messages);
-                setActiveConvId(newConvId);
-                setInput('');
-                return;
-            }
-        }
-        // No saved conversation for this mode — start empty
-        setMessages([]);
-        setActiveConvId(null);
-        setInput('');
-    }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Mode changes only affect the system prompt (via modeRef) — no state reset needed
 
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
@@ -157,6 +127,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const modeRef = useRef(mode);
     const workpalFolderRef = useRef(workpalFolder);
     const scopeRef = useRef(scope);
+    const streamingModeRef = useRef<string | null>(null); // tracks which mode started current stream
 
     // Keep refs in sync with props so closures always have current value
     useEffect(() => { activeProjectRef.current = activeProject; }, [activeProject]);
@@ -584,8 +555,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         streamContentRef.current = '';
         toolStepsRef.current = [];
         setActiveToolSteps([]);
+        // Generate unique request ID — used to filter stream events for THIS request only
+        const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        streamingModeRef.current = modeRef.current;
 
-        const removeChunkListener = window.onicode!.onStreamChunk((chunk: string) => {
+        const removeChunkListener = window.onicode!.onStreamChunk((chunk: string, requestId?: string) => {
+            // Only process chunks for OUR request
+            if (requestId && requestId !== reqId) return;
             streamContentRef.current += chunk;
             setStreamingContent(streamContentRef.current);
         });
@@ -595,6 +571,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         const removeToolCallListener = window.onicode!.onToolCall((data) => {
             if ((data as Record<string, unknown>).agentId) return;
+            if ((data as Record<string, unknown>).requestId && (data as Record<string, unknown>).requestId !== reqId) return;
             const step: ToolStep = { id: data.id, name: data.name, args: data.args, round: data.round, status: 'running' };
             toolStepsRef.current = [...toolStepsRef.current, step];
             setActiveToolSteps([...toolStepsRef.current]);
@@ -602,6 +579,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         const removeToolResultListener = window.onicode!.onToolResult((data) => {
             if ((data as Record<string, unknown>).agentId) return;
+            if ((data as Record<string, unknown>).requestId && (data as Record<string, unknown>).requestId !== reqId) return;
             toolStepsRef.current = toolStepsRef.current.map(s =>
                 s.id === data.id ? { ...s, result: data.result, status: 'done' as const } : s
             );
@@ -633,7 +611,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             pendingWidgetsRef.current = [...pendingWidgetsRef.current, { id: data.id, type: data.type, data: data.data }];
         }) || (() => { console.warn('[ChatView] onWidget not available in preload'); });
 
-        const removeDoneListener = window.onicode!.onStreamDone((error: string | null) => {
+        const removeDoneListener = window.onicode!.onStreamDone((error: string | null, requestId?: string) => {
+            // Only process done for OUR request
+            if (requestId && requestId !== reqId) return;
             removeChunkListener();
             removeDoneListener();
             removeToolCallListener();
@@ -646,12 +626,21 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             const finalContent = streamContentRef.current;
             const finalToolSteps = [...toolStepsRef.current];
             const finalWidgets = [...pendingWidgetsRef.current];
+            const streamMode = streamingModeRef.current;
             setStreamingContent('');
             streamContentRef.current = '';
             setActiveToolSteps([]);
             toolStepsRef.current = [];
             pendingWidgetsRef.current = [];
             sendingRef.current = false;
+            streamingModeRef.current = null;
+
+            // If mode changed during streaming, discard UI update — the response was for a different mode
+            // The conversation was already persisted via persistConversation during streaming
+            if (streamMode && streamMode !== modeRef.current) {
+                console.log(`[ChatView] Stream finished for mode ${streamMode} but current mode is ${modeRef.current} — skipping UI update`);
+                return;
+            }
 
             if (error) {
                 setMessages((prev) => [...prev, {
@@ -697,6 +686,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             selectedModel: provider.selectedModel,
             projectPath: activeProjectRef.current?.path,
             reasoningEffort: localStorage.getItem('onicode-thinking-level') || 'medium',
+            requestId: reqId,
+            mode: modeRef.current,
         });
 
         if (result.error) {
@@ -1027,8 +1018,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // ── Channel Bridge: Telegram and other channels feed into this ChatView ──
     useEffect(() => {
-        // Only OniChat mode handles Telegram messages
-        if (!isElectron || !window.onicode?.onChannelIncoming || mode !== 'onichat') return;
+        if (!isElectron || !window.onicode?.onChannelIncoming) return;
         const cleanup = window.onicode!.onChannelIncoming((data) => {
             const { channel, chatId, from, text, action } = data;
 
@@ -1233,18 +1223,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         localStorage.removeItem(modeConvKey); setAttachments([]);
     }, []);
 
-    // ── Listen for external new-chat signal (mode-specific) ──
+    // ── Listen for external new-chat signal ──
     useEffect(() => {
-        // Listen for both global and mode-specific new-chat events
-        const handler = (e: Event) => {
-            const targetMode = (e as CustomEvent).detail;
-            // Only respond if: no target mode specified (from New Chat button in this mode's sidebar),
-            // OR target mode matches this ChatView's mode
-            if (!targetMode || targetMode === mode) newChat();
-        };
+        const handler = () => newChat();
         window.addEventListener('onicode-new-chat', handler);
         return () => window.removeEventListener('onicode-new-chat', handler);
-    }, [newChat, mode]);
+    }, [newChat]);
 
     // ── Execute slash commands ──
     const handleCommand = useCallback(async (cmd: string): Promise<boolean> => {
@@ -1382,16 +1366,12 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         window.dispatchEvent(new CustomEvent('onicode-conversation-deleted'));
     }, [activeConvId, newChat]);
 
-    // ── Listen for external load-conversation signal (mode-specific) ──
+    // ── Listen for external load-conversation signal ──
     useEffect(() => {
         const handler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
-            // Support both string (legacy) and { id, mode } format
             const convId = typeof detail === 'string' ? detail : detail?.id;
-            const targetMode = typeof detail === 'string' ? undefined : detail?.mode;
             if (!convId) return;
-            // Only respond if no target mode specified or it matches this ChatView
-            if (targetMode && targetMode !== mode) return;
             const cached = loadConversationsFromCache().find(c => c.id === convId);
             if (cached) { loadConversation(cached); return; }
             if (isElectron && window.onicode?.conversationGet) {
@@ -1403,7 +1383,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         };
         window.addEventListener('onicode-load-conversation', handler);
         return () => window.removeEventListener('onicode-load-conversation', handler);
-    }, [loadConversation, mode]);
+    }, [loadConversation]);
 
     // ── Toggle expanded step ──
     const toggleStepExpand = useCallback((stepId: string, event?: React.MouseEvent) => {

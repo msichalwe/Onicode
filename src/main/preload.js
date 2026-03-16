@@ -13,18 +13,18 @@ contextBridge.exposeInMainWorld('onicode', {
         ipcRenderer.invoke('ai-send-message', messages, providerConfig),
 
     onStreamChunk: (callback) => {
-        const handler = (_event, chunk) => callback(chunk);
+        const handler = (_event, chunk, requestId) => callback(chunk, requestId);
         ipcRenderer.on('ai-stream-chunk', handler);
         return () => ipcRenderer.removeListener('ai-stream-chunk', handler);
     },
 
     onStreamDone: (callback) => {
-        const handler = (_event, error) => callback(error);
+        const handler = (_event, error, requestId) => callback(error, requestId);
         ipcRenderer.on('ai-stream-done', handler);
         return () => ipcRenderer.removeListener('ai-stream-done', handler);
     },
 
-    abortAI: () => ipcRenderer.invoke('ai-abort'),
+    abortAI: (requestId) => ipcRenderer.invoke('ai-abort', requestId),
 
     // Message break — finalize current message bubble, start a new one
     onMessageBreak: (callback) => {
