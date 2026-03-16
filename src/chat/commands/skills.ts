@@ -5,6 +5,8 @@
  * They are injected into the system prompt when enabled.
  */
 
+export type SkillMode = 'onichat' | 'workpal' | 'projects' | 'all';
+
 export interface Skill {
     id: string;
     name: string;
@@ -13,7 +15,8 @@ export interface Skill {
     prompt: string;
     enabled: boolean;
     icon: string;
-    system?: boolean; // System skills — always recommended, shown with a badge
+    system?: boolean;
+    modes: SkillMode[]; // Which modes this skill is relevant to. 'all' = every mode.
 }
 
 const STORAGE_KEY = 'onicode-skills';
@@ -25,6 +28,7 @@ export const DEFAULT_SKILLS: Skill[] = [
         description: 'Analyze code for bugs, security issues, performance problems, and best practices',
         category: 'review',
         icon: 'Review',
+        modes: ["projects","workpal"],
         enabled: true,
         prompt: `When asked to review code or when you detect code that could be improved:
 1. Check for bugs, edge cases, and logic errors
@@ -41,6 +45,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Refactor code to improve readability, reduce duplication, and follow patterns',
         category: 'code',
         icon: 'Refactor',
+        modes: ["projects"],
         enabled: true,
         prompt: `When refactoring code:
 1. Identify code smells: duplication, long functions, deep nesting, magic numbers
@@ -57,6 +62,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Generate comprehensive unit tests, integration tests, and E2E tests',
         category: 'testing',
         icon: 'Test',
+        modes: ["projects"],
         enabled: true,
         prompt: `When generating tests:
 1. Detect the testing framework (Jest, Vitest, Pytest, Go test, etc.)
@@ -73,6 +79,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Generate README, API docs, JSDoc/TSDoc, and inline comments',
         category: 'docs',
         icon: 'Docs',
+        modes: ["workpal","projects"],
         enabled: true,
         prompt: `When generating documentation:
 1. Write clear, concise README.md with: overview, setup, usage, API reference
@@ -88,6 +95,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Systematic debugging with log analysis, stack traces, and root cause identification',
         category: 'debug',
         icon: 'Debug',
+        modes: ["projects"],
         enabled: true,
         prompt: `When debugging issues:
 1. Read the error message and stack trace carefully
@@ -105,6 +113,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Smart git operations: commits, branches, PRs, conflict resolution',
         category: 'devops',
         icon: 'Git',
+        modes: ["projects"],
         enabled: true,
         prompt: `When working with git:
 1. Make atomic commits — one logical change per commit
@@ -121,6 +130,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Profile and optimize code for speed, memory, and bundle size',
         category: 'code',
         icon: 'Perf',
+        modes: ["projects"],
         enabled: true,
         prompt: `When optimizing performance:
 1. Identify bottlenecks: slow queries, excessive re-renders, large bundles
@@ -136,6 +146,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Scan for vulnerabilities: XSS, injection, auth flaws, exposed secrets',
         category: 'review',
         icon: 'Security',
+        modes: ["projects"],
         enabled: true,
         prompt: `When auditing security:
 1. Check for OWASP Top 10 vulnerabilities
@@ -153,6 +164,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Design and implement REST/GraphQL APIs with validation and error handling',
         category: 'code',
         icon: 'API',
+        modes: ["projects"],
         enabled: true,
         prompt: `When building APIs:
 1. Follow REST conventions: proper HTTP methods, status codes, URL patterns
@@ -169,6 +181,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Ensure WCAG compliance: ARIA labels, keyboard nav, screen readers, contrast',
         category: 'design',
         icon: 'A11y',
+        modes: ["projects","workpal"],
         enabled: true,
         prompt: `When checking accessibility:
 1. Add ARIA labels and roles to interactive elements
@@ -185,6 +198,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Set up GitHub Actions, Docker, deployment pipelines',
         category: 'devops',
         icon: 'CI/CD',
+        modes: ["projects"],
         enabled: false,
         prompt: `When setting up CI/CD:
 1. Create GitHub Actions workflows for: lint, test, build, deploy
@@ -200,6 +214,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Design schemas, write migrations, optimize queries',
         category: 'data',
         icon: 'DB',
+        modes: ["projects"],
         enabled: false,
         prompt: `When working with databases:
 1. Design normalized schemas with proper relationships
@@ -216,6 +231,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Design stunning UIs with modern frameworks, component libraries, and real-world inspiration',
         category: 'design',
         icon: 'Design',
+        modes: ["projects","workpal"],
         enabled: true,
         prompt: `When designing frontend interfaces:
 1. Use the web_search tool to find design inspiration from Dribbble, Behance, Awwwards, and similar sites
@@ -235,6 +251,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Search the web for latest docs, npm packages, framework guides, and code examples',
         category: 'research',
         icon: 'Research',
+        modes: ["all"],
         enabled: true,
         prompt: `When the user needs up-to-date information or you need to look something up:
 1. Use web_search to find the latest documentation, release notes, and migration guides
@@ -254,6 +271,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Clone any website or design from a URL or screenshot into working code',
         category: 'design',
         icon: 'Clone',
+        modes: ["projects","workpal"],
         enabled: true,
         prompt: `When cloning a design from a URL or screenshot:
 1. Use browser_screenshot or web_fetch to capture the target design
@@ -273,6 +291,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Build mobile-first responsive layouts with modern CSS techniques',
         category: 'design',
         icon: 'Layout',
+        modes: ["projects","workpal"],
         enabled: false,
         prompt: `When building responsive layouts:
 1. Start mobile-first: design for 320px, then scale up with min-width breakpoints
@@ -292,6 +311,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Add smooth animations, transitions, and micro-interactions',
         category: 'design',
         icon: 'Motion',
+        modes: ["projects","workpal"],
         enabled: false,
         prompt: `When adding animations and motion:
 1. Follow the principle: animation should inform, not distract
@@ -311,6 +331,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Generate complete project scaffolds with best-practice folder structure and config',
         category: 'code',
         icon: 'Scaffold',
+        modes: ["projects"],
         enabled: false,
         prompt: `When scaffolding a new project:
 1. Use web_search to find the LATEST create commands and starter templates
@@ -333,6 +354,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Production-grade UI with bold aesthetics — escapes generic AI design patterns',
         category: 'design',
         icon: 'DesignPro',
+        modes: ["projects","workpal"],
         enabled: true,
         prompt: `FRONTEND DESIGN PRO — Break the "generic AI" design pattern:
 1. NEVER default to Inter font + purple gradient + white background + card grid. This is distributional convergence.
@@ -354,6 +376,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Live web interaction, E2E testing, scraping, and visual validation',
         category: 'testing',
         icon: 'Browser',
+        modes: ["projects","workpal"],
         enabled: true,
         prompt: `BROWSER AUTOMATION — Use browser tools for testing and web interaction:
 1. For E2E testing: navigate to URL, interact with elements, assert outcomes
@@ -375,6 +398,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Reduce complexity — fewer lines, clearer intent, less abstraction',
         category: 'review',
         icon: 'Simplify',
+        modes: ["projects"],
         enabled: true,
         prompt: `SIMPLIFY — Make code shorter, clearer, and more direct:
 1. Remove dead code, unused imports, commented-out blocks
@@ -395,6 +419,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Create animated demos, explainers, and presentations using artifacts',
         category: 'design',
         icon: 'Video',
+        modes: ["workpal","onichat"],
         enabled: false,
         prompt: `VIDEO & ANIMATION — Create rich animated content using artifacts:
 1. Use show_widget artifact with HTML Canvas/SVG for animations
@@ -416,6 +441,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'ETL processing, CSV/JSON analysis, statistics, and visualization',
         category: 'data',
         icon: 'Pipeline',
+        modes: ["all"],
         enabled: true,
         prompt: `DATA PIPELINE — Process, analyze, and visualize data:
 1. For CSV/JSON: use ctx_execute with Python (pandas, json, csv modules)
@@ -437,6 +463,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Analyze code for vulnerabilities, test attack surfaces, validate fixes',
         category: 'review',
         icon: 'Pentest',
+        modes: ["projects"],
         enabled: false,
         prompt: `SECURITY PENTESTING — White-box security analysis:
 1. Map attack surface: list all endpoints, inputs, auth boundaries
@@ -458,6 +485,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Architecture diagrams, flowcharts, and system maps using artifacts',
         category: 'docs',
         icon: 'Diagram',
+        modes: ["all"],
         enabled: true,
         prompt: `DIAGRAM GENERATOR — Create visual architecture and system diagrams:
 1. Use show_widget artifact with SVG for all diagrams — never plain text descriptions
@@ -479,6 +507,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Database schema design with indexing, relationships, and migration planning',
         category: 'data',
         icon: 'Schema',
+        modes: ["projects"],
         enabled: true,
         prompt: `SCHEMA DESIGNER — Design databases that scale:
 1. Start with the access patterns: what queries will run? Design schema around reads, not writes
@@ -500,6 +529,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Automated pull request creation with descriptions, checklists, and reviews',
         category: 'devops',
         icon: 'PR',
+        modes: ["projects"],
         enabled: true,
         prompt: `PR CREATOR — Automate high-quality pull requests:
 1. Before creating PR: run linter, tests, and type checks. Fix any failures.
@@ -523,6 +553,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Persistent context management — remember decisions, preferences, and project state',
         category: 'research',
         icon: 'Memory',
+        modes: ["all"],
         enabled: true,
         prompt: `SMART MEMORY — Actively manage persistent context:
 1. After EVERY significant decision: save to memory (memory_save_fact or memory_append)
@@ -544,6 +575,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Create professional slide decks — PPTX-quality presentations using artifacts',
         category: 'docs',
         icon: 'PPTX',
+        modes: ["workpal","onichat"],
         enabled: true,
         system: true,
         prompt: `PRESENTATION CREATOR — Build professional slide decks:
@@ -577,6 +609,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Design and build games — mechanics, systems, prototyping, and playtesting',
         category: 'code',
         icon: 'Game',
+        modes: ["projects","onichat"],
         enabled: true,
         system: true,
         prompt: `GAME DESIGN FRAMEWORK — Design and prototype games systematically:
@@ -625,6 +658,7 @@ Format: Use a structured review with sections for each category.`,
         description: 'Write professional documents — reports, proposals, memos, and formatted content',
         category: 'docs',
         icon: 'DocWriter',
+        modes: ["workpal","onichat"],
         enabled: true,
         system: true,
         prompt: `DOCUMENT WRITER — Create professional written deliverables:
@@ -681,14 +715,20 @@ export function saveSkills(skills: Skill[]) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(states));
 }
 
-/** Get the combined prompt text for all enabled skills */
-export function getEnabledSkillsPrompt(): string {
-    const skills = loadSkills().filter(s => s.enabled);
+/** Get the combined prompt text for enabled skills, filtered by current mode */
+export function getEnabledSkillsPrompt(mode?: string): string {
+    const currentMode = mode || 'onichat';
+    const skills = loadSkills().filter(s => {
+        if (!s.enabled) return false;
+        // Check if skill is relevant to current mode
+        if (s.modes.includes('all')) return true;
+        return s.modes.includes(currentMode as SkillMode);
+    });
     if (skills.length === 0) return '';
 
-    const lines = ['\n## Active Skills\nYou have the following specialized skills enabled. Apply them proactively when relevant:\n'];
+    const lines = ['\n## Active Skills\nYou have the following specialized skills enabled for this mode. Apply them proactively when relevant:\n'];
     for (const skill of skills) {
-        lines.push(`### ${skill.name}\n${skill.prompt}\n`);
+        lines.push(`### ${skill.name}${skill.system ? ' (System)' : ''}\n${skill.prompt}\n`);
     }
     return lines.join('\n');
 }

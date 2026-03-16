@@ -148,13 +148,23 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
     const [chats, setChats] = useState<CachedConv[]>([]);
     const [tick, setTick] = useState(0);
 
-    // Read from cache on every tick/mode change
+    // Read from cache, filter by mode
     useEffect(() => {
         const all = readFromCache();
-        // Show ALL conversations — no mode filtering (keeps it simple and reliable)
-        // Just sort by most recent and cap at MAX_RECENTS
-        const sorted = all
-            .filter(c => c.title && c.title !== 'New Chat')
+        const withMessages = all.filter(c => c.messages && Array.isArray(c.messages) && c.messages.length > 0);
+
+        // Filter by mode using scope field
+        const filtered = withMessages.filter(c => {
+            const scope = c.scope || 'general';
+            const hasProject = !!(c.projectName || c.projectId);
+
+            if (mode === 'projects') return hasProject || scope === 'project';
+            if (mode === 'workpal') return scope === 'workpal' || scope === 'workmate';
+            // OniChat: general scope without project
+            return (scope === 'general' || !scope) && !hasProject;
+        });
+
+        const sorted = filtered
             .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
             .slice(0, MAX_RECENTS);
         setChats(sorted);
@@ -198,13 +208,9 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
             </div>
             <div className="sidebar-recents-list">
                 {chats.map(c => (
-                    <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Untitled'}>
-                        <div className="sidebar-recent-title">{c.title || 'Untitled'}</div>
-                        <div className="sidebar-recent-meta">
-                            {c.projectName && <span className="sidebar-recent-project">{c.projectName}</span>}
-                            {c.scope === 'workpal' && <span className="sidebar-recent-workpal">Workpal</span>}
-                            <span className="sidebar-recent-time">{timeAgo(c.updatedAt || c.createdAt || 0)}</span>
-                        </div>
+                    <button key={c.id} className="sidebar-recent-item" onClick={() => handleClick(c.id)} title={c.title || 'Chat'}>
+                        <div className="sidebar-recent-title">{c.title || (c.messages && Array.isArray(c.messages) && c.messages.length > 0 ? String((c.messages[0] as Record<string, unknown>)?.content || '').slice(0, 40) : 'Chat')}</div>
+                        <span className="sidebar-recent-time">{timeAgo(c.updatedAt || c.createdAt || 0)}</span>
                     </button>
                 ))}
             </div>

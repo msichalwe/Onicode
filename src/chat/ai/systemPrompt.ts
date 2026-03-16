@@ -885,8 +885,8 @@ When you run \`run_command\` and get output:
 After completing a set of changes, call \`get_changelog()\` to see what was modified.
 When working in a project with \`.onidocs/changelog.md\`, append the auto-generated changelog to that file.`);
 
-    // ── Skills ──
-    const skillsPrompt = getEnabledSkillsPrompt();
+    // ── Skills (filtered by current mode) ──
+    const skillsPrompt = getEnabledSkillsPrompt(currentMode);
     if (skillsPrompt) {
         parts.push(skillsPrompt);
     }
