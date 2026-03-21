@@ -13,9 +13,10 @@ const { registerConnectorIPC } = require('./connectors');
 const { registerMemoryIPC, setMainWindow: setMemoryWindow, setAICallFunction: setMemoryAICall, commitSession: commitMemorySession, smartRetrieve, getRelatedMemories, trackMemoryAccess } = require('./memory');
 const { logger, registerLoggerIPC } = require('./logger');
 const { registerBrowserIPC } = require('./browser');
+const { registerBrowserAgentIPC, setAICallFunction: setBrowserAgentAICall, setMainWindow: setBrowserAgentWindow, setProviderConfig: setBrowserAgentProvider } = require('./browserAgent');
 const { registerHooksIPC, executeHook, getHooksSummary, loadHooks, setMainWindow: setHooksWindow } = require('./hooks');
 const { registerCommandsIPC, getCustomCommandsSummary, loadCustomCommands } = require('./commands');
-const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall } = require('./compactor');
+const { registerCompactorIPC, semanticCompact, setAICallFunction: setCompactorAICall, getCompactionThreshold, getModelContextWindow, getModelMaxOutput } = require('./compactor');
 const { TOOL_DEFINITIONS, executeTool, fileContext, listAgents, setMainWindow: setAIToolsWindow, getTerminalSessions, taskManager, setPermissions, setAgentModeRef, setDangerousProtectionCheck, setAutoCommitCheck, setAICallFunction, setLastProviderConfig, startSession, getSessionId, killBackgroundProcesses, getBackgroundProcesses, setAIStreamingActive, getCurrentProjectPath, resolveUserAnswer, resetThoughtChain, resolvePermissionApproval, SUB_AGENT_TOOL_SETS, getActiveToolDefinitions, loadToolCategories, resetLoadedTools, DEFERRED_TOOL_CATEGORIES, getPlanModeState, setPlanModeState, getWorktreeState } = require('./aiTools');
 const { closeDB } = require('./storage');
 const { registerLSPIPC, getLSPToolDefinitions, executeLSPTool } = require('./lsp');
@@ -25,6 +26,7 @@ const { registerMCPIPC, getMCPToolDefinitions, executeMCPTool, connectAllEnabled
 const { registerCatalogIPC, MCP_SEARCH_TOOL, executeMcpSearch } = require('./mcpCatalog');
 const { registerContextEngineIPC, getContextEngineToolDefinitions, executeContextEngineTool, buildDependencyGraph, preRetrieve, assemblePreRetrievedContext, startWatching, stopWatching } = require('./contextEngine');
 const { registerKeystoreIPC } = require('./keystore');
+const { registerVaultIPC } = require('./vault');
 const { registerSchedulerIPC, startSchedulerLoop, stopSchedulerLoop, getSchedulerToolDefinitions, executeSchedulerTool, setAICallFunction: setSchedulerAICall, setWorkflowExecutor: setSchedulerWorkflowExecutor, setWorkflowCreator: setSchedulerWorkflowCreator, setMainWindow: setSchedulerWindow, setSendAutomationMessage: setSchedulerAutomationMsg, setProviderConfig: setSchedulerProviderConfig } = require('./scheduler');
 const { registerWorkflowIPC, executeWorkflow, createWorkflow, ensureSystemWorkflow, isSystemWorkflow, getWorkflowToolDefinitions, executeWorkflowTool, setAICallFunction: setWorkflowAICall, setToolExecutor: setWorkflowToolExecutor, setToolSetResolver: setWorkflowToolSetResolver, setToolDefinitionsGetter: setWorkflowToolDefsGetter, setProviderConfig: setWorkflowProviderConfig, setMainWindow: setWorkflowWindow, sendAutomationMessage, setChatActive: setWorkflowChatActive, flushResultQueue: flushWorkflowResults } = require('./workflows');
 const { registerHeartbeatIPC, startHeartbeat, stopHeartbeat, ensureHeartbeatDefaults, getHeartbeatToolDefinitions, executeHeartbeatTool, setAICallFunction: setHeartbeatAICall, setWorkflowExecutor: setHeartbeatWorkflowExecutor, setMainWindow: setHeartbeatWindow, setProviderConfig: setHeartbeatProviderConfig, setSendAutomationMessage: setHeartbeatAutomationMsg } = require('./heartbeat');
@@ -78,6 +80,7 @@ function seedAllProviderConfigs(config) {
     setSchedulerProviderConfig(config);
     setHeartbeatProviderConfig(config);
     setChannelsProviderConfig(config);
+    setBrowserAgentProvider(config);
 }
 
 // ── Tool definition caching + smart filtering ──
@@ -132,6 +135,26 @@ function getActiveToolSets() {
     return sets;
 }
 
+// ── Schema Normalizer — ChatGPT Responses API requires additionalProperties: false + all keys in required ──
+function normalizeToolSchema(schema) {
+    if (!schema || typeof schema !== 'object') return schema;
+    if (schema.type === 'object') {
+        if (schema.properties) {
+            schema.additionalProperties = false;
+            schema.required = Object.keys(schema.properties);
+            for (const key of schema.required) normalizeToolSchema(schema.properties[key]);
+        } else {
+            // Object without explicit properties — ChatGPT rejects this.
+            // Convert to JSON-encoded string to pass validation.
+            schema.type = 'string';
+            if (!schema.description) schema.description = 'JSON-encoded object';
+            else schema.description += ' (as JSON string)';
+        }
+    }
+    if (schema.type === 'array' && schema.items) normalizeToolSchema(schema.items);
+    return schema;
+}
+
 function getAllToolDefinitions(options = {}) {
     const { full = false } = options;
     const mcpTools = getMCPToolDefinitions();
@@ -156,6 +179,11 @@ function getAllToolDefinitions(options = {}) {
         ...mcpTools,
         MCP_SEARCH_TOOL,
     ];
+
+    // Normalize ALL tool schemas for ChatGPT Responses API compatibility
+    for (const tool of allTools) {
+        if (tool.function?.parameters) normalizeToolSchema(tool.function.parameters);
+    }
 
     if (full) {
         _allToolsCache = allTools;
@@ -302,6 +330,7 @@ function createWindow() {
     setMemoryWindow(mainWindow);
     setHooksWindow(mainWindow);
     setCtxModeWindow(mainWindow);
+    setBrowserAgentWindow(mainWindow);
 
     // Wire orchestrator dependencies
     setOrchestratorDeps({
@@ -377,6 +406,65 @@ function streamToolCall(data, requestId) {
 }
 function streamToolResult(data, requestId) {
     mainWindow?.webContents.send('ai-tool-result', { ...data, requestId: requestId || currentRequestId });
+}
+
+// ── Rate Limit Helpers ──
+function parseRateLimitInfo(bodyText, headers) {
+    const info = { provider: 'unknown', resetsAt: null, resetsInSeconds: null, planType: null, message: null };
+    // Parse response body
+    try {
+        const body = typeof bodyText === 'string' ? JSON.parse(bodyText) : null;
+        if (body?.error) {
+            info.message = body.error.message || null;
+            info.planType = body.error.plan_type || null;
+            if (body.error.resets_at) info.resetsAt = body.error.resets_at * 1000; // convert to ms
+            if (body.error.resets_in_seconds) info.resetsInSeconds = body.error.resets_in_seconds;
+        }
+    } catch {}
+    // Parse headers (Anthropic uses retry-after, OpenAI uses x-ratelimit-reset-*)
+    if (headers) {
+        const getHeader = (name) => headers.get ? headers.get(name) : headers[name];
+        const retryAfter = getHeader('retry-after');
+        if (retryAfter && !info.resetsInSeconds) info.resetsInSeconds = parseInt(retryAfter, 10);
+        const resetMs = getHeader('x-ratelimit-reset-requests') || getHeader('x-ratelimit-reset-tokens');
+        if (resetMs && !info.resetsInSeconds) {
+            // Format: "1s" or "2m30s" or "1h"
+            const match = String(resetMs).match(/(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/);
+            if (match) info.resetsInSeconds = (parseInt(match[1] || '0') * 3600) + (parseInt(match[2] || '0') * 60) + parseInt(match[3] || '0');
+        }
+    }
+    // Compute resetsAt from resetsInSeconds if not present
+    if (!info.resetsAt && info.resetsInSeconds) info.resetsAt = Date.now() + info.resetsInSeconds * 1000;
+    return info;
+}
+
+function formatRateLimitError(info) {
+    let msg = 'Rate limited (429).';
+    if (info.planType) msg += ` Plan: ${info.planType}.`;
+    if (info.resetsInSeconds) {
+        const hrs = Math.floor(info.resetsInSeconds / 3600);
+        const mins = Math.floor((info.resetsInSeconds % 3600) / 60);
+        const secs = info.resetsInSeconds % 60;
+        const parts = [];
+        if (hrs > 0) parts.push(`${hrs}h`);
+        if (mins > 0) parts.push(`${mins}m`);
+        if (secs > 0 && hrs === 0) parts.push(`${secs}s`);
+        msg += ` Resets in ${parts.join(' ')}.`;
+    } else if (info.resetsAt) {
+        msg += ` Resets at ${new Date(info.resetsAt).toLocaleTimeString()}.`;
+    }
+    return msg;
+}
+
+function emitRateLimited(info) {
+    console.log(`[AI] Rate limited — resets in ${info.resetsInSeconds || '?'}s, plan: ${info.planType || 'unknown'}`);
+    mainWindow?.webContents.send('ai-rate-limited', {
+        resetsAt: info.resetsAt,
+        resetsInSeconds: info.resetsInSeconds,
+        planType: info.planType,
+        message: info.message,
+        timestamp: Date.now(),
+    });
 }
 
 ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
@@ -474,13 +562,65 @@ ipcMain.handle('ai-send-message', async (_event, messages, providerConfig) => {
     }
 });
 
-/** Convert Chat Completions tool defs to Responses API format */
+/**
+ * Enforce strict mode on a JSON Schema parameter object.
+ * Required for OpenAI structured outputs: additionalProperties: false,
+ * all properties in required, optional types become unions with null.
+ */
+function enforceStrictSchema(params) {
+    if (!params || typeof params !== 'object') return params;
+    const result = { ...params };
+    if (result.type === 'object' && result.properties) {
+        result.additionalProperties = false;
+        // Ensure all properties are in required
+        const allProps = Object.keys(result.properties);
+        if (!result.required) result.required = allProps;
+        else {
+            const reqSet = new Set(result.required);
+            for (const prop of allProps) {
+                if (!reqSet.has(prop)) {
+                    result.required.push(prop);
+                    // Make optional params nullable
+                    const propSchema = result.properties[prop];
+                    if (propSchema && !Array.isArray(propSchema.type) && propSchema.type) {
+                        result.properties = { ...result.properties };
+                        result.properties[prop] = { ...propSchema, type: [propSchema.type, 'null'] };
+                    }
+                }
+            }
+        }
+        // Recursively enforce on nested objects
+        const newProps = { ...result.properties };
+        for (const [key, val] of Object.entries(newProps)) {
+            if (val && typeof val === 'object' && val.type === 'object') {
+                newProps[key] = enforceStrictSchema(val);
+            }
+        }
+        result.properties = newProps;
+    }
+    return result;
+}
+
+/** Convert Chat Completions tool defs to Responses API format with strict mode */
 function toResponsesAPITools(toolDefs) {
     return toolDefs.map(t => ({
         type: 'function',
         name: t.function.name,
         description: t.function.description,
-        parameters: t.function.parameters,
+        parameters: enforceStrictSchema(t.function.parameters),
+        strict: true,
+    }));
+}
+
+/** Add strict: true to Chat Completions format tool definitions (for OpenAI only) */
+function addStrictToTools(toolDefs) {
+    return toolDefs.map(t => ({
+        ...t,
+        function: {
+            ...t.function,
+            parameters: enforceStrictSchema(t.function.parameters),
+            strict: true,
+        },
     }));
 }
 
@@ -532,6 +672,11 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
         try { const errJson = JSON.parse(errText); errorMsg = errJson.error?.message || errJson.detail || errorMsg; } catch { }
         if (response.status === 401) errorMsg = 'OAuth token expired. Go to Settings and sign in again.';
         if (response.status === 403) errorMsg = 'Access denied. Your ChatGPT subscription may not include this model.';
+        if (response.status === 429) {
+            const rlInfo = parseRateLimitInfo(errText, response.headers);
+            emitRateLimited(rlInfo);
+            errorMsg = formatRateLimitError(rlInfo);
+        }
         console.error('[AI] ChatGPT backend error:', response.status, errText.slice(0, 500));
         throw new Error(errorMsg);
     }
@@ -603,6 +748,301 @@ async function streamChatGPTSingle(inputItems, instructions, accessToken, accoun
 
     currentAIRequest = null;
     return { content: textContent, functionCalls: [...functionCalls.values()] };
+}
+
+// ══════════════════════════════════════════
+//  Responses API for API Key Users (GPT-5.x)
+// ══════════════════════════════════════════
+
+/** Track previous_response_id for cache improvement (40-80% savings) */
+let _previousResponseId = null;
+
+/**
+ * Single streaming Responses API call for sk- API key users.
+ * Uses api.openai.com/v1/responses instead of /v1/chat/completions.
+ * Includes native web_search_preview and code_interpreter built-in tools.
+ *
+ * Returns { textContent, toolCalls, hasToolCalls, responseId, builtinResults } or { error }
+ */
+async function streamResponsesAPISingle(inputItems, instructions, providerConfig, includeTools = true, forceToolChoice = false) {
+    const model = providerConfig.selectedModel || 'gpt-5.4';
+    const isOModel = model.startsWith('o');
+    const reasoningEffort = providerConfig.reasoningEffort || 'medium';
+
+    const bodyObj = {
+        model,
+        instructions,
+        input: inputItems,
+        stream: true,
+        store: false,
+    };
+
+    // Apply reasoning effort for models that support it
+    if (reasoningEffort && reasoningEffort !== 'medium') {
+        bodyObj.reasoning = { effort: reasoningEffort };
+    }
+
+    // Build tools array: custom function tools + built-in tools
+    if (includeTools && !isOModel) {
+        const customTools = toResponsesAPITools(getAllToolDefinitions());
+
+        // Add native built-in tools for GPT-5.x models
+        const builtinTools = [];
+        builtinTools.push({ type: 'web_search_preview' });
+        builtinTools.push({
+            type: 'code_interpreter',
+            container: { type: 'auto' },
+        });
+
+        bodyObj.tools = [...customTools, ...builtinTools];
+
+        if (forceToolChoice) {
+            bodyObj.tool_choice = 'required';
+        }
+    }
+
+    // Cache optimization: pass previous_response_id for 40-80% token savings
+    if (_previousResponseId) {
+        bodyObj.previous_response_id = _previousResponseId;
+    }
+
+    const maxOutput = getModelMaxOutput(model);
+    bodyObj.max_output_tokens = maxOutput;
+
+    const abortController = new AbortController();
+    currentAIRequest = abortController;
+
+    try {
+        const response = await net.fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${providerConfig.apiKey}`,
+                'accept': 'text/event-stream',
+            },
+            body: JSON.stringify(bodyObj),
+            signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+            const errText = await response.text().catch(() => '');
+            currentAIRequest = null;
+            let errorMsg = `OpenAI Responses API returned HTTP ${response.status}`;
+            try {
+                const errJson = JSON.parse(errText);
+                errorMsg = errJson.error?.message || errJson.detail || errorMsg;
+            } catch { }
+            if (response.status === 401) errorMsg = 'API key invalid or expired (401). Check your key in Settings.';
+            if (response.status === 403) errorMsg = `Access denied for model "${model}". Your API plan may not include this model.`;
+            if (response.status === 429) {
+                const rlInfo = parseRateLimitInfo(errText, response.headers);
+                emitRateLimited(rlInfo);
+                errorMsg = formatRateLimitError(rlInfo);
+            }
+            console.error('[AI] Responses API error:', response.status, errText.slice(0, 500));
+            throw new Error(errorMsg);
+        }
+
+        // Parse SSE stream — same format as OAuth Responses API path
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let textContent = '';
+        const functionCalls = new Map(); // item_id -> { call_id, name, arguments }
+        let currentFnItemId = null;
+        let responseId = null;
+        const builtinResults = []; // web search citations, code interpreter output
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || !trimmed.startsWith('data: ')) continue;
+                const dataStr = trimmed.slice(6);
+                if (dataStr === '[DONE]') continue;
+                try {
+                    const json = JSON.parse(dataStr);
+
+                    // Capture response ID for caching
+                    if (json.type === 'response.created' && json.response?.id) {
+                        responseId = json.response.id;
+                    }
+
+                    // Text delta
+                    if (json.type === 'response.output_text.delta' && json.delta) {
+                        textContent += json.delta;
+                        streamChunk(json.delta);
+                    }
+
+                    // Function call started
+                    if (json.type === 'response.output_item.added' && json.item?.type === 'function_call') {
+                        const item = json.item;
+                        currentFnItemId = item.id || json.output_index;
+                        functionCalls.set(currentFnItemId, {
+                            call_id: item.call_id,
+                            name: item.name,
+                            arguments: '',
+                        });
+                    }
+
+                    // Function call arguments delta
+                    if (json.type === 'response.function_call_arguments.delta' && json.delta) {
+                        const itemId = json.item_id || currentFnItemId;
+                        const fn = functionCalls.get(itemId);
+                        if (fn) fn.arguments += json.delta;
+                    }
+
+                    // Function call arguments done
+                    if (json.type === 'response.function_call_arguments.done') {
+                        const itemId = json.item_id || currentFnItemId;
+                        const fn = functionCalls.get(itemId);
+                        if (fn && json.arguments) fn.arguments = json.arguments;
+                    }
+
+                    // Web search result — stream status to renderer
+                    if (json.type === 'response.output_item.added' && json.item?.type === 'web_search_call') {
+                        mainWindow?.webContents.send('ai-builtin-tool-status', {
+                            type: 'web_search',
+                            status: 'searching',
+                            query: json.item.query || '',
+                        });
+                    }
+
+                    // Web search completed
+                    if (json.type === 'response.output_item.done' && json.item?.type === 'web_search_call') {
+                        mainWindow?.webContents.send('ai-builtin-tool-status', {
+                            type: 'web_search',
+                            status: 'done',
+                        });
+                    }
+
+                    // Code interpreter started
+                    if (json.type === 'response.output_item.added' && json.item?.type === 'code_interpreter_call') {
+                        mainWindow?.webContents.send('ai-builtin-tool-status', {
+                            type: 'code_interpreter',
+                            status: 'running',
+                        });
+                    }
+
+                    // Code interpreter completed
+                    if (json.type === 'response.output_item.done' && json.item?.type === 'code_interpreter_call') {
+                        const item = json.item;
+                        mainWindow?.webContents.send('ai-builtin-tool-status', {
+                            type: 'code_interpreter',
+                            status: 'done',
+                            output: item.output || '',
+                        });
+                        builtinResults.push({
+                            type: 'code_interpreter',
+                            code: item.input || '',
+                            output: item.output || '',
+                        });
+                    }
+
+                    // Capture inline citations from web search
+                    if (json.type === 'response.output_text.annotation.added' && json.annotation?.type === 'url_citation') {
+                        builtinResults.push({
+                            type: 'citation',
+                            url: json.annotation.url || '',
+                            title: json.annotation.title || '',
+                        });
+                    }
+
+                } catch { /* skip unparseable SSE lines */ }
+            }
+        }
+
+        currentAIRequest = null;
+
+        // Update previous_response_id for next call (40-80% cache savings)
+        if (responseId) {
+            _previousResponseId = responseId;
+        }
+
+        // Convert function calls to same format as streamOpenAISingle for compatibility
+        const toolCallsArray = [...functionCalls.values()].map(fn => ({
+            id: fn.call_id,
+            name: fn.name,
+            arguments: fn.arguments,
+        }));
+
+        return {
+            textContent,
+            toolCalls: toolCallsArray,
+            hasToolCalls: toolCallsArray.length > 0,
+            finishReason: toolCallsArray.length > 0 ? 'tool_calls' : 'stop',
+            responseId,
+            builtinResults,
+        };
+    } catch (err) {
+        currentAIRequest = null;
+        if (err.name === 'AbortError') return { textContent: '', toolCalls: [], hasToolCalls: false, error: null };
+        return { error: err.message };
+    }
+}
+
+/**
+ * Convert Chat Completions messages array to Responses API input items.
+ * Chat Completions format: { role, content, tool_calls, tool_call_id, name }
+ * Responses API format: { role, content } | { type: 'function_call', ... } | { type: 'function_call_output', ... }
+ */
+function convertMessagesToInputItems(messages) {
+    const items = [];
+    for (const msg of messages) {
+        if (msg.role === 'system') {
+            // System messages go into instructions, skip here
+            continue;
+        }
+        if (msg.role === 'user') {
+            items.push({ role: 'user', content: msg.content || '' });
+        }
+        if (msg.role === 'assistant') {
+            // Text content as message
+            if (msg.content) {
+                items.push({ role: 'assistant', content: msg.content });
+            }
+            // Tool calls as function_call items
+            if (Array.isArray(msg.tool_calls)) {
+                for (const tc of msg.tool_calls) {
+                    items.push({
+                        type: 'function_call',
+                        id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                        call_id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                        name: tc.function?.name || '',
+                        arguments: tc.function?.arguments || '{}',
+                    });
+                }
+            }
+        }
+        if (msg.role === 'tool') {
+            items.push({
+                type: 'function_call_output',
+                call_id: msg.tool_call_id,
+                output: msg.content || '',
+            });
+        }
+    }
+    return items;
+}
+
+/**
+ * Check if a model should use the Responses API instead of Chat Completions.
+ * GPT-5.x models benefit from built-in tools (web search, code interpreter)
+ * and the stateful response caching via previous_response_id.
+ */
+function shouldUseResponsesAPI(model, providerConfig) {
+    // Only for OpenAI API key users (not OAuth, not gateways, not Ollama)
+    if (providerConfig.id !== 'codex' && providerConfig.id !== 'openai') return false;
+    if (!providerConfig.apiKey?.trim()) return false;
+    // Only for models that support the Responses API well
+    if (!model) return false;
+    return model.startsWith('gpt-5') || model.startsWith('gpt-4.1') || model.startsWith('o3') || model.startsWith('o4');
 }
 
 /**
@@ -939,9 +1379,10 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                     if (item.output) return sum + item.output.length;
                     return sum + (JSON.stringify(item).length);
                 }, 0);
-                const estTokens = totalChars / 4;
-                if (estTokens > 80000) {
-                    logger.info('compaction', `ChatGPT backend auto-compact at round ${round}, ~${Math.round(estTokens)} tokens, ${inputItems.length} items`);
+                const estTokens = totalChars / 3.8;
+                const compactThreshold = getCompactionThreshold(model);
+                if (estTokens > compactThreshold) {
+                    logger.info('compaction', `ChatGPT backend auto-compact at round ${round}, ~${Math.round(estTokens)} tokens (threshold: ${compactThreshold}), ${inputItems.length} items`);
                     // Context mode: save resume snapshot before compaction
                     try { ctxOnPreCompact(getSessionId()); } catch {}
                     const keepLast = 20;
@@ -1127,42 +1568,42 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
             }
 
             mainWindow?.webContents.send('ai-agent-step', { round, status: 'executing' });
-            for (const fn of result.functionCalls) {
+
+            // ── Parallel sub-agent execution (OAuth/Responses API path) ──
+            const PARALLEL_TOOLS_OAUTH = new Set(['spawn_sub_agent', 'browser_agent_run', 'orchestrate', 'spawn_specialist']);
+
+            const parsedFnCalls = result.functionCalls.map(fn => {
                 let args = {};
                 try {
                     args = JSON.parse(fn.arguments);
                 } catch (parseErr) {
                     logger.warn('tool-args', `Malformed JSON in ${fn.name} tool call: ${fn.arguments?.slice(0, 200)}`);
-                    // Try to salvage — common issue is trailing garbage from streaming
                     const cleaned = (fn.arguments || '').replace(/[}\]]*\s*,?\s*\{[^}]*$/g, '').trim();
                     try { args = JSON.parse(cleaned.endsWith('}') ? cleaned : cleaned + '}'); } catch { }
                 }
+                return { fn, args, isParallel: PARALLEL_TOOLS_OAUTH.has(fn.name) };
+            });
 
+            const parallelFnCalls = parsedFnCalls.filter(p => p.isParallel);
+            const sequentialFnCalls = parsedFnCalls.filter(p => !p.isParallel);
+            const shouldParallelizeFn = parallelFnCalls.length >= 2;
+
+            async function executeSingleFnTool({ fn, args }) {
                 toolsUsed.add(fn.name);
-
-                streamToolCall( {
-                    id: fn.call_id,
-                    name: fn.name,
-                    args,
-                    round,
-                });
+                streamToolCall({ id: fn.call_id, name: fn.name, args, round });
 
                 logger.toolCall(fn.name, args, round);
                 let toolResult;
                 if (fn.name === 'init_project' && _currentProjectPath) {
-                    // Only block if AI is trying to re-init the SAME project path
                     const requestedPath = (args.projectPath || '').replace(/^~/, os.homedir());
                     const isSamePath = requestedPath && path.resolve(requestedPath) === path.resolve(_currentProjectPath);
                     if (isSamePath) {
                         logger.warn('agent-loop', `Blocked duplicate init_project — same path already active: ${_currentProjectPath}`);
                         toolResult = {
-                            success: true,
-                            already_registered: true,
-                            project_path: _currentProjectPath,
-                            message: `This project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
+                            success: true, already_registered: true, project_path: _currentProjectPath,
+                            message: `This project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again.`,
                         };
                     } else {
-                        // Different project — allow it, clear old project state
                         logger.info('agent-loop', `Switching from ${_currentProjectPath} to new project: ${requestedPath}`);
                         toolResult = await executeAnyTool(fn.name, args);
                     }
@@ -1171,42 +1612,53 @@ async function streamChatGPTBackend(messages, accessToken, selectedModel, projec
                 }
                 logger.toolResult(fn.name, toolResult, round);
 
-                // Context mode: track tool completion for session events + auto-indexing
                 try { ctxOnToolComplete(fn.name, args, toolResult, getSessionId()); } catch {}
 
-                // Track browser_navigate failures — block AI from calling it again after 3 cumulative failures
-                // (Note: aiTools.js already retries internally up to 3 times with progressive delays)
                 if (fn.name === 'browser_navigate') {
                     if (toolResult?.error && /ECONNREFUSED|CONNECTION_REFUSED|ERR_CONNECTION_REFUSED/i.test(toolResult.error)) {
                         _browserNavFailures++;
                         if (_browserNavFailures >= 3) {
-                            toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times with CONNECTION_REFUSED (including internal retries). The dev server is not running or crashed. Do NOT call browser_navigate again — skip browser testing and move on.';
-                            logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times (cumulative) — injecting stop-retry directive`);
+                            toolResult.STOP_RETRYING = 'Browser navigation has failed multiple times. Do NOT call browser_navigate again.';
                         }
                     } else if (!toolResult?.error) {
-                        _browserNavFailures = 0; // Reset on success
+                        _browserNavFailures = 0;
                     }
                 }
 
-                streamToolResult( {
-                    id: fn.call_id,
-                    name: fn.name,
-                    result: toolResult,
-                    round,
-                });
+                streamToolResult({ id: fn.call_id, name: fn.name, result: toolResult, round });
+                return { fn, args, toolResult };
+            }
 
-                // Add function call + result to input for next round
-                inputItems.push({
-                    type: 'function_call',
-                    call_id: fn.call_id,
-                    name: fn.name,
-                    arguments: fn.arguments,
-                });
-                inputItems.push({
-                    type: 'function_call_output',
-                    call_id: fn.call_id,
-                    output: JSON.stringify(toolResult).slice(0, 16000),
-                });
+            const allFnResults = [];
+            if (shouldParallelizeFn) {
+                for (const call of sequentialFnCalls) {
+                    allFnResults.push(await executeSingleFnTool(call));
+                }
+                logger.info('agent-loop', `Executing ${parallelFnCalls.length} sub-agents in parallel`);
+                const pResults = await Promise.all(parallelFnCalls.map(call => executeSingleFnTool(call)));
+                allFnResults.push(...pResults);
+            } else {
+                for (const call of parsedFnCalls) {
+                    allFnResults.push(await executeSingleFnTool(call));
+                }
+            }
+
+            // Add results to input in original order
+            for (const parsed of parsedFnCalls) {
+                const executed = allFnResults.find(r => r.fn.call_id === parsed.fn.call_id);
+                if (executed) {
+                    inputItems.push({
+                        type: 'function_call',
+                        call_id: executed.fn.call_id,
+                        name: executed.fn.name,
+                        arguments: executed.fn.arguments,
+                    });
+                    inputItems.push({
+                        type: 'function_call_output',
+                        call_id: executed.fn.call_id,
+                        output: JSON.stringify(executed.toolResult).slice(0, 16000),
+                    });
+                }
             }
 
             // ── Track tool-only rounds and inject synthetic status every 3 rounds ──
@@ -1359,7 +1811,10 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
     // Add tools for function calling (skip for o-models which may not support tools well)
     const hasTools = includeTools && !isOModel;
     if (hasTools) {
-        bodyObj.tools = getAllToolDefinitions();
+        const rawTools = getAllToolDefinitions();
+        // Apply structured outputs (strict: true) for OpenAI models only
+        const isOpenAI = providerConfig.id === 'codex' || providerConfig.id === 'openai';
+        bodyObj.tools = isOpenAI ? addStrictToTools(rawTools) : rawTools;
         bodyObj.tool_choice = forceToolChoice ? 'required' : 'auto';
     }
 
@@ -1369,8 +1824,10 @@ function streamOpenAISingle(messages, providerConfig, includeTools = true, force
         bodyObj.reasoning_effort = reasoningEffort;
     }
 
-    if (useCompletionTokens) bodyObj.max_completion_tokens = 16384;
-    else bodyObj.max_tokens = 16384;
+    // Model-aware max output tokens
+    const maxOutput = getModelMaxOutput(model);
+    if (useCompletionTokens) bodyObj.max_completion_tokens = maxOutput;
+    else bodyObj.max_tokens = maxOutput;
 
     const bodyStr = JSON.stringify(bodyObj);
 
@@ -1623,7 +2080,11 @@ function streamAnthropicSingle(messages, providerConfig, includeTools = true) {
                         let errorMsg = `HTTP ${res.statusCode}`;
                         try { errorMsg = JSON.parse(data).error?.message || errorMsg; } catch { }
                         if (res.statusCode === 401) errorMsg = 'Authentication failed (401). Check your Anthropic API key.';
-                        if (res.statusCode === 429) errorMsg = 'Rate limited by Anthropic. Wait a moment and try again.';
+                        if (res.statusCode === 429) {
+                            const rlInfo = parseRateLimitInfo(data, res.headers);
+                            emitRateLimited(rlInfo);
+                            errorMsg = formatRateLimitError(rlInfo);
+                        }
                         console.error('[AI] Anthropic API error:', res.statusCode, data.slice(0, 200));
                         resolve({ error: errorMsg });
                     });
@@ -1933,7 +2394,11 @@ async function makeSubAgentOAuthCall(messages, providerConfig, toolOverrides) {
         if (!response.ok) {
             const errText = await response.text().catch(() => '');
             if (response.status === 401) return { error: 'OAuth token expired. Re-authenticate in Settings.' };
-            if (response.status === 429) return { error: 'Rate limited. Try again in a moment.' };
+            if (response.status === 429) {
+                const rlInfo = parseRateLimitInfo(errText, response.headers);
+                emitRateLimited(rlInfo);
+                return { error: formatRateLimitError(rlInfo) };
+            }
             let errorMsg = `ChatGPT backend error: ${response.status}`;
             try { const errJson = JSON.parse(errText); errorMsg = errJson.error?.message || errJson.detail || errorMsg; } catch {}
             return { error: errorMsg };
@@ -2036,8 +2501,10 @@ function makeSubAgentCompletionsCall(messages, providerConfig, toolOverrides) {
         bodyObj.tool_choice = 'auto';
     }
 
-    if (useCompletionTokens) bodyObj.max_completion_tokens = 16384;
-    else bodyObj.max_tokens = 16384;
+    // Model-aware max output tokens for sub-agents
+    const subMaxOutput = getModelMaxOutput(model);
+    if (useCompletionTokens) bodyObj.max_completion_tokens = subMaxOutput;
+    else bodyObj.max_tokens = subMaxOutput;
 
     let endpoint;
     if (providerConfig.id === 'codex' || providerConfig.id === 'openai') {
@@ -2114,6 +2581,7 @@ setMemoryAICall(makeSubAgentAICall);
 setSchedulerAICall(makeSubAgentAICall);
 setWorkflowAICall(makeSubAgentAICall);
 setHeartbeatAICall(makeSubAgentAICall);
+setBrowserAgentAICall(makeSubAgentAICall);
 // Channels AI routing goes through ChatView — no direct AI call needed
 
 /**
@@ -2121,10 +2589,10 @@ setHeartbeatAICall(makeSubAgentAICall);
  * Keeps the system prompt and last N messages, replaces the middle with a summary.
  * Inspired by OpenCode's compaction agent.
  */
-function compactConversation(messages, maxTokenEstimate = 180000) {
-    // Rough token estimate: ~4 chars per token
+function compactConversation(messages, maxTokenEstimate = 500000) {
+    // Token estimate: ~3.8 chars per token for GPT-5.x cl200k_base tokenizer
     const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0) + JSON.stringify(m.tool_calls || '').length, 0);
-    const estimatedTokens = totalChars / 4;
+    const estimatedTokens = totalChars / 3.8;
 
     if (estimatedTokens < maxTokenEstimate * 0.8) return messages; // Under 80%, no compaction needed
 
@@ -2387,12 +2855,13 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
         round++;
 
         // Auto-compact conversation if it's getting too long
-        // Check actual token estimate before compacting
+        // Check actual token estimate before compacting — model-aware threshold
         if (round > 3) {
             const totalChars = conversationMessages.reduce((sum, m) => sum + (m.content?.length || 0) + JSON.stringify(m.tool_calls || '').length, 0);
-            const estTokens = totalChars / 4;
-            if (estTokens > 80000) {
-                logger.info('compaction', `Auto-compact triggered at round ${round}, ~${Math.round(estTokens)} tokens`);
+            const estTokens = totalChars / 3.8;
+            const compactThreshold = getCompactionThreshold(providerConfig.selectedModel || 'gpt-5.4');
+            if (estTokens > compactThreshold) {
+                logger.info('compaction', `Auto-compact triggered at round ${round}, ~${Math.round(estTokens)} tokens (threshold: ${compactThreshold})`);
                 // PreCompact hook + context mode snapshot
                 try { executeHook('PreCompact', { projectDir: projectPath || '' }); } catch {}
                 try { ctxOnPreCompact(getSessionId()); } catch {}
@@ -2419,9 +2888,17 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
         const TRANSIENT_ERRORS = ['ERR_QUIC_PROTOCOL_ERROR', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_CONNECTION_RESET', 'ERR_NETWORK_CHANGED', 'EPIPE', 'socket hang up', 'network error'];
         const MAX_RETRIES = 2;
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            result = backend === 'anthropic'
-                ? await streamAnthropicSingle(conversationMessages, providerConfig, includeTools)
-                : await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
+            if (backend === 'anthropic') {
+                result = await streamAnthropicSingle(conversationMessages, providerConfig, includeTools);
+            } else if (shouldUseResponsesAPI(providerConfig.selectedModel || 'gpt-5.4', providerConfig)) {
+                // GPT-5.x with API key → Responses API (built-in tools, caching)
+                const systemText = conversationMessages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+                const inputItems = convertMessagesToInputItems(conversationMessages);
+                result = await streamResponsesAPISingle(inputItems, systemText, providerConfig, includeTools, forceTools);
+            } else {
+                // Fallback: Chat Completions API (Ollama, gateways, older models)
+                result = await streamOpenAISingle(conversationMessages, providerConfig, includeTools, forceTools);
+            }
             if (!result.error) break;
             const isTransient = TRANSIENT_ERRORS.some(e => result.error.includes(e));
             if (!isTransient || attempt === MAX_RETRIES) break;
@@ -2589,34 +3066,42 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
         }));
         conversationMessages.push(assistantMsg);
 
-        // Execute each tool call
-        for (const tc of result.toolCalls) {
+        // ── Execute tool calls — parallel for sub-agents, sequential for everything else ──
+        // Tools that can safely run concurrently (independent AI sub-processes)
+        const PARALLEL_TOOLS = new Set(['spawn_sub_agent', 'browser_agent_run', 'orchestrate', 'spawn_specialist']);
+
+        // Parse all tool call arguments first
+        const parsedCalls = result.toolCalls.map(tc => {
             let args;
             try {
                 args = JSON.parse(tc.arguments);
             } catch (parseErr) {
                 logger.warn('tool-args', `Malformed JSON in ${tc.name} tool call: ${tc.arguments?.slice(0, 200)}`);
-                // Try to salvage — common issue is trailing garbage from streaming
                 const cleaned = (tc.arguments || '').replace(/[}\]]*\s*,?\s*\{[^}]*$/g, '').trim();
                 try { args = JSON.parse(cleaned.endsWith('}') ? cleaned : cleaned + '}'); } catch { args = {}; }
             }
+            return { tc, args, isParallel: PARALLEL_TOOLS.has(tc.name) };
+        });
 
-            // Track tool types used
+        // Check if we have multiple parallel-eligible tools in this batch
+        const parallelCalls = parsedCalls.filter(p => p.isParallel);
+        const sequentialCalls = parsedCalls.filter(p => !p.isParallel);
+        const shouldParallelize = parallelCalls.length >= 2;
+
+        /**
+         * Execute a single tool call and handle all side effects.
+         * Returns { tc, args, toolResult } for later conversation assembly.
+         */
+        async function executeSingleTool({ tc, args }) {
             toolsUsed.add(tc.name);
 
             // Notify renderer: tool call starting
-            streamToolCall( {
-                id: tc.id,
-                name: tc.name,
-                args,
-                round,
-            });
+            streamToolCall({ id: tc.id, name: tc.name, args, round });
 
             // Execute the tool (with init_project guard)
             logger.toolCall(tc.name, args, round);
             let toolResult;
             if (tc.name === 'init_project' && _currentProjectPath) {
-                // Only block if AI is trying to re-init the SAME project path
                 const requestedPath = (args.projectPath || '').replace(/^~/, os.homedir());
                 const isSamePath = requestedPath && path.resolve(requestedPath) === path.resolve(_currentProjectPath);
                 if (isSamePath) {
@@ -2628,7 +3113,6 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
                         message: `This project is ALREADY initialized at ${_currentProjectPath}. Do NOT call init_project again. Proceed directly with task_add to plan tasks, then create_file to build.`,
                     };
                 } else {
-                    // Different project — allow it, clear old project state
                     logger.info('agent-loop', `Switching from ${_currentProjectPath} to new project: ${requestedPath}`);
                     toolResult = await executeAnyTool(tc.name, args);
                 }
@@ -2637,11 +3121,10 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
             }
             logger.toolResult(tc.name, toolResult, round);
 
-            // Context mode: track tool completion for session events + auto-indexing
+            // Context mode tracking
             try { ctxOnToolComplete(tc.name, args, toolResult, getSessionId()); } catch {}
 
-            // Track browser_navigate failures — block AI from calling it again after 3 cumulative failures
-            // (Note: aiTools.js already retries internally up to 3 times with progressive delays)
+            // Browser nav failure tracking
             if (tc.name === 'browser_navigate') {
                 if (toolResult?.error && /ECONNREFUSED|CONNECTION_REFUSED|ERR_CONNECTION_REFUSED/i.test(toolResult.error)) {
                     _browserNavFailures++;
@@ -2650,24 +3133,48 @@ async function _streamAgenticLoop(messages, providerConfig, projectPath, backend
                         logger.warn('browser', `browser_navigate failed ${_browserNavFailures} times (cumulative) — injecting stop-retry directive`);
                     }
                 } else if (!toolResult?.error) {
-                    _browserNavFailures = 0; // Reset on success
+                    _browserNavFailures = 0;
                 }
             }
 
             // Notify renderer: tool result
-            streamToolResult( {
-                id: tc.id,
-                name: tc.name,
-                result: toolResult,
-                round,
-            });
+            streamToolResult({ id: tc.id, name: tc.name, result: toolResult, round });
 
-            // Add tool result to conversation
-            conversationMessages.push({
-                role: 'tool',
-                tool_call_id: tc.id,
-                content: JSON.stringify(toolResult),
-            });
+            return { tc, args, toolResult };
+        }
+
+        // Execute tools — parallel sub-agents, sequential everything else
+        const allResults = []; // Maintain original order for conversation messages
+
+        if (shouldParallelize) {
+            // Run sequential tools first (file ops, etc.)
+            for (const call of sequentialCalls) {
+                allResults.push(await executeSingleTool(call));
+            }
+
+            // Run all parallel tools concurrently
+            logger.info('agent-loop', `Executing ${parallelCalls.length} sub-agents in parallel: ${parallelCalls.map(p => p.tc.name).join(', ')}`);
+            const parallelResults = await Promise.all(
+                parallelCalls.map(call => executeSingleTool(call))
+            );
+            allResults.push(...parallelResults);
+        } else {
+            // Standard sequential execution
+            for (const call of parsedCalls) {
+                allResults.push(await executeSingleTool(call));
+            }
+        }
+
+        // Add all tool results to conversation in original tool_call order
+        for (const parsed of parsedCalls) {
+            const executed = allResults.find(r => r.tc.id === parsed.tc.id);
+            if (executed) {
+                conversationMessages.push({
+                    role: 'tool',
+                    tool_call_id: executed.tc.id,
+                    content: JSON.stringify(executed.toolResult),
+                });
+            }
         }
 
         // ── Track tool-only rounds and inject synthetic status every 3 rounds ──
@@ -3107,6 +3614,7 @@ registerConnectorIPC(ipcMain, () => mainWindow);
 registerMemoryIPC();
 registerLoggerIPC();
 registerBrowserIPC();
+registerBrowserAgentIPC(ipcMain);
 registerHooksIPC(ipcMain);
 registerCommandsIPC(ipcMain);
 registerCompactorIPC(ipcMain);
@@ -3118,6 +3626,7 @@ registerMCPIPC(ipcMain, () => mainWindow);
 registerCatalogIPC(ipcMain);
 registerChannelsIPC(ipcMain, () => mainWindow);
 registerKeystoreIPC(ipcMain);
+registerVaultIPC(ipcMain);
 registerSchedulerIPC(ipcMain, () => mainWindow);
 registerWorkflowIPC(ipcMain, () => mainWindow);
 registerHeartbeatIPC(ipcMain, () => mainWindow);

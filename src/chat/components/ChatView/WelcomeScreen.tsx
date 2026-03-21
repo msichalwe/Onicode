@@ -1,8 +1,37 @@
-import React from 'react';
-import { WELCOME_SUGGESTIONS } from './constants';
-import type { WelcomeScreenProps } from './types';
+import React, { useState, useEffect } from 'react';
+import { getWelcomePrompts } from './constants';
+import type { OnicodeMode } from '../../modes';
 
-export default function WelcomeScreen({ onSuggestionClick }: WelcomeScreenProps) {
+interface WelcomeScreenProps {
+    onSuggestionClick: (suggestion: string) => void;
+    mode?: OnicodeMode;
+}
+
+const MODE_TITLES: Record<OnicodeMode, { title: string; subtitle: string }> = {
+    onichat: {
+        title: 'Welcome to Onicode',
+        subtitle: 'Your AI-powered companion. Ask me anything — code, general questions, brainstorming, or open a project to start building.',
+    },
+    workpal: {
+        title: 'Workpal Mode',
+        subtitle: 'Your document and productivity assistant. Summarize files, draft emails, organize notes, and get work done faster.',
+    },
+    projects: {
+        title: 'Project Mode',
+        subtitle: 'Your software engineering partner. Write code, debug, refactor, test, and ship — all within your project context.',
+    },
+};
+
+export default function WelcomeScreen({ onSuggestionClick, mode = 'onichat' }: WelcomeScreenProps) {
+    // Shuffle prompts on mount and when mode changes
+    const [prompts, setPrompts] = useState(() => getWelcomePrompts(mode));
+
+    useEffect(() => {
+        setPrompts(getWelcomePrompts(mode));
+    }, [mode]);
+
+    const { title, subtitle } = MODE_TITLES[mode] || MODE_TITLES.onichat;
+
     return (
         <div className="welcome">
             <div className="welcome-logo">
@@ -14,16 +43,13 @@ export default function WelcomeScreen({ onSuggestionClick }: WelcomeScreenProps)
                     <circle cx="512" cy="512" r="28" fill="#fff" opacity="0.85"/>
                 </svg>
             </div>
-            <h2>Welcome to Onicode</h2>
-            <p>
-                Your AI-powered development companion. Ask me anything — code,
-                general questions, brainstorming, or open a project to start building.
-            </p>
+            <h2>{title}</h2>
+            <p>{subtitle}</p>
             <div className="welcome-hints">
                 Type <code>/help</code> for commands &middot; Paste a URL to attach &middot; Drop files to include
             </div>
             <div className="welcome-actions">
-                {WELCOME_SUGGESTIONS.map((s) => (
+                {prompts.map((s) => (
                     <button key={s} className="welcome-chip" onClick={() => onSuggestionClick(s)}>{s}</button>
                 ))}
             </div>

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SLASH_COMMANDS } from '../../commands/registry';
 import { executeCommand } from '../../commands/executor';
-import { buildSystemPromptCached, type AIContext } from '../../ai/systemPrompt';
+import { buildSystemPromptCached, invalidatePromptCache, type AIContext } from '../../ai/systemPrompt';
 import { isElectron, generateId, requestPanel } from '../../utils';
 
 import { ACTIVE_CONV_KEY } from './constants';
@@ -35,8 +35,10 @@ import InputArea from './InputArea';
 export type { ToolStep, Message, Attachment, Conversation } from './types';
 
 export default function ChatView({ scope = 'general', activeProject, onChangeScope, onNewMessage, mode = 'onichat', workpalFolder }: ChatViewProps) {
-    // Per-mode conversation key
+    // Per-mode conversation key — ref so closures always read the latest
     const modeConvKey = `${ACTIVE_CONV_KEY}-${mode}`;
+    const modeConvKeyRef = useRef(modeConvKey);
+    const prevModeRef = useRef(mode);
 
     // ── Conversation state ──
     const [conversations, setConversations] = useState<Conversation[]>(loadConversationsFromCache);
@@ -79,7 +81,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     } | null>(null);
 
     const [showScrollBtn, setShowScrollBtn] = useState(false);
-    const [contextInfo, setContextInfo] = useState<{ tokens: number; messages: number } | null>(null);
+    const [contextInfo, setContextInfo] = useState<{ tokens: number; messages: number; contextWindow?: number } | null>(null);
     const [pendingQuestion, setPendingQuestion] = useState<{
         questionId: string;
         question: string;
@@ -101,6 +103,9 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     const [showAttachMenu, setShowAttachMenu] = useState(false);
     const attachMenuRef = useRef<HTMLDivElement>(null);
     const sessionStartRef = useRef<number | null>(null);
+
+    // ── Rate Limit State ──
+    const [rateLimitInfo, setRateLimitInfo] = useState<{ resetsAt: number; planType?: string } | null>(null);
 
     // ── Message Queue ──
     const [messageQueue, setMessageQueue] = useState<QueueItem[]>([]);
@@ -134,6 +139,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
     useEffect(() => { messageQueueRef.current = messageQueue; }, [messageQueue]);
     useEffect(() => { scopeRef.current = scope; }, [scope]);
     useEffect(() => { modeRef.current = mode; }, [mode]);
+    useEffect(() => { modeConvKeyRef.current = `${ACTIVE_CONV_KEY}-${mode}`; }, [mode]);
     useEffect(() => { workpalFolderRef.current = workpalFolder; }, [workpalFolder]);
 
     // Close attach menu on outside click
@@ -193,8 +199,13 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 convs[idx].messages = msgs;
                 convs[idx].updatedAt = Date.now();
                 if (msgs.length === 1) convs[idx].title = generateTitle(msgs[0].content);
-                convs[idx].scope = currentScope;
-                if (currentScope === 'project' && currentProject) {
+                // Scope is immutable after creation — never overwrite an existing conversation's scope
+                // This prevents mode switching from re-tagging conversations
+                if (!convs[idx].scope) {
+                    convs[idx].scope = currentScope;
+                }
+                // Only set project info if this conv was originally a project conv
+                if (convs[idx].scope === 'project' && currentProject && !convs[idx].projectId) {
                     convs[idx].projectId = currentProject.id;
                     convs[idx].projectName = currentProject.name;
                 }
@@ -220,7 +231,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
         saveConversationsCache(convs);
         setConversations(convs);
-        localStorage.setItem(modeConvKey, id);
+        localStorage.setItem(modeConvKeyRef.current, id);
         if (convToSave) persistConversationToSQLite(convToSave);
         // Notify sidebar
         window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
@@ -250,15 +261,16 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         return () => container.removeEventListener('scroll', handleScroll);
     }, [messages.length > 0]);
 
-    // ── Context tracking ──
+    // ── Context tracking (model-aware) ──
     useEffect(() => {
         if (messages.length === 0) { setContextInfo(null); return; }
         let totalChars = 0;
+        let imageCount = 0;
         for (const m of messages) {
             totalChars += m.content.length;
             if (m.toolSteps) {
                 for (const step of m.toolSteps) {
-                    totalChars += JSON.stringify(step.args || {}).length;
+                    totalChars += (step.name || '').length + JSON.stringify(step.args || {}).length;
                     if (step.result) totalChars += JSON.stringify(step.result).length;
                 }
             }
@@ -266,13 +278,35 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 for (const att of m.attachments) {
                     if (att.content) totalChars += att.content.length;
                     if (att.url) totalChars += att.url.length;
+                    if (att.type?.startsWith('image')) imageCount++;
                 }
             }
         }
-        const systemPromptTokens = 1500;
-        const messageOverhead = messages.length * 4;
-        const estimatedTokens = Math.round(totalChars / 4) + systemPromptTokens + messageOverhead;
-        setContextInfo({ tokens: estimatedTokens, messages: messages.length });
+        // Token estimation: ~3.8 chars/token for mixed content
+        // System prompt with 80+ tools ≈ 18K-25K tokens
+        // Per-message overhead: ~15 tokens (role, framing, separators)
+        // Images: ~765 tokens each (auto detail)
+        // Tool definitions in API call: ~200 tokens per tool × 80+ tools ≈ 16K tokens
+        const systemPromptTokens = 22000;  // system prompt + instructions
+        const toolDefTokens = 16000;       // ~80 tool definitions in API payload
+        const messageOverhead = messages.length * 15;
+        const imageTokens = imageCount * 765;
+        const contentTokens = Math.round(totalChars / 3.8);
+        const estimatedTokens = contentTokens + systemPromptTokens + toolDefTokens + messageOverhead + imageTokens;
+
+        // Get model context window for display
+        const provider = getActiveProvider();
+        const model = provider?.selectedModel || 'gpt-5.4';
+        // Model context window lookup (mirrors compactor.js)
+        let contextWindow = 128000;
+        if (model.startsWith('gpt-5.4')) contextWindow = 1048576;
+        else if (model.startsWith('gpt-5')) contextWindow = 1048576;
+        else if (model.startsWith('gpt-4.1')) contextWindow = 1048576;
+        else if (model.startsWith('gpt-4o')) contextWindow = 128000;
+        else if (model.startsWith('o3') || model.startsWith('o4')) contextWindow = 200000;
+        else if (model.startsWith('claude')) contextWindow = 200000;
+
+        setContextInfo({ tokens: estimatedTokens, messages: messages.length, contextWindow });
     }, [messages]);
 
     // ── Session timer ──
@@ -515,6 +549,54 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             if (data.status === 'sub-agent' || data.status === 'specialist' || data.status === 'orchestration-start') {
                 requestPanel('agents');
             }
+        });
+        return unsub;
+    }, []);
+
+    // ── Listen for built-in tool status (web search, code interpreter) ──
+    useEffect(() => {
+        if (!window.onicode?.onBuiltinToolStatus) return;
+        const unsub = window.onicode.onBuiltinToolStatus((data) => {
+            if (data.type === 'web_search' && data.status === 'searching') {
+                setActiveToolSteps(prev => [...prev, {
+                    id: `builtin-websearch-${Date.now()}`,
+                    name: 'web_search',
+                    args: { query: data.query || '' },
+                    status: 'running' as const,
+                    result: {},
+                    round: 0,
+                }]);
+            } else if (data.type === 'web_search' && data.status === 'done') {
+                setActiveToolSteps(prev => prev.map(s =>
+                    s.name === 'web_search' && s.status === 'running'
+                        ? { ...s, status: 'done' as const, result: { success: true } }
+                        : s
+                ));
+            } else if (data.type === 'code_interpreter' && data.status === 'running') {
+                setActiveToolSteps(prev => [...prev, {
+                    id: `builtin-interpreter-${Date.now()}`,
+                    name: 'code_interpreter',
+                    args: {},
+                    status: 'running' as const,
+                    result: {},
+                    round: 0,
+                }]);
+            } else if (data.type === 'code_interpreter' && data.status === 'done') {
+                setActiveToolSteps(prev => prev.map(s =>
+                    s.name === 'code_interpreter' && s.status === 'running'
+                        ? { ...s, status: 'done' as const, result: { output: data.output || '' } }
+                        : s
+                ));
+            }
+        });
+        return unsub;
+    }, []);
+
+    // ── Invalidate prompt cache when memories change ──
+    useEffect(() => {
+        if (!window.onicode?.onMemoryChanged) return;
+        const unsub = window.onicode.onMemoryChanged(() => {
+            invalidatePromptCache();
         });
         return unsub;
     }, []);
@@ -1056,6 +1138,29 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         }
     }, [sendViaIPC, sendViaFetch]);
 
+    // ── Rate Limit Listener ──
+    useEffect(() => {
+        if (!isElectron || !window.onicode?.onRateLimited) return;
+        const cleanup = window.onicode!.onRateLimited((data) => {
+            if (data.resetsAt) {
+                setRateLimitInfo({ resetsAt: data.resetsAt, planType: data.planType || undefined });
+            }
+        });
+        return cleanup;
+    }, []);
+
+    // Rate limit countdown timer
+    useEffect(() => {
+        if (!rateLimitInfo) return;
+        const iv = setInterval(() => {
+            if (Date.now() >= rateLimitInfo.resetsAt) {
+                setRateLimitInfo(null);
+                clearInterval(iv);
+            }
+        }, 1000);
+        return () => clearInterval(iv);
+    }, [rateLimitInfo]);
+
     // ── Channel Bridge: Telegram and other channels feed into this ChatView ──
     useEffect(() => {
         if (!isElectron || !window.onicode?.onChannelIncoming) return;
@@ -1260,7 +1365,10 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         setMessages([]); setInput(''); setIsTyping(false); setStreamingContent('');
         streamContentRef.current = ''; sendingRef.current = false;
         setActiveConvId(null); setMessageQueue([]);
-        localStorage.removeItem(modeConvKey); setAttachments([]);
+        setAttachments([]); setExpandedSteps(new Set());
+        setActiveToolSteps([]); setAgentStatus(null);
+        setPendingQuestion(null); setPendingApproval(null);
+        localStorage.removeItem(modeConvKeyRef.current);
         // Clear stale tasks from previous conversation
         if (isElectron && window.onicode?.clearAllTasks) window.onicode.clearAllTasks().catch(() => {});
     }, []);
@@ -1287,6 +1395,69 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
         window.addEventListener('onicode-new-chat', handler);
         return () => window.removeEventListener('onicode-new-chat', handler);
     }, [newChat]);
+
+    // ── Handle mode changes: save current conversation, load target mode's conversation ──
+    useEffect(() => {
+        if (prevModeRef.current === mode) return; // No mode change
+        const oldKey = `${ACTIVE_CONV_KEY}-${prevModeRef.current}`;
+        const newKey = `${ACTIVE_CONV_KEY}-${mode}`;
+        prevModeRef.current = mode;
+
+        // 1. Persist current conversation under the OLD mode's key
+        if (messagesRef.current.length > 0 && activeConvIdRef.current) {
+            localStorage.setItem(oldKey, activeConvIdRef.current);
+            const convs = loadConversationsFromCache();
+            const idx = convs.findIndex(c => c.id === activeConvIdRef.current);
+            if (idx >= 0) {
+                convs[idx].messages = messagesRef.current;
+                convs[idx].updatedAt = Date.now();
+                saveConversationsCache(convs);
+                persistConversationToSQLite(convs[idx]);
+            }
+        }
+
+        // 2. Abort any running AI and clear transient state
+        if (isElectron && window.onicode?.abortAI) window.onicode.abortAI();
+        else abortRef.current?.abort();
+        if (cleanupRef.current) { cleanupRef.current(); cleanupRef.current = null; }
+        setInput(''); setIsTyping(false); setStreamingContent('');
+        streamContentRef.current = ''; sendingRef.current = false;
+        setMessageQueue([]); setAttachments([]);
+        setExpandedSteps(new Set()); setActiveToolSteps([]);
+        setAgentStatus(null); setPendingQuestion(null); setPendingApproval(null);
+
+        // 3. Load target mode's conversation or start fresh
+        const savedConvId = localStorage.getItem(newKey);
+        if (savedConvId) {
+            const cached = loadConversationsFromCache().find(c => c.id === savedConvId);
+            if (cached && cached.messages && cached.messages.length > 0) {
+                setMessages(cached.messages);
+                setActiveConvId(cached.id);
+            } else if (isElectron && window.onicode?.conversationGet) {
+                setMessages([]); setActiveConvId(null);
+                window.onicode.conversationGet(savedConvId).then((res: unknown) => {
+                    const r = res as { success?: boolean; conversation?: Conversation };
+                    const conv = r.success ? r.conversation : undefined;
+                    if (conv && conv.messages && conv.messages.length > 0) {
+                        setMessages(conv.messages);
+                        setActiveConvId(conv.id);
+                    } else {
+                        localStorage.removeItem(newKey);
+                    }
+                }).catch(() => { localStorage.removeItem(newKey); });
+            } else {
+                setMessages([]); setActiveConvId(null);
+                localStorage.removeItem(newKey);
+            }
+        } else {
+            setMessages([]); setActiveConvId(null);
+        }
+
+        // 4. Clear stale tasks
+        if (isElectron && window.onicode?.clearAllTasks) window.onicode.clearAllTasks().catch(() => {});
+        // 5. Notify sidebar
+        window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
+    }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Execute slash commands ──
     const handleCommand = useCallback(async (cmd: string): Promise<boolean> => {
@@ -1409,15 +1580,23 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
 
     // ── Load conversation ──
     const loadConversation = useCallback((conv: Conversation) => {
-        // Clear current state (including tasks) and load the conversation
-        newChat();
-        setTimeout(() => {
-            setMessages(conv.messages); setActiveConvId(conv.id);
-            localStorage.setItem(modeConvKey, conv.id); setShowHistory(false);
-            // Notify sidebar that conversation changed
-            window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
-        }, 0);
-    }, [newChat]);
+        // Abort any running AI
+        if (isElectron) window.onicode!.abortAI();
+        else abortRef.current?.abort();
+        if (cleanupRef.current) { cleanupRef.current(); cleanupRef.current = null; }
+        // Set all state in one batch (React 18 auto-batching — no flash)
+        setMessages(conv.messages);
+        setActiveConvId(conv.id);
+        setInput(''); setIsTyping(false); setStreamingContent('');
+        streamContentRef.current = ''; sendingRef.current = false;
+        setMessageQueue([]); setAttachments([]);
+        setExpandedSteps(new Set()); setActiveToolSteps([]);
+        setAgentStatus(null); setPendingQuestion(null); setPendingApproval(null);
+        setShowHistory(false);
+        localStorage.setItem(modeConvKeyRef.current, conv.id);
+        window.dispatchEvent(new CustomEvent('onicode-conversation-saved'));
+        if (isElectron && window.onicode?.clearAllTasks) window.onicode.clearAllTasks().catch(() => {});
+    }, []);
 
     const deleteConversation = useCallback((convId: string) => {
         const convs = loadConversationsFromCache().filter((c) => c.id !== convId);
@@ -1505,6 +1684,7 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
             {messages.length === 0 ? (
                 <WelcomeScreen
                     onSuggestionClick={handleSuggestionClick}
+                    mode={mode}
                 />
             ) : (
                 <MessageList
@@ -1525,6 +1705,8 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                     sendToAI={sendToAI}
                 />
             )}
+
+            {rateLimitInfo && <RateLimitBanner resetsAt={rateLimitInfo.resetsAt} planType={rateLimitInfo.planType} onDismiss={() => setRateLimitInfo(null)} />}
 
             <InputArea
                 input={input}
@@ -1587,6 +1769,50 @@ export default function ChatView({ scope = 'general', activeProject, onChangeSco
                 onSetPendingApproval={setPendingApproval}
                 onChangeScope={onChangeScope}
             />
+        </div>
+    );
+}
+
+// ── Rate Limit Countdown Banner ──
+function RateLimitBanner({ resetsAt, planType, onDismiss }: { resetsAt: number; planType?: string; onDismiss: () => void }) {
+    const [now, setNow] = useState(Date.now());
+
+    useEffect(() => {
+        const iv = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(iv);
+    }, []);
+
+    const remaining = Math.max(0, Math.floor((resetsAt - now) / 1000));
+    if (remaining <= 0) return null;
+
+    const hrs = Math.floor(remaining / 3600);
+    const mins = Math.floor((remaining % 3600) / 60);
+    const secs = remaining % 60;
+
+    const timeStr = hrs > 0
+        ? `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+        : `${mins}:${String(secs).padStart(2, '0')}`;
+
+    const pct = resetsAt > now ? Math.min(100, ((resetsAt - now) / (resetsAt - (resetsAt - remaining * 1000))) * 100) : 0;
+
+    return (
+        <div className="rate-limit-banner">
+            <div className="rate-limit-content">
+                <span className="rate-limit-icon">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>
+                </span>
+                <span className="rate-limit-text">
+                    Usage limit reached{planType ? ` (${planType})` : ''}
+                </span>
+                <span className="rate-limit-timer">{timeStr}</span>
+                <span className="rate-limit-label">until reset</span>
+            </div>
+            <div className="rate-limit-bar">
+                <div className="rate-limit-bar-fill" style={{ width: `${100 - pct}%` }} />
+            </div>
+            <button className="rate-limit-dismiss" onClick={onDismiss} title="Dismiss">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
+            </button>
         </div>
     );
 }

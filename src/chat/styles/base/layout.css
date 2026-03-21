@@ -435,6 +435,26 @@
   font-weight: 600;
 }
 
+.search-modal-item-workpal {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.search-modal-item-chat {
+  background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
+  color: var(--text-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.search-modal-item-cross {
+  opacity: 0.7;
+}
+
 /* ── Main Content ── */
 .main-content {
   flex: 1;
@@ -449,6 +469,8 @@
   flex-direction: column;
   overflow: hidden;
   width: 100%;
+  background: var(--bg-chat, var(--bg-primary));
+  transition: background var(--transition-theme);
 }
 
 /* ── Unified App Header ── */

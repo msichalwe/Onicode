@@ -202,17 +202,24 @@ function stopTelegramPolling() {
 }
 
 async function _pollLoop() {
+    let consecutiveErrors = 0;
+    const BASE_BACKOFF = 2000;   // 2s
+    const MAX_BACKOFF = 120000;  // 2 min cap
+
     while (_telegramState.polling && _telegramState.token) {
         try {
             const updates = await _getUpdates();
+            consecutiveErrors = 0; // reset on success
             for (const update of updates) {
                 _telegramState.offset = update.update_id + 1;
                 if (update.message?.text) await _handleTelegramMessage(update.message);
             }
         } catch (err) {
             if (_telegramState.polling) {
-                logger.warn('channels', `Poll error: ${err.message}`);
-                await new Promise(r => setTimeout(r, 5000));
+                consecutiveErrors++;
+                const backoff = Math.min(BASE_BACKOFF * Math.pow(2, consecutiveErrors - 1), MAX_BACKOFF);
+                logger.warn('channels', `Poll error (attempt ${consecutiveErrors}, backoff ${backoff}ms): ${err.message}`);
+                await new Promise(r => setTimeout(r, backoff));
             }
         }
     }

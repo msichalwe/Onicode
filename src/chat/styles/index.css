@@ -22,6 +22,8 @@
 /* ── Settings ── */
 @import './settings/settings.css';
 @import './settings/providers.css';
+@import './settings/vault.css';
+@import './settings/profile.css';
 
 /* ── Projects ── */
 @import './projects/projects.css';
@@ -40,3 +42,4 @@
 
 /* ── Shared ── */
 @import './shared/misc.css';
+@import './shared/onboarding.css';

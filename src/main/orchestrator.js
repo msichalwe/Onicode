@@ -80,6 +80,23 @@ const AGENT_ROLES = {
         maxRounds: 10,
         description: 'Analyze codebase, create task plans, define milestones.',
     },
+    browser_agent: {
+        label: 'Browser Agent',
+        icon: '🌐',
+        tools: [
+            'browser_navigate', 'browser_screenshot', 'browser_evaluate',
+            'browser_click', 'browser_type', 'browser_wait',
+            'browser_console_logs', 'browser_close',
+            'browser_get_elements', 'browser_get_structure',
+            'browser_extract_table', 'browser_extract_links',
+            'browser_fill_form', 'browser_select', 'browser_scroll',
+            'browser_tab_open', 'browser_tab_switch', 'browser_tab_list', 'browser_tab_close',
+            'browser_status',
+        ],
+        canWrite: false,
+        maxRounds: 30,
+        description: 'Autonomous web browsing: navigate, interact, extract data from websites.',
+    },
 };
 
 function getRole(roleName) {

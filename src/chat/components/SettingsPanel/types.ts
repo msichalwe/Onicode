@@ -6,9 +6,10 @@ import type { Skill } from '../../commands/skills';
 //  Tab Definitions
 // ══════════════════════════════════════════
 
-export type SettingsTab = 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'channels' | 'connectors' | 'memory' | 'data';
+export type SettingsTab = 'profile' | 'general' | 'appearance' | 'providers' | 'skills' | 'hooks' | 'mcp' | 'channels' | 'connectors' | 'vault' | 'memory' | 'data';
 
 export const TABS: { id: SettingsTab; label: string }[] = [
+    { id: 'profile', label: 'Profile' },
     { id: 'general', label: 'General' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'providers', label: 'Providers' },
@@ -17,6 +18,7 @@ export const TABS: { id: SettingsTab; label: string }[] = [
     { id: 'mcp', label: 'MCP' },
     { id: 'channels', label: 'Channels' },
     { id: 'connectors', label: 'Connectors' },
+    { id: 'vault', label: 'Vault' },
     { id: 'memory', label: 'Memory' },
     { id: 'data', label: 'Data' },
 ];

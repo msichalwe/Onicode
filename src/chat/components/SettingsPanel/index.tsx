@@ -13,8 +13,10 @@ import ConnectorsTab from './ConnectorsTab';
 import HooksTab from './HooksTab';
 import McpTab from './McpTab';
 import ChannelsTab from './ChannelsTab';
+import VaultTab from './VaultTab';
 import MemoryTab from './MemoryTab';
 import DataTab from './DataTab';
+import ProfileTab from './ProfileTab';
 
 // Re-export types for consumers
 export type { SettingsTab, ConnectorState, VaultKey } from './types';
@@ -462,6 +464,8 @@ export default function SettingsPanel() {
                 ))}
             </div>
 
+            {activeTab === 'profile' && <ProfileTab />}
+
             {activeTab === 'general' && (
                 <GeneralTab
                     permissionMode={permissionMode} setPermissionMode={setPermissionMode}
@@ -538,6 +542,8 @@ export default function SettingsPanel() {
             )}
 
             {activeTab === 'channels' && <ChannelsTab />}
+
+            {activeTab === 'vault' && <VaultTab />}
 
             {activeTab === 'memory' && (
                 <MemoryTab

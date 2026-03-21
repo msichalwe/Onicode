@@ -127,16 +127,26 @@ function readFromCache(): CachedConv[] {
     } catch { return []; }
 }
 
+/** Derive which mode a conversation belongs to from its scope/project fields */
+function convMode(c: CachedConv): OnicodeMode {
+    if (c.projectName || c.scope === 'project') return 'projects';
+    if (c.scope === 'workpal' || (c.scope as string) === 'workmate') return 'workpal';
+    return 'onichat';
+}
+
 function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: (v: View) => void }) {
     const [chats, setChats] = useState<CachedConv[]>([]);
     const [tick, setTick] = useState(0);
 
-    // Read from cache — each mode has its own pool, no filtering needed
+    // Read from cache — filter by current mode so each tab shows its own chats
     useEffect(() => {
         const all = readFromCache();
         const withMessages = all.filter(c => c.messages && Array.isArray(c.messages) && c.messages.length > 0);
 
-        const sorted = withMessages
+        // Filter: show only conversations belonging to the current mode
+        const filtered = withMessages.filter(c => convMode(c) === mode);
+
+        const sorted = filtered
             .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
             .slice(0, MAX_RECENTS);
         setChats(sorted);
@@ -160,19 +170,21 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
     })();
 
     const handleClick = (chat: CachedConv) => {
-        onViewChange('chat');
-        // If it's a project chat, activate that project
-        if (chat.scope === 'project' && chat.projectName) {
-            window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: 'projects' }));
-            if (chat.projectId) {
-                window.dispatchEvent(new CustomEvent('onicode-project-activate', {
-                    detail: { id: chat.projectId, name: chat.projectName, path: chat.projectPath || '' }
-                }));
-            }
+        const chatBelongsTo = convMode(chat);
+
+        // Cross-mode click → trigger mode switch (which shows the warning dialog)
+        // This will NOT load the old chat — it switches mode and starts fresh
+        if (chatBelongsTo !== mode) {
+            window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: chatBelongsTo }));
+            return;
         }
-        // If it's a workpal chat, switch to workpal mode
-        if (chat.scope === 'workpal' || (chat.scope as string) === 'workmate') {
-            window.dispatchEvent(new CustomEvent('onicode-mode-switch', { detail: 'workpal' }));
+
+        // Same mode → load the conversation directly
+        onViewChange('chat');
+        if (chatBelongsTo === 'projects' && chat.projectName && chat.projectId) {
+            window.dispatchEvent(new CustomEvent('onicode-project-activate', {
+                detail: { id: chat.projectId, name: chat.projectName, path: chat.projectPath || '' }
+            }));
         }
         window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: chat.id }));
     };
@@ -185,7 +197,18 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
         return `${Math.floor(diff / 86400000)}d`;
     };
 
-    if (chats.length === 0) return null;
+    const modeLabel = mode === 'projects' ? 'Project' : mode === 'workpal' ? 'Workpal' : 'Chat';
+
+    if (chats.length === 0) {
+        return (
+            <div className="sidebar-recents">
+                <div className="sidebar-recents-header">
+                    <span>{modeLabel} Recents</span>
+                </div>
+                <div className="sidebar-recents-empty">No {modeLabel.toLowerCase()} conversations yet</div>
+            </div>
+        );
+    }
 
     const openFullHistory = () => {
         onViewChange('chat');
@@ -195,21 +218,29 @@ function RecentChats({ mode, onViewChange }: { mode: OnicodeMode; onViewChange: 
     return (
         <div className="sidebar-recents">
             <div className="sidebar-recents-header">
-                <span>Recents</span>
+                <span>{modeLabel} Recents</span>
                 <button className="sidebar-recents-all" onClick={openFullHistory} title="View all chats">All</button>
             </div>
             <div className="sidebar-recents-list">
                 {chats.map(c => {
-                    const chatMode = c.projectName || c.scope === 'project' ? 'project'
-                        : c.scope === 'workpal' || (c.scope as string) === 'workmate' ? 'workpal'
-                        : 'general';
+                    const chatBelongsTo = convMode(c);
                     const title = c.title || (c.messages && Array.isArray(c.messages) && c.messages.length > 0 ? String((c.messages[0] as Record<string, unknown>)?.content || '').slice(0, 40) : 'Chat');
                     return (
                         <button key={c.id} className={`sidebar-recent-item ${c.id === activeConvId ? 'sidebar-recent-active' : ''}`} onClick={() => handleClick(c)} title={title}>
-                            <span className={`sidebar-recent-dot sidebar-recent-dot-${chatMode}`} />
+                            <span className={`sidebar-recent-dot sidebar-recent-dot-${chatBelongsTo === 'projects' ? 'project' : chatBelongsTo === 'workpal' ? 'workpal' : 'general'}`} />
                             <div className="sidebar-recent-body">
-                                <div className="sidebar-recent-title">{title}</div>
-                                <span className="sidebar-recent-time">{timeAgo(c.updatedAt || c.createdAt || 0)}</span>
+                                <div className="sidebar-recent-title">
+                                    {title}
+                                </div>
+                                <span className="sidebar-recent-meta">
+                                    {chatBelongsTo === 'projects' && c.projectName && (
+                                        <span className="sidebar-recent-project">{c.projectName}</span>
+                                    )}
+                                    {chatBelongsTo === 'workpal' && (
+                                        <span className="sidebar-recent-workpal">Workpal</span>
+                                    )}
+                                    <span className="sidebar-recent-time">{timeAgo(c.updatedAt || c.createdAt || 0)}</span>
+                                </span>
                             </div>
                         </button>
                     );

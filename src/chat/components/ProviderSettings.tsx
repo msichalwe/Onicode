@@ -14,6 +14,7 @@ interface ProviderConfig {
     models?: string[];
     testStatus?: 'idle' | 'testing' | 'success' | 'error';
     testMessage?: string;
+    comingSoon?: boolean;
 }
 
 const OPENAI_MODELS = [
@@ -54,23 +55,11 @@ const ANTHROPIC_MODELS = [
 
 const DEFAULT_PROVIDERS: ProviderConfig[] = [
     {
-        id: 'openai',
+        id: 'codex',
         name: 'OpenAI',
         initials: 'AI',
-        description: 'GPT-5.4, GPT-5, o3, o4-mini — standard API key from platform.openai.com',
-        enabled: false,
-        connected: false,
-        authType: 'api-key',
-        apiKey: '',
-        selectedModel: 'gpt-5.4',
-        models: OPENAI_MODELS,
-    },
-    {
-        id: 'codex',
-        name: 'OpenAI Codex',
-        initials: 'Cx',
-        description: 'ChatGPT sign-in (OAuth) — use your ChatGPT Plus/Pro subscription',
-        enabled: false,
+        description: 'ChatGPT OAuth sign-in or API key',
+        enabled: true,
         connected: false,
         authType: 'api-key',
         apiKey: '',
@@ -78,22 +67,36 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
         models: CODEX_MODELS,
     },
     {
+        id: 'openai',
+        name: 'OpenAI API',
+        initials: 'GP',
+        description: 'GPT-5.4, o3, o4-mini via API key',
+        enabled: false,
+        connected: false,
+        authType: 'api-key',
+        apiKey: '',
+        selectedModel: 'gpt-5.4',
+        models: OPENAI_MODELS,
+        comingSoon: true,
+    },
+    {
         id: 'anthropic',
         name: 'Anthropic Claude',
         initials: 'Cl',
-        description: 'Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 — Anthropic API key',
+        description: 'Opus 4.6, Sonnet 4.6, Haiku 4.5',
         enabled: false,
         connected: false,
         authType: 'api-key',
         apiKey: '',
         selectedModel: 'claude-sonnet-4-6',
         models: ANTHROPIC_MODELS,
+        comingSoon: true,
     },
     {
         id: 'ollama',
         name: 'Ollama (Local)',
         initials: 'OL',
-        description: 'Run models locally via Ollama — no API key needed',
+        description: 'Run models locally, no key needed',
         enabled: false,
         connected: false,
         authType: 'url-key',
@@ -101,12 +104,13 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
         apiKey: '',
         selectedModel: '',
         models: [],
+        comingSoon: true,
     },
     {
         id: 'onigateway',
         name: 'OniAI Gateway',
-        initials: 'Oni',
-        description: 'Your self-hosted AI gateway — connect with URL',
+        initials: 'On',
+        description: 'Self-hosted AI gateway',
         enabled: false,
         connected: false,
         authType: 'url-key',
@@ -114,12 +118,13 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
         apiKey: '',
         selectedModel: 'default',
         models: ['default'],
+        comingSoon: true,
     },
     {
         id: 'openclaw',
-        name: 'OpenClaw Gateway',
+        name: 'OpenClaw',
         initials: 'OC',
-        description: 'OpenClaw multi-model gateway — connect with URL and key',
+        description: 'Multi-model gateway',
         enabled: false,
         connected: false,
         authType: 'url-key',
@@ -127,6 +132,7 @@ const DEFAULT_PROVIDERS: ProviderConfig[] = [
         apiKey: '',
         selectedModel: 'default',
         models: ['default'],
+        comingSoon: true,
     },
 ];
 
@@ -602,96 +608,149 @@ export default function ProviderSettings() {
     }, [updateProvider]);
 
     const toggleExpanded = (id: string) => {
+        // Don't expand coming-soon providers
+        const p = providers.find(pr => pr.id === id);
+        if (p?.comingSoon) return;
         setExpandedProvider((prev) => (prev === id ? null : id));
     };
 
+    const expanded = expandedProvider ? providers.find(p => p.id === expandedProvider) : null;
+
     return (
         <div className="provider-settings">
-            {providers.map((provider) => (
-                <div
-                    key={provider.id}
-                    className={`provider-card ${expandedProvider === provider.id ? 'expanded' : ''}`}
-                >
-                    <div className="provider-card-header" onClick={() => toggleExpanded(provider.id)}>
-                        <div className="provider-icon">{provider.initials}</div>
+            {/* Grid of provider cards */}
+            <div className="provider-grid">
+                {providers.map((provider) => (
+                    <div
+                        key={provider.id}
+                        className={`provider-tile ${expandedProvider === provider.id ? 'provider-tile-active' : ''} ${provider.comingSoon ? 'provider-tile-coming-soon' : provider.enabled ? 'provider-tile-enabled' : 'provider-tile-disabled'}`}
+                        onClick={() => toggleExpanded(provider.id)}
+                    >
+                        <div className="provider-tile-top">
+                            <div className="provider-tile-icon">{provider.initials}</div>
+                            {!provider.comingSoon && (
+                                <button
+                                    className={`provider-toggle ${provider.enabled ? 'active' : ''}`}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        updateProvider(provider.id, { enabled: !provider.enabled });
+                                    }}
+                                    title={provider.enabled ? 'Disable' : 'Enable'}
+                                />
+                            )}
+                            {provider.comingSoon && (
+                                <span className="provider-coming-soon-badge">Coming Soon</span>
+                            )}
+                        </div>
+                        <div className="provider-tile-name">{provider.name}</div>
+                        <div className="provider-tile-desc">{provider.description}</div>
+                        <div className="provider-tile-status">
+                            {provider.comingSoon ? (
+                                <span className="connection-badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' }}>Unavailable</span>
+                            ) : (
+                                <>
+                                    {provider.connected && <span className="connection-badge connected">Connected</span>}
+                                    {!provider.connected && provider.enabled && <span className="connection-badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' }}>Not connected</span>}
+                                    {!provider.enabled && <span className="connection-badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' }}>Disabled</span>}
+                                    {provider.testStatus === 'error' && <span className="connection-badge error">Error</span>}
+                                </>
+                            )}
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Expanded config panel below the grid */}
+            {expanded && (
+                <div className="provider-card expanded">
+                    <div className="provider-card-header" onClick={() => toggleExpanded(expanded.id)}>
+                        <div className="provider-icon">{expanded.initials}</div>
                         <div className="provider-info">
-                            <div className="provider-name">
-                                {provider.name}
-                                {provider.connected && <span className="connection-badge connected">Connected</span>}
-                                {!provider.connected && provider.testStatus === 'error' && <span className="connection-badge error">Error</span>}
-                            </div>
-                            <div className="provider-status">{provider.description}</div>
+                            <div className="provider-name">{expanded.name}</div>
+                            <div className="provider-status">{expanded.description}</div>
                         </div>
                         <svg
-                            className={`expand-chevron ${expandedProvider === provider.id ? 'open' : ''}`}
+                            className="expand-chevron open"
                             width="18" height="18" viewBox="0 0 24 24" fill="none"
                             stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                         >
                             <polyline points="6 9 12 15 18 9" />
                         </svg>
                     </div>
-
-                    {expandedProvider === provider.id && (
-                        <div className="provider-card-body">
+                    <div className="provider-card-body">
                             {/* URL + API Key fields */}
                             <div className="field-group">
-                                {provider.authType === 'url-key' && (
+                                {expanded.authType === 'url-key' && (
                                     <>
                                         <label className="field-label">
-                                            {provider.id === 'ollama' ? 'Ollama URL' : 'Gateway URL'}
+                                            {expanded.id === 'ollama' ? 'Ollama URL' : 'Gateway URL'}
                                         </label>
                                         <input
                                             className="field-input" type="url"
                                             placeholder={
-                                                provider.id === 'ollama' ? 'http://localhost:11434' :
-                                                provider.id === 'onigateway' ? 'https://your-oni-gateway.com' : 'https://gateway.openclaw.io'
+                                                expanded.id === 'ollama' ? 'http://localhost:11434' :
+                                                expanded.id === 'onigateway' ? 'https://your-oni-gateway.com' : 'https://gateway.openclaw.io'
                                             }
-                                            value={provider.baseUrl || ''}
-                                            onChange={(e) => updateProvider(provider.id, { baseUrl: e.target.value })}
+                                            value={expanded.baseUrl || ''}
+                                            onChange={(e) => updateProvider(expanded.id, { baseUrl: e.target.value })}
                                             spellCheck={false}
                                         />
                                     </>
                                 )}
-                                {provider.id !== 'ollama' && provider.id !== 'codex' && (
+                                {expanded.id !== 'ollama' && expanded.id !== 'codex' && (
                                     <>
                                         <label className="field-label">
-                                            {provider.id === 'openai' ? 'OpenAI API Key' : provider.id === 'anthropic' ? 'Anthropic API Key' : 'API Key'}
-                                            {provider.id === 'openai' && (
+                                            {expanded.id === 'openai' ? 'OpenAI API Key' : expanded.id === 'anthropic' ? 'Anthropic API Key' : 'API Key'}
+                                            {expanded.id === 'openai' && (
                                                 <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
                                             )}
-                                            {provider.id === 'anthropic' && (
+                                            {expanded.id === 'anthropic' && (
                                                 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="field-link">Get key</a>
                                             )}
                                         </label>
                                         <input
                                             className="field-input" type="password"
                                             placeholder={
-                                                provider.id === 'openai' ? 'sk-...' :
-                                                provider.id === 'anthropic' ? 'sk-ant-...' :
+                                                expanded.id === 'openai' ? 'sk-...' :
+                                                expanded.id === 'anthropic' ? 'sk-ant-...' :
                                                 'Enter API key (optional)'
                                             }
-                                            value={provider.apiKey || ''}
-                                            onChange={(e) => updateProvider(provider.id, { apiKey: e.target.value })}
+                                            value={expanded.apiKey || ''}
+                                            onChange={(e) => updateProvider(expanded.id, { apiKey: e.target.value })}
                                             spellCheck={false}
                                         />
                                     </>
                                 )}
-                                {provider.id === 'openai' && (
+                                {expanded.id === 'codex' && (
+                                    <>
+                                        <label className="field-label">
+                                            API Key <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, fontSize: 11, color: 'var(--text-tertiary)' }}>(or use ChatGPT sign-in below)</span>
+                                        </label>
+                                        <input
+                                            className="field-input" type="password"
+                                            placeholder="sk-..."
+                                            value={expanded.apiKey || ''}
+                                            onChange={(e) => updateProvider(expanded.id, { apiKey: e.target.value })}
+                                            spellCheck={false}
+                                        />
+                                    </>
+                                )}
+                                {expanded.id === 'openai' && (
                                     <div className="field-hint">
                                         Standard API key from platform.openai.com. Use "Refresh" in model picker to pull your available models.
                                     </div>
                                 )}
-                                {provider.id === 'codex' && (
+                                {expanded.id === 'codex' && (
                                     <div className="field-hint">
-                                        Sign in with your ChatGPT account below. Uses your ChatGPT Plus/Pro subscription — no separate API key needed.
+                                        Uses your ChatGPT Plus/Pro subscription. Enter an API key above or sign in with ChatGPT below.
                                     </div>
                                 )}
-                                {provider.id === 'anthropic' && (
+                                {expanded.id === 'anthropic' && (
                                     <div className="field-hint">
                                         Get an API key from console.anthropic.com. Supports Claude Opus, Sonnet, and Haiku.
                                     </div>
                                 )}
-                                {provider.id === 'ollama' && (
+                                {expanded.id === 'ollama' && (
                                     <div className="field-hint">
                                         No API key needed. Make sure Ollama is running locally. Install models with: ollama pull llama3.3
                                     </div>
@@ -699,7 +758,7 @@ export default function ProviderSettings() {
                             </div>
 
                             {/* Codex ChatGPT OAuth sign-in (paste redirect URL flow) */}
-                            {provider.id === 'codex' && (
+                            {expanded.id === 'codex' && (
                                 <div className="field-group">
                                     <div className="auth-divider"><span>or sign in with ChatGPT</span></div>
 
@@ -723,11 +782,11 @@ export default function ProviderSettings() {
                                                 </div>
                                                 <div className="oauth-step">
                                                     <span className="oauth-step-num">2</span>
-                                                    After sign-in, your browser will redirect to a localhost URL that won't load
+                                                    After sign-in, your browser will redirect to a localhost URL that won&apos;t load
                                                 </div>
                                                 <div className="oauth-step">
                                                     <span className="oauth-step-num">3</span>
-                                                    Copy the <strong>full URL</strong> from your browser's address bar and paste it below
+                                                    Copy the <strong>full URL</strong> from your browser&apos;s address bar and paste it below
                                                 </div>
                                             </div>
                                             <div className="oauth-url-input-group">
@@ -772,15 +831,15 @@ export default function ProviderSettings() {
                             )}
 
                             {/* Model selection */}
-                            {provider.models && provider.models.length > 0 && (
+                            {expanded.models && expanded.models.length > 0 && (
                                 <div className="field-group">
                                     <label className="field-label">Model</label>
                                     <select
                                         className="field-select"
-                                        value={provider.selectedModel || ''}
-                                        onChange={(e) => updateProvider(provider.id, { selectedModel: e.target.value })}
+                                        value={expanded.selectedModel || ''}
+                                        onChange={(e) => updateProvider(expanded.id, { selectedModel: e.target.value })}
                                     >
-                                        {provider.models.map((model) => (
+                                        {expanded.models.map((model) => (
                                             <option key={model} value={model}>{model}</option>
                                         ))}
                                     </select>
@@ -790,11 +849,11 @@ export default function ProviderSettings() {
                             {/* Test connection */}
                             <div className="field-group">
                                 <button
-                                    className={`test-btn ${provider.testStatus || ''}`}
-                                    onClick={() => testConnection(provider)}
-                                    disabled={provider.testStatus === 'testing'}
+                                    className={`test-btn ${expanded.testStatus || ''}`}
+                                    onClick={() => testConnection(expanded)}
+                                    disabled={expanded.testStatus === 'testing'}
                                 >
-                                    {provider.testStatus === 'testing' ? (
+                                    {expanded.testStatus === 'testing' ? (
                                         <><span className="test-spinner" /> Testing...</>
                                     ) : (
                                         <>
@@ -806,44 +865,43 @@ export default function ProviderSettings() {
                                         </>
                                     )}
                                 </button>
-                                {provider.testMessage && (
-                                    <div className={`test-result ${provider.testStatus}`}>
-                                        {provider.testStatus === 'success' && (
+                                {expanded.testMessage && (
+                                    <div className={`test-result ${expanded.testStatus}`}>
+                                        {expanded.testStatus === 'success' && (
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                                 <polyline points="20 6 9 17 4 12" />
                                             </svg>
                                         )}
-                                        {provider.testStatus === 'error' && (
+                                        {expanded.testStatus === 'error' && (
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                                 <circle cx="12" cy="12" r="10" />
                                                 <line x1="15" y1="9" x2="9" y2="15" />
                                                 <line x1="9" y1="9" x2="15" y2="15" />
                                             </svg>
                                         )}
-                                        {provider.testMessage}
+                                        {expanded.testMessage}
                                     </div>
                                 )}
                             </div>
 
                             {/* Disconnect */}
-                            {provider.connected && (
+                            {expanded.connected && (
                                 <button
                                     className="disconnect-btn"
                                     onClick={() => {
-                                        updateProvider(provider.id, {
+                                        updateProvider(expanded.id, {
                                             connected: false, enabled: false,
                                             testStatus: 'idle', testMessage: '', apiKey: '',
                                         });
-                                        localStorage.removeItem('onicode-codex-tokens');
+                                        if (expanded.id === 'codex') localStorage.removeItem('onicode-codex-tokens');
                                     }}
                                 >
                                     Disconnect
                                 </button>
                             )}
                         </div>
-                    )}
                 </div>
-            ))}
+            )}
         </div>
     );
 }

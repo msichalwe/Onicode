@@ -368,13 +368,121 @@
 }
 
 
-/* ── Provider Card (Expandable) ── */
+/* ── Provider Grid ── */
 .provider-settings {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .provider-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.provider-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+}
+
+.provider-tile:hover {
+  border-color: var(--border);
+}
+
+.provider-tile-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.provider-tile-disabled {
+  opacity: 0.5;
+}
+
+.provider-tile-disabled:hover {
+  opacity: 0.75;
+}
+
+.provider-tile-coming-soon {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.provider-coming-soon-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.provider-tile-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.provider-tile-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.provider-tile-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-tile-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.provider-tile-status {
+  margin-top: 2px;
+}
+
+.provider-tile-status .connection-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+/* ── Provider Card (Expanded Config Panel) ── */
 .provider-card {
   border-radius: var(--radius-md);
   background: var(--bg-secondary);

@@ -26,6 +26,13 @@ contextBridge.exposeInMainWorld('onicode', {
 
     abortAI: (requestId) => ipcRenderer.invoke('ai-abort', requestId),
 
+    // Rate limit events
+    onRateLimited: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-rate-limited', handler);
+        return () => ipcRenderer.removeListener('ai-rate-limited', handler);
+    },
+
     // Message break — finalize current message bubble, start a new one
     onMessageBreak: (callback) => {
         const handler = (_event, data) => callback(data);
@@ -59,6 +66,13 @@ contextBridge.exposeInMainWorld('onicode', {
         const handler = (_event, data) => callback(data);
         ipcRenderer.on('ai-agent-step', handler);
         return () => ipcRenderer.removeListener('ai-agent-step', handler);
+    },
+
+    // Built-in tool status (web search, code interpreter)
+    onBuiltinToolStatus: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('ai-builtin-tool-status', handler);
+        return () => ipcRenderer.removeListener('ai-builtin-tool-status', handler);
     },
 
     // Ask User Question (Cascade-level structured questions)
@@ -205,6 +219,14 @@ contextBridge.exposeInMainWorld('onicode', {
     keystoreDelete: (id) => ipcRenderer.invoke('keystore-delete', id),
     keystoreStatus: () => ipcRenderer.invoke('keystore-status'),
 
+    // ── Credential Vault ──
+    vaultList: () => ipcRenderer.invoke('vault-list'),
+    vaultSave: (id, entry) => ipcRenderer.invoke('vault-save', id, entry),
+    vaultGet: (id) => ipcRenderer.invoke('vault-get', id),
+    vaultDelete: (id) => ipcRenderer.invoke('vault-delete', id),
+    vaultSearch: (query) => ipcRenderer.invoke('vault-search', query),
+    vaultStatus: () => ipcRenderer.invoke('vault-status'),
+
     // ── Memory ──
     memoryLoadCore: (projectId) => ipcRenderer.invoke('memory-load-core', projectId),
     memoryEnsureDefaults: () => ipcRenderer.invoke('memory-ensure-defaults'),
@@ -234,6 +256,27 @@ contextBridge.exposeInMainWorld('onicode', {
         return () => ipcRenderer.removeListener('memory-changed', handler);
     },
 
+    // AI-triggered config changes (from update_config tool)
+    onConfigChange: (callback) => {
+        const themeHandler = (_event, theme) => callback({ setting: 'theme', value: theme });
+        const permHandler = (_event, mode) => callback({ setting: 'permission_mode', value: mode });
+        const commitHandler = (_event, enabled) => callback({ setting: 'auto_commit', value: enabled });
+        const thinkHandler = (_event, level) => callback({ setting: 'thinking_level', value: level });
+        const compactHandler = (_event, threshold) => callback({ setting: 'compact_threshold', value: threshold });
+        ipcRenderer.on('set-theme', themeHandler);
+        ipcRenderer.on('set-permission-mode', permHandler);
+        ipcRenderer.on('set-auto-commit', commitHandler);
+        ipcRenderer.on('set-thinking-level', thinkHandler);
+        ipcRenderer.on('set-compact-threshold', compactHandler);
+        return () => {
+            ipcRenderer.removeListener('set-theme', themeHandler);
+            ipcRenderer.removeListener('set-permission-mode', permHandler);
+            ipcRenderer.removeListener('set-auto-commit', commitHandler);
+            ipcRenderer.removeListener('set-thinking-level', thinkHandler);
+            ipcRenderer.removeListener('set-compact-threshold', compactHandler);
+        };
+    },
+
     // ── Browser / Puppeteer ──
     browserLaunch: (opts) => ipcRenderer.invoke('browser-launch', opts),
     browserClose: () => ipcRenderer.invoke('browser-close'),
@@ -246,6 +289,34 @@ contextBridge.exposeInMainWorld('onicode', {
     browserContent: () => ipcRenderer.invoke('browser-content'),
     browserConsoleLogs: (opts) => ipcRenderer.invoke('browser-console-logs', opts),
     browserConsoleClear: () => ipcRenderer.invoke('browser-console-clear'),
+
+    // Browser Agent
+    browserAgentRun: (goal, opts) => ipcRenderer.invoke('browser-agent-run', goal, opts),
+    browserAgentSession: (sessionId) => ipcRenderer.invoke('browser-agent-session', sessionId),
+    browserAgentSessions: () => ipcRenderer.invoke('browser-agent-sessions'),
+    onBrowserAgentStatus: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('browser-agent-status', handler);
+        return () => ipcRenderer.removeListener('browser-agent-status', handler);
+    },
+    onBrowserAgentStep: (callback) => {
+        const handler = (_event, data) => callback(data);
+        ipcRenderer.on('browser-agent-step', handler);
+        return () => ipcRenderer.removeListener('browser-agent-step', handler);
+    },
+    // Browser extended
+    browserGetElements: () => ipcRenderer.invoke('browser-interactive-elements'),
+    browserGetStructure: () => ipcRenderer.invoke('browser-page-structure'),
+    browserExtractTable: (selector) => ipcRenderer.invoke('browser-extract-tables', selector),
+    browserExtractLinks: (filter) => ipcRenderer.invoke('browser-extract-links', filter),
+    browserFillForm: (fields) => ipcRenderer.invoke('browser-fill-form', fields),
+    browserSelect: (selector, value) => ipcRenderer.invoke('browser-select', selector, value),
+    browserScroll: (opts) => ipcRenderer.invoke('browser-scroll', opts),
+    browserOpenTab: (url) => ipcRenderer.invoke('browser-open-tab', url),
+    browserSwitchTab: (tabId) => ipcRenderer.invoke('browser-switch-tab', tabId),
+    browserListTabs: () => ipcRenderer.invoke('browser-list-tabs'),
+    browserCloseTab: (tabId) => ipcRenderer.invoke('browser-close-tab', tabId),
+    browserStatus: () => ipcRenderer.invoke('browser-status'),
 
     // ── Attachments (project-scoped, SQLite) ──
     attachmentSave: (att) => ipcRenderer.invoke('attachment-save', att),

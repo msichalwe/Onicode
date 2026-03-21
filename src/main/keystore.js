@@ -221,4 +221,4 @@ function registerKeystoreIPC(ipcMain) {
     });
 }
 
-module.exports = { registerKeystoreIPC, getKeyValue, listKeys };
+module.exports = { registerKeystoreIPC, getKeyValue, listKeys, encrypt, decrypt };

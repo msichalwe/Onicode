@@ -120,6 +120,7 @@ function resolvePermissionApproval(approvalId, approved) {
 let _currentSessionId = null;
 let _currentProjectId = null;
 let _currentProjectPath = null;
+let _currentExecutingAgentId = null; // Set during sub-agent tool execution for browser tab isolation
 let _activePlanId = null;
 let _aiStreamingActive = false; // Lock: true when AI is actively executing tool calls
 
@@ -137,6 +138,18 @@ const fileContext = new FileContextTracker();
 // ══════════════════════════════════════════
 //  Background Process Manager (dev servers, watchers)
 // ══════════════════════════════════════════
+
+/**
+ * Safely parse a task dependency field (blocks / blocked_by).
+ * Handles: arrays (already parsed), JSON strings, null/undefined.
+ * @param {*} val — array, JSON string, or falsy value
+ * @returns {number[]}
+ */
+function safeParseDepArray(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val;
+    try { return JSON.parse(val); } catch { return []; }
+}
 
 const _backgroundProcesses = new Map(); // sessionId -> { child, command, port, cwd, outputBuffer, startedAt }
 const MAX_OUTPUT_BUFFER = 200; // Keep last 200 lines per process
@@ -393,6 +406,8 @@ class TaskManager {
                     createdAt: r.created_at,
                     completedAt: r.completed_at,
                     milestoneId: r.milestone_id || null,
+                    blocks: r.blocks || null,
+                    blocked_by: r.blocked_by || null,
                 }));
                 this.nextId = Math.max(...this.tasks.map(t => t.id)) + 1;
             }
@@ -579,7 +594,8 @@ function createSubAgent(id, task, parentContext) {
 const SUB_AGENT_TOOL_SETS = {
     'read-only': ['read_file', 'search_files', 'list_directory', 'glob_files', 'explore_codebase', 'get_context_summary'],
     'git': ['read_file', 'search_files', 'list_directory', 'glob_files', 'git_status', 'git_diff', 'git_log', 'git_branches', 'git_show', 'git_remotes', 'gh_cli'],
-    'browser': ['browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close', 'read_file'],
+    'browser': ['browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close', 'browser_get_elements', 'browser_get_structure', 'browser_extract_table', 'browser_extract_links', 'browser_fill_form', 'browser_select', 'browser_scroll', 'browser_tab_open', 'browser_tab_switch', 'browser_tab_list', 'browser_tab_close', 'browser_status', 'read_file'],
+    'browser-agent': ['browser_agent_run', 'browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close', 'browser_get_elements', 'browser_get_structure', 'browser_extract_table', 'browser_extract_links', 'browser_fill_form', 'browser_select', 'browser_scroll', 'browser_tab_open', 'browser_tab_switch', 'browser_tab_list', 'browser_tab_close', 'browser_status', 'read_file'],
     'workspace': ['gws_cli', 'read_file', 'search_files', 'list_directory'],
     'file-ops': ['read_file', 'edit_file', 'multi_edit', 'create_file', 'delete_file', 'search_files', 'list_directory', 'glob_files'],
     'search': ['read_file', 'search_files', 'glob_files', 'list_directory', 'find_symbol', 'find_references', 'list_symbols', 'semantic_search', 'find_implementation', 'batch_search'],
@@ -589,14 +605,14 @@ const SUB_AGENT_TOOL_SETS = {
 // Tool categories for deferred loading (load_tools)
 const DEFERRED_TOOL_CATEGORIES = {
     deployment: ['deploy_web_app', 'read_deployment_config', 'check_deploy_status'],
-    browser: ['browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close'],
+    browser: ['browser_navigate', 'browser_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_wait', 'browser_console_logs', 'browser_close', 'browser_agent_run', 'browser_get_elements', 'browser_get_structure', 'browser_extract_table', 'browser_extract_links', 'browser_fill_form', 'browser_select', 'browser_scroll', 'browser_tab_open', 'browser_tab_switch', 'browser_tab_list', 'browser_tab_close', 'browser_status'],
     notebooks: ['read_notebook', 'edit_notebook'],
     url_reading: ['read_url_content', 'view_content_chunk'],
     orchestration: ['orchestrate', 'spawn_specialist', 'delegate_task'],
     code_intelligence: ['find_symbol', 'find_references', 'list_symbols', 'find_implementation'],
     context_engine: ['get_context_summary', 'explore_codebase', 'get_dependency_graph', 'get_smart_context'],
     verification: ['verify_project'],
-    memory_intelligence: ['memory_smart_search', 'memory_get_related', 'memory_hot_list'],
+    // memory_intelligence tools are now CORE — always available
 };
 
 // Core tools always sent to AI (everything NOT in deferred categories)
@@ -736,6 +752,8 @@ ${fileCtx ? `\n\nContext files provided:\n${fileCtx}` : ''}`;
             // No tool calls — sub-agent is done
             if (!result.hasToolCalls && !result.functionCalls?.length) {
                 messages.push({ role: 'assistant', content: result.textContent || result.content || '' });
+                // Release agent's browser tab mapping
+                try { require('../browser').releaseAgentTab(agentId); } catch {}
                 // Save conversation for potential resume
                 _agentConversations.set(agentId, { messages: [...messages], toolSet: effectiveToolSet, agentType });
                 agent.status = 'done';
@@ -776,7 +794,10 @@ ${fileCtx ? `\n\nContext files provided:\n${fileCtx}` : ''}`;
                     continue;
                 }
 
+                // Set agent context for browser tab isolation
+                _currentExecutingAgentId = agentId;
                 const toolResult = await executeTool(tc.name, args);
+                _currentExecutingAgentId = null;
                 messages.push({
                     role: 'tool',
                     tool_call_id: tc.id || tc.call_id,
@@ -785,12 +806,17 @@ ${fileCtx ? `\n\nContext files provided:\n${fileCtx}` : ''}`;
             }
         }
 
+        // Release agent's browser tab mapping (tab stays open for inspection)
+        try { require('../browser').releaseAgentTab(agentId); } catch {}
+
         // Save conversation for potential resume
         _agentConversations.set(agentId, { messages: [...messages], toolSet: effectiveToolSet, agentType });
         agent.status = 'done';
         agent.result = { content: 'Sub-agent reached max rounds.', agentId, toolsUsed: agent.toolsUsed, rounds: MAX_SUB_ROUNDS };
         return agent.result;
     } catch (err) {
+        _currentExecutingAgentId = null; // Clear on error
+        try { require('../browser').releaseAgentTab(agentId); } catch {}
         agent.status = 'error';
         agent.result = { error: err.message };
         return agent.result;
@@ -2063,12 +2089,99 @@ async function executeTool(name, args) {
                 };
             }
 
+            // ── Credential Vault Executors ──
+
+            case 'credential_save': {
+                const { vaultSave } = require('../vault');
+                const credId = (args.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                if (!credId) return { error: 'title is required' };
+                const result = vaultSave(credId, {
+                    title: args.title,
+                    type: args.type || 'secret',
+                    service: args.service || '',
+                    description: args.description || '',
+                    tags: args.tags || [],
+                    username: args.username || null,
+                    password: args.password || null,
+                    apiKey: args.api_key || null,
+                    token: args.token || null,
+                    refreshToken: args.refresh_token || null,
+                    extra: args.extra || {},
+                });
+                return { success: true, credential_id: result.id, title: result.title, service: result.service, type: result.type, message: `Credential "${result.title}" saved to encrypted vault.` };
+            }
+
+            case 'credential_search': {
+                const { vaultSearch } = require('../vault');
+                if (!args.query) return { error: 'query is required' };
+                const results = vaultSearch(args.query);
+                return {
+                    results,
+                    count: results.length,
+                    hint: results.length === 0
+                        ? 'No credentials found. Ask the user to save one, or use show_widget({ type: "credential-prompt", ... }) to request credentials inline.'
+                        : undefined,
+                };
+            }
+
+            case 'credential_get': {
+                const { vaultGet } = require('../vault');
+                if (!args.credential_id) return { error: 'credential_id is required' };
+                const cred = vaultGet(args.credential_id);
+                if (!cred) return { error: `Credential "${args.credential_id}" not found` };
+                return { credential: cred };
+            }
+
+            case 'credential_use': {
+                const { vaultGetDecrypted } = require('../vault');
+                if (!args.credential_id) return { error: 'credential_id is required' };
+                const cred = vaultGetDecrypted(args.credential_id);
+                if (!cred) return { error: `Credential "${args.credential_id}" not found` };
+                // Filter to requested fields if specified
+                if (args.fields && Array.isArray(args.fields)) {
+                    const filtered = { credential_id: args.credential_id };
+                    for (const f of args.fields) {
+                        if (cred[f] !== undefined) filtered[f] = cred[f];
+                    }
+                    filtered._security = 'Decrypted for immediate use. Do NOT include these values in chat text.';
+                    return filtered;
+                }
+                return { ...cred, _security: 'Decrypted for immediate use. Do NOT include these values in chat text.' };
+            }
+
+            case 'credential_list': {
+                const { vaultList } = require('../vault');
+                let credentials = vaultList();
+                if (args.type_filter) credentials = credentials.filter(c => c.type === args.type_filter);
+                if (args.service_filter) credentials = credentials.filter(c => c.service.toLowerCase().includes(args.service_filter.toLowerCase()));
+                return { credentials, count: credentials.length };
+            }
+
+            case 'credential_delete': {
+                const { vaultDelete } = require('../vault');
+                if (!args.credential_id) return { error: 'credential_id is required' };
+                const deleted = vaultDelete(args.credential_id);
+                if (!deleted) return { error: `Credential "${args.credential_id}" not found` };
+                return { success: true, deleted: args.credential_id, message: 'Credential permanently deleted from vault.' };
+            }
+
             // ── Browser / Puppeteer Executors ──
+            // When called from a sub-agent, _currentExecutingAgentId is set.
+            // We ensure the agent has a dedicated tab and pass its page to browser functions,
+            // so parallel agents don't clobber each other's navigation.
 
             case 'browser_navigate': {
                 const browserMod = require('../browser');
+                // Ensure agent has its own tab for isolation
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    const tabResult = await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    if (tabResult.error) return tabResult;
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
                 let result = await browserMod.navigate(args.url, {
                     waitUntil: args.wait_until || 'networkidle2',
+                    _page: agentPage,
                 });
                 if (result.error && result.error.includes('ERR_CONNECTION_REFUSED')) {
                     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -2077,6 +2190,7 @@ async function executeTool(name, args) {
                         await new Promise(r => setTimeout(r, delay));
                         result = await browserMod.navigate(args.url, {
                             waitUntil: args.wait_until || 'networkidle2',
+                            _page: agentPage,
                         });
                         if (!result.error || !result.error.includes('ERR_CONNECTION_REFUSED')) break;
                     }
@@ -2087,35 +2201,60 @@ async function executeTool(name, args) {
 
             case 'browser_screenshot': {
                 const browserMod = require('../browser');
-                const result = await browserMod.screenshot({ name: args.name, selector: args.selector, fullPage: args.full_page });
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.screenshot({ name: args.name, selector: args.selector, fullPage: args.full_page, _page: agentPage });
                 logger.tool('browser', `screenshot → ${args.name}`, result);
                 return result;
             }
 
             case 'browser_evaluate': {
                 const browserMod = require('../browser');
-                const result = await browserMod.evaluate(args.script);
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.evaluate(args.script, { _page: agentPage });
                 logger.tool('browser', 'evaluate', result);
                 return result;
             }
 
             case 'browser_click': {
                 const browserMod = require('../browser');
-                const result = await browserMod.click(args.selector);
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.click(args.selector, { _page: agentPage });
                 logger.tool('browser', `click → ${args.selector}`, result);
                 return result;
             }
 
             case 'browser_type': {
                 const browserMod = require('../browser');
-                const result = await browserMod.type(args.selector, args.text);
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.type(args.selector, args.text, { _page: agentPage });
                 logger.tool('browser', `type → ${args.selector}`, result);
                 return result;
             }
 
             case 'browser_wait': {
                 const browserMod = require('../browser');
-                const result = await browserMod.waitForSelector(args.selector, { timeout: args.timeout || 10000 });
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.waitForSelector(args.selector, { timeout: args.timeout || 10000, _page: agentPage });
                 logger.tool('browser', `wait → ${args.selector}`, result);
                 return result;
             }
@@ -2133,6 +2272,142 @@ async function executeTool(name, args) {
                 return result;
             }
 
+            case 'browser_agent_run': {
+                const browserAgent = require('../browserAgent');
+                const result = await browserAgent.runAgent(args.goal, {
+                    startUrl: args.start_url,
+                    maxSteps: args.max_steps,
+                    useChrome: args.use_chrome,
+                });
+                logger.tool('browser-agent', `run → "${args.goal?.slice(0, 60)}"`, { status: result.status, steps: result.totalSteps });
+                return result;
+            }
+
+            case 'browser_get_elements': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.getInteractiveElements({ _page: agentPage });
+                logger.tool('browser', 'get_elements', { total: result.total });
+                return result;
+            }
+
+            case 'browser_get_structure': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.getPageStructure({ _page: agentPage });
+                logger.tool('browser', 'get_structure', { title: result.title });
+                return result;
+            }
+
+            case 'browser_extract_table': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.extractTables(args.selector, { _page: agentPage });
+                logger.tool('browser', `extract_table${args.selector ? ` → ${args.selector}` : ''}`, result);
+                return result;
+            }
+
+            case 'browser_extract_links': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.extractLinks(args.filter, { _page: agentPage });
+                logger.tool('browser', `extract_links${args.filter ? ` → ${args.filter}` : ''}`, { total: result.total });
+                return result;
+            }
+
+            case 'browser_fill_form': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.fillForm(args.fields, { _page: agentPage });
+                logger.tool('browser', `fill_form → ${args.fields?.length || 0} fields`, result);
+                return result;
+            }
+
+            case 'browser_select': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.selectOption(args.selector, args.value, { _page: agentPage });
+                logger.tool('browser', `select → ${args.selector} = ${args.value}`, result);
+                return result;
+            }
+
+            case 'browser_scroll': {
+                const browserMod = require('../browser');
+                let agentPage = null;
+                if (_currentExecutingAgentId) {
+                    await browserMod.ensureAgentTab(_currentExecutingAgentId);
+                    agentPage = browserMod.getAgentPage(_currentExecutingAgentId);
+                }
+                const result = await browserMod.scrollTo({
+                    selector: args.selector,
+                    direction: args.direction,
+                    amount: args.amount,
+                    toBottom: args.to_bottom,
+                    toTop: args.to_top,
+                    _page: agentPage,
+                });
+                logger.tool('browser', 'scroll', result);
+                return result;
+            }
+
+            case 'browser_tab_open': {
+                const browserMod = require('../browser');
+                const result = await browserMod.openTab(args.url);
+                logger.tool('browser', `tab_open${args.url ? ` → ${args.url}` : ''}`, result);
+                return result;
+            }
+
+            case 'browser_tab_switch': {
+                const browserMod = require('../browser');
+                const result = await browserMod.switchTab(args.tab_id);
+                logger.tool('browser', `tab_switch → ${args.tab_id}`, result);
+                return result;
+            }
+
+            case 'browser_tab_list': {
+                const browserMod = require('../browser');
+                const result = await browserMod.listTabs();
+                logger.tool('browser', 'tab_list', { count: result.tabs?.length });
+                return result;
+            }
+
+            case 'browser_tab_close': {
+                const browserMod = require('../browser');
+                const result = await browserMod.closeTab(args.tab_id);
+                logger.tool('browser', `tab_close → ${args.tab_id}`, result);
+                return result;
+            }
+
+            case 'browser_status': {
+                const browserMod = require('../browser');
+                const result = browserMod.getBrowserStatus();
+                return result;
+            }
+
             // ── Task Management Executors ──
 
             case 'task_add': {
@@ -2144,7 +2419,7 @@ async function executeTool(name, args) {
                         for (const blockedId of args.blocks) {
                             const blocked = taskManager.getTask(blockedId);
                             if (blocked) {
-                                const existing = JSON.parse(blocked.blocked_by || '[]');
+                                const existing = safeParseDepArray(blocked.blocked_by);
                                 if (!existing.includes(task.id)) {
                                     existing.push(task.id);
                                     taskManager.updateTask(blockedId, { blocked_by: JSON.stringify(existing) });
@@ -2158,7 +2433,7 @@ async function executeTool(name, args) {
                         for (const blockerId of args.blocked_by) {
                             const blocker = taskManager.getTask(blockerId);
                             if (blocker) {
-                                const existing = JSON.parse(blocker.blocks || '[]');
+                                const existing = safeParseDepArray(blocker.blocks);
                                 if (!existing.includes(task.id)) {
                                     existing.push(task.id);
                                     taskManager.updateTask(blockerId, { blocks: JSON.stringify(existing) });
@@ -2186,7 +2461,7 @@ async function executeTool(name, args) {
                 if (args.status === 'in_progress') {
                     const currentTask = taskManager.getTask(args.id);
                     if (currentTask) {
-                        const blockedBy = JSON.parse(currentTask.blocked_by || '[]');
+                        const blockedBy = safeParseDepArray(currentTask.blocked_by);
                         if (blockedBy.length > 0) {
                             const unfinished = blockedBy.filter(bid => {
                                 const blocker = taskManager.getTask(bid);
@@ -2208,7 +2483,7 @@ async function executeTool(name, args) {
 
                 if (args.add_blocks) {
                     const current = taskManager.getTask(args.id);
-                    const existing = JSON.parse(current?.blocks || '[]');
+                    const existing = safeParseDepArray(current?.blocks);
                     for (const bid of args.add_blocks) {
                         if (!existing.includes(bid)) existing.push(bid);
                     }
@@ -2216,7 +2491,7 @@ async function executeTool(name, args) {
                 }
                 if (args.add_blocked_by) {
                     const current = taskManager.getTask(args.id);
-                    const existing = JSON.parse(current?.blocked_by || '[]');
+                    const existing = safeParseDepArray(current?.blocked_by);
                     for (const bid of args.add_blocked_by) {
                         if (!existing.includes(bid)) existing.push(bid);
                     }
@@ -2224,12 +2499,12 @@ async function executeTool(name, args) {
                 }
                 if (args.remove_blocks) {
                     const current = taskManager.getTask(args.id);
-                    const existing = JSON.parse(current?.blocks || '[]').filter(b => !args.remove_blocks.includes(b));
+                    const existing = safeParseDepArray(current?.blocks).filter(b => !args.remove_blocks.includes(b));
                     updates.blocks = JSON.stringify(existing);
                 }
                 if (args.remove_blocked_by) {
                     const current = taskManager.getTask(args.id);
-                    const existing = JSON.parse(current?.blocked_by || '[]').filter(b => !args.remove_blocked_by.includes(b));
+                    const existing = safeParseDepArray(current?.blocked_by).filter(b => !args.remove_blocked_by.includes(b));
                     updates.blocked_by = JSON.stringify(existing);
                 }
 
@@ -3776,6 +4051,288 @@ async function executeTool(name, args) {
                     }
                     return { error: `gws command failed: ${stderr || stdout || err.message}`.slice(0, 2000) };
                 }
+            }
+
+            // ══════════════════════════════════════════
+            //  Self-Management & Platform Identity
+            // ══════════════════════════════════════════
+
+            case 'get_platform_info': {
+                const includeDiag = args.include_diagnostics !== false;
+                const result = {
+                    platform: {
+                        name: 'Onicode',
+                        description: 'AI-powered development environment — premium chat that expands into a full IDE',
+                        version: require('../../package.json').version || 'dev',
+                        runtime: `Electron ${process.versions.electron || '?'}, Node ${process.version}`,
+                        os: `${os.type()} ${os.release()} (${os.arch()})`,
+                        machine: os.hostname(),
+                        user: os.userInfo().username,
+                        home: os.homedir(),
+                        shell: process.env.SHELL || process.env.COMSPEC || 'unknown',
+                    },
+                    capabilities: [
+                        '80+ AI tools (file ops, git, browser, terminal, memory, search, deployment, orchestration)',
+                        '5 AI providers (OpenAI, Anthropic, Ollama, OniAI, OpenClaw)',
+                        'Multi-agent orchestration with specialist roles',
+                        'Persistent memory (soul.md, user.md, daily logs, project memory)',
+                        'SQLite-backed tasks, conversations, sessions',
+                        'MCP client (dynamic tool discovery)',
+                        '38 interactive widget types + artifact renderer',
+                        'Git integration (23 IPC handlers + 19 AI tools + GitHub CLI)',
+                        'Headless browser (Puppeteer) for testing',
+                        'Context engine with dependency graph',
+                        'Workflow engine + scheduler + heartbeat',
+                        'Code intelligence (LSP, TF-IDF search)',
+                    ],
+                    current_state: {
+                        active_project: _currentProjectPath || null,
+                        loaded_tool_categories: getLoadedToolCategories(),
+                        total_tool_definitions: TOOL_DEFINITIONS.length,
+                    },
+                };
+
+                if (includeDiag) {
+                    const memUsage = process.memoryUsage();
+                    result.diagnostics = {
+                        memory: {
+                            heapUsed: `${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`,
+                            heapTotal: `${Math.round(memUsage.heapTotal / 1024 / 1024)}MB`,
+                            rss: `${Math.round(memUsage.rss / 1024 / 1024)}MB`,
+                            external: `${Math.round(memUsage.external / 1024 / 1024)}MB`,
+                        },
+                        system: {
+                            cpus: os.cpus().length,
+                            totalMemory: `${Math.round(os.totalmem() / 1024 / 1024 / 1024)}GB`,
+                            freeMemory: `${Math.round(os.freemem() / 1024 / 1024 / 1024)}GB`,
+                            uptime: `${Math.round(os.uptime() / 3600)}h`,
+                            loadAvg: os.loadavg().map(l => l.toFixed(2)),
+                        },
+                        storage: (() => {
+                            try {
+                                const dbPath = path.join(os.homedir(), '.onicode', 'onicode.db');
+                                const memDir = path.join(os.homedir(), '.onicode', 'memory');
+                                return {
+                                    database: fs.existsSync(dbPath) ? `${Math.round(fs.statSync(dbPath).size / 1024)}KB` : 'not found',
+                                    memoryDir: fs.existsSync(memDir) ? 'exists' : 'not found',
+                                    configDir: fs.existsSync(path.join(os.homedir(), '.onicode')) ? 'exists' : 'not found',
+                                };
+                            } catch { return { error: 'unable to check' }; }
+                        })(),
+                    };
+                }
+                return { success: true, ...result };
+            }
+
+            case 'update_config': {
+                const { setting, value } = args;
+                if (!setting || value === undefined) return { error: 'Both setting and value are required' };
+
+                switch (setting) {
+                    case 'soul': {
+                        const soulPath = path.join(os.homedir(), '.onicode', 'memory', 'soul.md');
+                        const soulDir = path.dirname(soulPath);
+                        if (!fs.existsSync(soulDir)) fs.mkdirSync(soulDir, { recursive: true });
+                        fs.writeFileSync(soulPath, value, 'utf-8');
+                        // Notify renderer to invalidate prompt cache
+                        sendToRenderer('memory-changed', { file: 'soul.md' });
+                        return { success: true, setting: 'soul', message: 'Soul personality updated. Changes take effect on next message.' };
+                    }
+                    case 'user_profile': {
+                        const userPath = path.join(os.homedir(), '.onicode', 'memory', 'user.md');
+                        const userDir = path.dirname(userPath);
+                        if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true });
+                        fs.writeFileSync(userPath, value, 'utf-8');
+                        sendToRenderer('memory-changed', { file: 'user.md' });
+                        return { success: true, setting: 'user_profile', message: 'User profile updated.' };
+                    }
+                    case 'theme': {
+                        const validThemes = ['sand', 'midnight', 'obsidian', 'ocean', 'aurora', 'monokai', 'rose-pine', 'nord', 'catppuccin', 'light', 'dark', 'neutral'];
+                        if (!validThemes.includes(value.toLowerCase())) {
+                            return { error: `Invalid theme. Valid themes: ${validThemes.join(', ')}` };
+                        }
+                        sendToRenderer('set-theme', value.toLowerCase());
+                        return { success: true, setting: 'theme', value: value.toLowerCase(), message: `Theme changed to ${value}` };
+                    }
+                    case 'permission_mode': {
+                        const validModes = ['auto-allow', 'ask-destructive', 'plan-only'];
+                        if (!validModes.includes(value)) {
+                            return { error: `Invalid permission mode. Valid: ${validModes.join(', ')}` };
+                        }
+                        sendToRenderer('set-permission-mode', value);
+                        return { success: true, setting: 'permission_mode', value, message: `Permission mode changed to ${value}` };
+                    }
+                    case 'auto_commit': {
+                        const enabled = value === 'true' || value === '1';
+                        sendToRenderer('set-auto-commit', enabled);
+                        return { success: true, setting: 'auto_commit', value: enabled, message: `Auto-commit ${enabled ? 'enabled' : 'disabled'}` };
+                    }
+                    case 'thinking_level': {
+                        const validLevels = ['low', 'medium', 'high'];
+                        if (!validLevels.includes(value)) {
+                            return { error: `Invalid thinking level. Valid: ${validLevels.join(', ')}` };
+                        }
+                        sendToRenderer('set-thinking-level', value);
+                        return { success: true, setting: 'thinking_level', value, message: `Thinking level set to ${value}` };
+                    }
+                    case 'compact_threshold': {
+                        const threshold = parseInt(value);
+                        if (isNaN(threshold) || threshold < 10000) {
+                            return { error: 'compact_threshold must be a number >= 10000' };
+                        }
+                        sendToRenderer('set-compact-threshold', threshold);
+                        return { success: true, setting: 'compact_threshold', value: threshold, message: `Compaction threshold set to ${threshold} tokens` };
+                    }
+                    default:
+                        return { error: `Unknown setting: ${setting}` };
+                }
+            }
+
+            case 'self_diagnose': {
+                const checksStr = (args.checks || 'all').toLowerCase();
+                const runAll = checksStr.includes('all');
+                const checks = checksStr.split(',').map(s => s.trim());
+                const report = { overall: 'healthy', checks: {}, issues: [], recommendations: [] };
+
+                // Provider check
+                if (runAll || checks.includes('provider')) {
+                    try {
+                        const providers = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.onicode', 'providers.json'), 'utf-8') || '[]');
+                        const active = providers.find(p => p.enabled && p.connected);
+                        report.checks.provider = {
+                            status: active ? 'ok' : 'warning',
+                            active: active ? `${active.id} (${active.selectedModel || 'default model'})` : 'none',
+                            total: providers.length,
+                            connected: providers.filter(p => p.connected).length,
+                        };
+                        if (!active) {
+                            report.issues.push('No active AI provider found');
+                            report.recommendations.push('Configure an AI provider in Settings > Providers');
+                        }
+                    } catch {
+                        // providers stored in localStorage, not accessible from main — try fallback
+                        report.checks.provider = { status: 'info', message: 'Provider config stored in renderer localStorage — check Settings > Providers' };
+                    }
+                }
+
+                // Tool definitions check
+                if (runAll || checks.includes('tools')) {
+                    const toolCount = TOOL_DEFINITIONS.length;
+                    const deferredCount = Object.values(DEFERRED_TOOL_CATEGORIES).flat().length;
+                    const loadedCats = getLoadedToolCategories();
+                    report.checks.tools = {
+                        status: toolCount > 0 ? 'ok' : 'error',
+                        total_definitions: toolCount,
+                        core_tools: toolCount - deferredCount,
+                        deferred_tools: deferredCount,
+                        loaded_categories: loadedCats,
+                    };
+                    if (toolCount === 0) report.issues.push('No tool definitions loaded');
+                }
+
+                // Memory system check
+                if (runAll || checks.includes('memory')) {
+                    const memDir = path.join(os.homedir(), '.onicode', 'memory');
+                    try {
+                        const exists = fs.existsSync(memDir);
+                        const files = exists ? fs.readdirSync(memDir).filter(f => f.endsWith('.md')) : [];
+                        const soulExists = files.includes('soul.md');
+                        const userExists = files.includes('user.md');
+                        report.checks.memory = {
+                            status: exists ? 'ok' : 'warning',
+                            directory: exists ? 'exists' : 'missing',
+                            files: files.length,
+                            soul_md: soulExists ? 'present' : 'missing',
+                            user_md: userExists ? 'present' : 'missing',
+                        };
+                        if (!soulExists) {
+                            report.issues.push('soul.md not found — AI personality not configured');
+                            report.recommendations.push('Create soul.md in Settings > Memory or use update_config(soul, content)');
+                        }
+                    } catch (err) {
+                        report.checks.memory = { status: 'error', error: err.message };
+                        report.issues.push('Memory directory inaccessible');
+                    }
+                }
+
+                // Storage (SQLite) check
+                if (runAll || checks.includes('storage')) {
+                    const dbPath = path.join(os.homedir(), '.onicode', 'onicode.db');
+                    try {
+                        const exists = fs.existsSync(dbPath);
+                        report.checks.storage = {
+                            status: exists ? 'ok' : 'warning',
+                            database: exists ? 'exists' : 'missing',
+                            size: exists ? `${Math.round(fs.statSync(dbPath).size / 1024)}KB` : 'n/a',
+                        };
+                        if (!exists) {
+                            report.issues.push('SQLite database not found');
+                            report.recommendations.push('Database will be auto-created on first conversation save');
+                        }
+                    } catch (err) {
+                        report.checks.storage = { status: 'error', error: err.message };
+                    }
+                }
+
+                // MCP check
+                if (runAll || checks.includes('mcp')) {
+                    const mcpConfig = path.join(os.homedir(), '.onicode', 'mcp.json');
+                    try {
+                        if (fs.existsSync(mcpConfig)) {
+                            const config = JSON.parse(fs.readFileSync(mcpConfig, 'utf-8'));
+                            const servers = config.mcpServers || {};
+                            report.checks.mcp = {
+                                status: 'ok',
+                                configured_servers: Object.keys(servers).length,
+                                servers: Object.keys(servers),
+                            };
+                        } else {
+                            report.checks.mcp = { status: 'info', message: 'No MCP servers configured' };
+                        }
+                    } catch (err) {
+                        report.checks.mcp = { status: 'error', error: err.message };
+                    }
+                }
+
+                // Terminal sessions check
+                if (runAll || checks.includes('terminals')) {
+                    try {
+                        const sessions = getBackgroundProcesses();
+                        report.checks.terminals = {
+                            status: 'ok',
+                            active_sessions: sessions.length,
+                            sessions: sessions.map(s => ({ id: s.id, running: s.running, pid: s.pid, port: s.port || null })),
+                        };
+                    } catch {
+                        report.checks.terminals = { status: 'ok', active_sessions: 0, sessions: [] };
+                    }
+                }
+
+                // Recent errors check
+                if (runAll || checks.includes('errors')) {
+                    try {
+                        const { getRecentLogs } = require('../logger');
+                        const errors = getRecentLogs({ level: 'ERROR', limit: 10 });
+                        report.checks.errors = {
+                            status: errors.length > 5 ? 'warning' : 'ok',
+                            recent_errors: errors.length,
+                            latest: errors.slice(0, 3).map(e => ({ category: e.category, message: (e.message || '').slice(0, 150), time: e.timestamp })),
+                        };
+                        if (errors.length > 5) {
+                            report.issues.push(`${errors.length} recent errors in logs`);
+                            report.recommendations.push('Check get_system_logs(level: "ERROR") for details');
+                        }
+                    } catch {
+                        report.checks.errors = { status: 'info', message: 'Logger not available' };
+                    }
+                }
+
+                // Overall health
+                const hasErrors = Object.values(report.checks).some(c => c.status === 'error');
+                const hasWarnings = Object.values(report.checks).some(c => c.status === 'warning');
+                report.overall = hasErrors ? 'unhealthy' : hasWarnings ? 'degraded' : 'healthy';
+
+                return { success: true, ...report };
             }
 
             default:

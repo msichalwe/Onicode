@@ -69,7 +69,8 @@ export type ChatWidgetType =
     | 'equation'
     | 'video'
     | 'document'
-    | 'artifact';
+    | 'artifact'
+    | 'credential-prompt';
 
 export interface ChatWidget {
     id: string;
@@ -373,7 +374,7 @@ export interface InputAreaProps {
     showAttachMenu: boolean;
     scope: ChatScope;
     activeProject?: ActiveProject | null;
-    contextInfo: { tokens: number; messages: number } | null;
+    contextInfo: { tokens: number; messages: number; contextWindow?: number } | null;
     showModelPicker: boolean;
     thinkingLevel: string;
     messagesCount: number;
@@ -413,7 +414,7 @@ export interface InputAreaProps {
 }
 
 export interface ContextBarProps {
-    contextInfo: { tokens: number; messages: number } | null;
+    contextInfo: { tokens: number; messages: number; contextWindow?: number } | null;
     messagesCount: number;
     showModelPicker: boolean;
     thinkingLevel: string;
@@ -423,6 +424,7 @@ export interface ContextBarProps {
 
 export interface WelcomeScreenProps {
     onSuggestionClick: (suggestion: string) => void;
+    mode?: import('../../modes').OnicodeMode;
 }
 
 export interface ConversationHistoryProps {

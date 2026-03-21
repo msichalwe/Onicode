@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { isElectron } from '../../utils';
 import type {
     ChatWidget, WeatherData, SystemStatsData, QuickActionsData,
     TimerData, ProgressData, GitCardData, PollData, ChecklistData,
@@ -65,6 +66,7 @@ export default function WidgetRenderer({ widget, onAction, onUpdate }: WidgetRen
         case 'video': return <VideoWidget data={widget.data} />;
         case 'document': return <DocumentWidget data={widget.data} />;
         case 'artifact': return <ArtifactWidget data={widget.data} onAction={onAction} />;
+        case 'credential-prompt': return <CredentialPromptWidget data={widget.data} id={widget.id} onAction={onAction} />;
         default: return null;
     }
 }
@@ -848,6 +850,90 @@ function SVGChartWidget({ data }: { data: SVGChartData }) {
                     {datasets.map((ds, i) => <span key={i} className="cw-legend-item"><span className="cw-legend-dot" style={{ background: ds.color || colors[i % colors.length] }} />{ds.label}</span>)}
                 </div>
             )}
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════
+//  Credential Prompt (inline form for missing credentials)
+// ══════════════════════════════════════════
+
+function CredentialPromptWidget({ data, id, onAction }: { data: Record<string, unknown>; id: string; onAction?: (cmd: string) => void }) {
+    const service = String(data.service || data.name || 'this service');
+    const credType = String(data.type || data.credential_type || 'login') as 'api_key' | 'login' | 'secret' | 'oauth';
+    const message = data.message ? String(data.message) : `I need credentials for ${service} to continue.`;
+
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [apiKey, setApiKey] = useState('');
+    const [token, setToken] = useState('');
+    const [saved, setSaved] = useState(false);
+    const [saving, setSaving] = useState(false);
+
+    const handleSave = async () => {
+        if (!isElectron) return;
+        setSaving(true);
+        try {
+            const credId = service.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+            const entry: Record<string, unknown> = {
+                title: `${service} ${credType === 'login' ? 'Login' : credType === 'api_key' ? 'API Key' : credType === 'oauth' ? 'Token' : 'Secret'}`,
+                type: credType,
+                service: service.toLowerCase(),
+                tags: [service.toLowerCase()],
+            };
+            if (credType === 'login') {
+                if (username) entry.username = username;
+                if (password) entry.password = password;
+            } else if (credType === 'api_key' || credType === 'secret') {
+                if (apiKey) entry.apiKey = apiKey;
+            } else if (credType === 'oauth') {
+                if (token) entry.token = token;
+            }
+            await window.onicode!.vaultSave(credId, entry as any);
+            setSaved(true);
+            // Notify AI that creds were saved so it can retry
+            onAction?.(`Credentials for ${service} have been saved to the vault. Please retry the action.`);
+        } catch {}
+        setSaving(false);
+    };
+
+    if (saved) {
+        return (
+            <div className="cw cw-cred-prompt cw-cred-saved">
+                <span className="cw-cred-icon">✅</span>
+                <span>Credentials for <strong>{service}</strong> saved to vault.</span>
+            </div>
+        );
+    }
+
+    return (
+        <div className="cw cw-cred-prompt">
+            <div className="cw-cred-header">
+                <span className="cw-cred-icon">🔐</span>
+                <span className="cw-cred-message">{message}</span>
+            </div>
+            <div className="cw-cred-fields">
+                {credType === 'login' && (
+                    <>
+                        <input type="text" placeholder="Username or email" value={username} onChange={e => setUsername(e.target.value)} className="cw-cred-input" />
+                        <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="cw-cred-input" />
+                    </>
+                )}
+                {(credType === 'api_key' || credType === 'secret') && (
+                    <input type="password" placeholder={credType === 'api_key' ? 'API Key' : 'Secret value'} value={apiKey} onChange={e => setApiKey(e.target.value)} className="cw-cred-input" />
+                )}
+                {credType === 'oauth' && (
+                    <input type="password" placeholder="Access token" value={token} onChange={e => setToken(e.target.value)} className="cw-cred-input" />
+                )}
+            </div>
+            <div className="cw-cred-actions">
+                <button className="cw-cred-save" onClick={handleSave} disabled={saving}>
+                    {saving ? 'Saving...' : 'Save to Vault'}
+                </button>
+                <button className="cw-cred-skip" onClick={() => onAction?.(`User skipped providing credentials for ${service}.`)}>
+                    Skip
+                </button>
+            </div>
         </div>
     );
 }

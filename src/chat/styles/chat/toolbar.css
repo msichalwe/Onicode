@@ -13,6 +13,12 @@
   margin: 0 auto;
 }
 
+.context-model-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .context-model {
   font-weight: 600;
   color: var(--text-secondary);
@@ -21,6 +27,13 @@
   background: var(--bg-tertiary);
   padding: 1px 5px;
   border-radius: 3px;
+  border: none;
+  cursor: pointer;
+}
+
+.context-model:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-tertiary));
 }
 
 .context-divider {
@@ -123,6 +136,13 @@
 .model-picker-item.selected {
   background: var(--accent);
   color: var(--text-on-accent, #fff);
+}
+
+.model-picker-empty {
+  padding: 12px 8px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: center;
 }
 
 /* ── Thinking Level Control ── */

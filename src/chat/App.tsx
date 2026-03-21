@@ -19,6 +19,25 @@ import { isElectron } from './utils';
 import { MODE_CONFIGS } from './modes';
 import type { OnicodeMode, WorkpalFolder } from './modes';
 
+// Fun quips for mode-switch warning (stable outside component so no re-creation per render)
+const MODE_SWITCH_QUIPS = [
+    'Switching gears!', 'Plot twist incoming...', 'New chapter, who dis?',
+    'Hold tight, teleporting...', 'Changing lanes like a boss.',
+    'Brb, entering another dimension.', 'Goodbye old friend, hello new one.',
+    'Time to shift realities.', 'Pack your bags, we\'re moving!',
+    'One does not simply switch modes... or do they?',
+    'Loading alternate universe...', 'Swapping hats in 3... 2... 1...',
+    'Context switch: not just for CPUs.', 'Closing this tab in your brain.',
+    'Pivoting harder than a startup.', 'Mode change? That\'s a vibe shift.',
+    'Exiting the matrix...', 'Ctrl+Z won\'t save you now.',
+    'This conversation will self-destruct.', 'Engaging warp drive...',
+    'Abandoning ship! (safely)', 'New mode, new me.', 'BRB, recalibrating.',
+    'Switching frequencies...', 'Leaving the chat (literally).',
+    'Off to greener pastures.', 'Beam me up to the next mode!',
+    'Plot armor activated for the switch.', 'Rolling credits on this session.',
+    'Achievement unlocked: Mode Switcher!',
+];
+
 // Error boundary to catch render crashes in secondary views
 class ViewErrorBoundary extends React.Component<
     { children: React.ReactNode; onReset?: () => void },
@@ -71,10 +90,25 @@ function AppContent() {
     const [projects, setProjects] = useState<ActiveProject[]>([]);
     const [unreadChatCount, setUnreadChatCount] = useState(0);
     const currentViewRef = useRef(currentView);
-    const { theme } = useTheme();
+    const { theme, setTheme } = useTheme();
 
     // Keep ref in sync so callbacks see the latest view
     useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+
+    // Listen for AI-triggered config changes (from update_config tool)
+    useEffect(() => {
+        if (!window.onicode?.onConfigChange) return;
+        const cleanup = window.onicode.onConfigChange((data) => {
+            if (data.setting === 'theme' && typeof data.value === 'string') {
+                // Map theme names: the AI sends 'dark'/'light' but our theme names are 'default-dark'/'default-light'
+                const themeMap: Record<string, string> = { dark: 'default-dark', light: 'default-light', 'rose-pine': 'rosepine' };
+                const mapped = themeMap[data.value] || data.value;
+                setTheme(mapped as import('./hooks/useTheme').ThemeName);
+            }
+            // Other settings can be handled here as needed
+        });
+        return cleanup;
+    }, [setTheme]);
 
     // Reset unread count when switching to chat
     const handleViewChange = useCallback((view: View) => {
@@ -187,6 +221,8 @@ function AppContent() {
     }, []);
 
     // ── Mode switching ──
+    const [switchQuip, setSwitchQuip] = useState('');
+
     // Actually perform the mode switch (called directly or after confirmation)
     const doSwitchMode = useCallback(async (newMode: OnicodeMode) => {
         // Workpal: prompt for folder if none selected
@@ -223,23 +259,26 @@ function AppContent() {
         localStorage.setItem('onicode-chat-scope', newScope);
 
         handleViewChange('chat');
-        // Clear stale tasks and start fresh chat in the new mode
-        if (isElectron && window.onicode?.clearAllTasks) window.onicode.clearAllTasks().catch(() => {});
-        window.dispatchEvent(new CustomEvent('onicode-new-chat'));
+        // ChatView handles save/load transitions internally via mode-change useEffect
+        // — no event dispatch needed here
     }, [mode, workpalFolder, activeProject, handleViewChange]);
 
     const switchMode = useCallback(async (newMode: OnicodeMode) => {
         if (newMode === mode) return;
 
-        // If leaving a contextual mode (projects/workpal), show confirmation
-        const leavingContextual = (mode === 'projects' && activeProject) || (mode === 'workpal' && workpalFolder);
-        if (leavingContextual && !dontAskModeSwitch) {
+        // Always show warning when there's an active chat, regardless of mode
+        // Check if current mode has an active conversation with messages
+        const currentConvId = localStorage.getItem(`onicode-active-conversation-${mode}`);
+        const hasActiveChat = !!currentConvId;
+
+        if (hasActiveChat && !dontAskModeSwitch) {
+            setSwitchQuip(MODE_SWITCH_QUIPS[Math.floor(Math.random() * MODE_SWITCH_QUIPS.length)]);
             setPendingModeSwitch(newMode);
             return;
         }
 
         await doSwitchMode(newMode);
-    }, [mode, activeProject, workpalFolder, dontAskModeSwitch, doSwitchMode]);
+    }, [mode, dontAskModeSwitch, doSwitchMode]);
 
     const confirmModeSwitch = useCallback(() => {
         if (pendingModeSwitch) {
@@ -491,22 +530,37 @@ function AppContent() {
             {pendingModeSwitch && (
                 <div className="exit-warning-overlay" onClick={cancelModeSwitch}>
                     <div className="exit-warning-dialog" onClick={(e) => e.stopPropagation()}>
-                        <h3>Switch to {pendingModeSwitch === 'onichat' ? 'OniChat' : pendingModeSwitch === 'workpal' ? 'Workpal' : 'Projects'}?</h3>
-                        <p>Your current {mode === 'projects' ? 'project' : 'workpal'} chat will be saved. We&apos;ll start a fresh session in <strong>{pendingModeSwitch === 'onichat' ? 'OniChat' : pendingModeSwitch === 'workpal' ? 'Workpal' : 'Projects'}</strong> mode.</p>
+                        <h3>{switchQuip}</h3>
+                        <p>
+                            Switching to <strong>{pendingModeSwitch === 'onichat' ? 'OniChat' : pendingModeSwitch === 'workpal' ? 'Workpal' : 'Projects'}</strong>.
+                            {' '}Your current {mode === 'projects' ? 'project' : mode === 'workpal' ? 'workpal' : 'chat'} session will be saved and you can come back to it anytime.
+                        </p>
                         <label className="mode-switch-dont-ask" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8, cursor: 'pointer' }}>
                             <input type="checkbox" checked={dontAskModeSwitch} onChange={(e) => { setDontAskModeSwitch(e.target.checked); localStorage.setItem('onicode-dont-ask-mode-switch', String(e.target.checked)); }} />
-                            Don&apos;t show this again
+                            Don&apos;t ask me again
                         </label>
                         <div className="exit-warning-actions">
-                            <button className="exit-warning-cancel" onClick={cancelModeSwitch}>Cancel</button>
-                            <button className="exit-warning-confirm" onClick={confirmModeSwitch}>Switch Mode</button>
+                            <button className="exit-warning-cancel" onClick={cancelModeSwitch}>Stay</button>
+                            <button className="exit-warning-confirm" onClick={confirmModeSwitch}>Switch</button>
                         </div>
                     </div>
                 </div>
             )}
 
             {/* Search Modal */}
-            {showSearch && <SearchModal onClose={() => setShowSearch(false)} onSelect={(id) => { setShowSearch(false); handleViewChange('chat'); window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: id })); }} />}
+            {showSearch && <SearchModal mode={mode} onClose={() => setShowSearch(false)} onSelect={(id, convScope) => {
+                setShowSearch(false);
+                // Determine which mode this conversation belongs to
+                const targetMode: OnicodeMode = convScope === 'project' ? 'projects' : convScope === 'workpal' ? 'workpal' : 'onichat';
+                if (targetMode !== mode) {
+                    // Cross-mode: trigger mode switch (shows warning), don't load old chat
+                    switchMode(targetMode);
+                } else {
+                    // Same mode: load conversation directly
+                    handleViewChange('chat');
+                    window.dispatchEvent(new CustomEvent('onicode-load-conversation', { detail: id }));
+                }
+            }} />}
 
             <div className="app-body">
                 <Sidebar currentView={currentView} onViewChange={handleViewChange} unreadChatCount={unreadChatCount} mode={mode} />
@@ -555,7 +609,7 @@ function AppContent() {
 //  Search Modal (⌘K)
 // ══════════════════════════════════════════
 
-function SearchModal({ onClose, onSelect }: { onClose: () => void; onSelect: (id: string) => void }) {
+function SearchModal({ mode, onClose, onSelect }: { mode: OnicodeMode; onClose: () => void; onSelect: (id: string, scope?: string) => void }) {
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<Array<{ id: string; title: string; updated_at: number; project_name?: string; scope?: string }>>([]);
     const [selected, setSelected] = useState(0);
@@ -567,7 +621,7 @@ function SearchModal({ onClose, onSelect }: { onClose: () => void; onSelect: (id
         if (!query.trim() || !isElectron) {
             if (!query.trim()) {
                 // Show recent conversations when no query
-                window.onicode?.conversationList(15, 0).then(res => {
+                window.onicode?.conversationList(30, 0).then(res => {
                     if (res.success && res.conversations) setResults(res.conversations as typeof results);
                 }).catch(() => {});
             }
@@ -576,7 +630,7 @@ function SearchModal({ onClose, onSelect }: { onClose: () => void; onSelect: (id
         // Search conversations
         const timer = setTimeout(async () => {
             try {
-                const res = await window.onicode!.conversationList(30, 0);
+                const res = await window.onicode!.conversationList(50, 0);
                 if (res.success && res.conversations) {
                     const q = query.toLowerCase();
                     const filtered = (res.conversations as typeof results).filter(c =>
@@ -594,7 +648,7 @@ function SearchModal({ onClose, onSelect }: { onClose: () => void; onSelect: (id
         if (e.key === 'Escape') onClose();
         if (e.key === 'ArrowDown') { e.preventDefault(); setSelected(p => Math.min(p + 1, results.length - 1)); }
         if (e.key === 'ArrowUp') { e.preventDefault(); setSelected(p => Math.max(p - 1, 0)); }
-        if (e.key === 'Enter' && results[selected]) { onSelect(results[selected].id); }
+        if (e.key === 'Enter' && results[selected]) { onSelect(results[selected].id, results[selected].scope); }
     };
 
     const timeAgo = (ts: number) => {
@@ -605,25 +659,38 @@ function SearchModal({ onClose, onSelect }: { onClose: () => void; onSelect: (id
         return `${Math.floor(diff / 86400000)}d ago`;
     };
 
+    /** Determine which mode a conversation belongs to */
+    const convBelongsTo = (c: { scope?: string; project_name?: string }): OnicodeMode => {
+        if (c.project_name || c.scope === 'project') return 'projects';
+        if (c.scope === 'workpal' || c.scope === 'workmate') return 'workpal';
+        return 'onichat';
+    };
+
     return (
         <div className="search-modal-overlay" onClick={onClose}>
             <div className="search-modal" onClick={e => e.stopPropagation()}>
                 <div className="search-modal-input-row">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                    <input ref={inputRef} className="search-modal-input" placeholder="Search conversations..." value={query} onChange={e => setQuery(e.target.value)} onKeyDown={handleKeyDown} />
+                    <input ref={inputRef} className="search-modal-input" placeholder="Search all conversations..." value={query} onChange={e => setQuery(e.target.value)} onKeyDown={handleKeyDown} />
                     <kbd className="search-modal-kbd">esc</kbd>
                 </div>
                 <div className="search-modal-results">
                     {results.length === 0 && query && <div className="search-modal-empty">No conversations found</div>}
-                    {results.map((c, i) => (
-                        <button key={c.id} className={`search-modal-item ${i === selected ? 'selected' : ''}`} onClick={() => onSelect(c.id)} onMouseEnter={() => setSelected(i)}>
-                            <div className="search-modal-item-title">{c.title || 'Untitled'}</div>
-                            <div className="search-modal-item-meta">
-                                {c.project_name && <span className="search-modal-item-project">{c.project_name}</span>}
-                                <span>{timeAgo(c.updated_at)}</span>
-                            </div>
-                        </button>
-                    ))}
+                    {results.map((c, i) => {
+                        const belongsTo = convBelongsTo(c);
+                        const isCrossMode = belongsTo !== mode;
+                        return (
+                            <button key={c.id} className={`search-modal-item ${i === selected ? 'selected' : ''}${isCrossMode ? ' search-modal-item-cross' : ''}`} onClick={() => onSelect(c.id, c.scope)} onMouseEnter={() => setSelected(i)}>
+                                <div className="search-modal-item-title">{c.title || 'Untitled'}</div>
+                                <div className="search-modal-item-meta">
+                                    {belongsTo === 'projects' && c.project_name && <span className="search-modal-item-project">{c.project_name}</span>}
+                                    {belongsTo === 'workpal' && <span className="search-modal-item-workpal">Workpal</span>}
+                                    {belongsTo === 'onichat' && isCrossMode && <span className="search-modal-item-chat">Chat</span>}
+                                    <span>{timeAgo(c.updated_at)}</span>
+                                </div>
+                            </button>
+                        );
+                    })}
                 </div>
             </div>
         </div>

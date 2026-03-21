@@ -1,3 +1,94 @@
+/* ── Rate Limit Banner ── */
+.rate-limit-banner {
+  max-width: 780px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 8px 28px 0;
+  position: relative;
+  animation: rate-limit-slide-in 0.2s ease-out;
+}
+
+@keyframes rate-limit-slide-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.rate-limit-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--warning-bg, rgba(227, 179, 65, 0.12));
+  border: 1px solid var(--warning, #e3b341);
+  border-radius: 8px 8px 0 0;
+  border-bottom: none;
+}
+
+.rate-limit-icon {
+  color: var(--warning, #e3b341);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.rate-limit-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.rate-limit-timer {
+  font-size: 16px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--warning, #e3b341);
+  letter-spacing: 0.5px;
+  margin-left: auto;
+}
+
+.rate-limit-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.rate-limit-bar {
+  height: 3px;
+  background: var(--bg-tertiary);
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  margin: 0 12px;
+}
+
+.rate-limit-bar-fill {
+  height: 100%;
+  background: var(--warning, #e3b341);
+  border-radius: 0 0 8px 8px;
+  transition: width 1s linear;
+}
+
+.rate-limit-dismiss {
+  position: absolute;
+  top: 12px;
+  right: 32px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+}
+
+.rate-limit-dismiss:hover {
+  opacity: 1;
+  color: var(--text-primary);
+}
+
 /* ── Input Area ── */
 .input-area {
   padding: 12px 28px 20px;

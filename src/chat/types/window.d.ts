@@ -51,6 +51,24 @@ interface ContextModeStats {
     search_calls_this_session: number;
 }
 
+export interface VaultCredential {
+    id: string;
+    title: string;
+    description: string;
+    type: 'api_key' | 'login' | 'secret' | 'oauth';
+    service: string;
+    tags: string[];
+    maskedUsername?: string | null;
+    maskedPassword?: string | null;
+    maskedApiKey?: string | null;
+    maskedToken?: string | null;
+    hasRefreshToken?: boolean;
+    hasExtra?: boolean;
+    extraKeys?: string[];
+    createdAt: number;
+    updatedAt: number;
+}
+
 interface ProjectMeta {
     id: string;
     name: string;
@@ -89,6 +107,7 @@ interface OnicodeAPI {
     ) => Promise<{ success?: boolean; error?: string }>;
     onStreamChunk: (callback: (chunk: string, requestId?: string) => void) => () => void;
     onStreamDone: (callback: (error: string | null, requestId?: string) => void) => () => void;
+    onRateLimited: (callback: (data: { resetsAt: number | null; resetsInSeconds: number | null; planType: string | null; message: string | null; timestamp: number }) => void) => () => void;
     abortAI: (requestId?: string) => Promise<{ success: boolean }>;
     openExternal: (url: string) => Promise<void>;
 
@@ -100,6 +119,7 @@ interface OnicodeAPI {
     onToolResult: (callback: (data: { id: string; name: string; result: Record<string, unknown>; round: number }) => void) => () => void;
     onWidget: (callback: (data: { id: string; type: string; data: Record<string, unknown> }) => void) => () => void;
     onAgentStep: (callback: (data: { round: number; status: string; agentId?: string; task?: string; toolSet?: string; role?: string; orchestrationId?: string }) => void) => () => void;
+    onBuiltinToolStatus: (callback: (data: { type: string; status: string; query?: string; output?: string }) => void) => () => void;
     onPanelOpen: (callback: (data: { type: string }) => void) => () => void;
 
     // Ask User Question (Cascade-level)
@@ -275,6 +295,19 @@ interface OnicodeAPI {
     keystoreDelete: (id: string) => Promise<{ success: boolean }>;
     keystoreStatus: () => Promise<{ encrypted: boolean; algorithm: string; keyDerivation: string; safeStorage: boolean; keyCount: number }>;
 
+    // Credential Vault
+    vaultList: () => Promise<{ credentials: VaultCredential[]; error?: string }>;
+    vaultSave: (id: string, entry: {
+        title: string; type: string; service: string; description?: string;
+        tags?: string[]; username?: string; password?: string;
+        apiKey?: string; token?: string; refreshToken?: string;
+        extra?: Record<string, string>;
+    }) => Promise<{ success: boolean; credential?: VaultCredential; error?: string }>;
+    vaultGet: (id: string) => Promise<{ found: boolean; credential?: VaultCredential; error?: string }>;
+    vaultDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+    vaultSearch: (query: string) => Promise<{ results: VaultCredential[]; error?: string }>;
+    vaultStatus: () => Promise<{ encrypted: boolean; algorithm: string; keyDerivation?: string; safeStorage: boolean; credentialCount: number; error?: string }>;
+
     // Memory
     memoryLoadCore: (projectId?: string) => Promise<{
         success: boolean;
@@ -314,6 +347,9 @@ interface OnicodeAPI {
     // Memory change notifications
     onMemoryChanged: (callback: (data: { filename: string; action: string; scope: string }) => void) => () => void;
 
+    // AI-triggered config changes (from update_config tool)
+    onConfigChange: (callback: (data: { setting: string; value: string | boolean | number }) => void) => () => void;
+
     // Browser / Puppeteer
     browserLaunch: (opts?: { headless?: boolean; width?: number; height?: number }) => Promise<{ success?: boolean; error?: string; reused?: boolean; message?: string }>;
     browserClose: () => Promise<{ success: boolean }>;
@@ -326,6 +362,36 @@ interface OnicodeAPI {
     browserContent: () => Promise<{ success?: boolean; url?: string; title?: string; html?: string; length?: number; error?: string }>;
     browserConsoleLogs: (opts?: { type?: string; limit?: number }) => Promise<{ success: boolean; logs: Array<{ type: string; text: string; ts: string }> }>;
     browserConsoleClear: () => Promise<{ success: boolean }>;
+
+    // Browser Agent
+    browserAgentRun: (goal: string, opts?: { start_url?: string; max_steps?: number; use_chrome?: boolean }) => Promise<{
+        success: boolean;
+        sessionId: string;
+        goal: string;
+        status: string;
+        result: any;
+        steps: Array<{ step: number; action?: string; result?: string; error?: string }>;
+        totalSteps: number;
+        duration: number;
+        error?: string;
+    }>;
+    browserAgentSession: (sessionId: string) => Promise<any>;
+    browserAgentSessions: () => Promise<Array<{ id: string; goal: string; status: string; steps: number; startedAt: number; result: any }>>;
+    onBrowserAgentStatus: (callback: (data: { sessionId: string; status: string; goal: string; steps?: number; duration?: number; result?: any }) => void) => () => void;
+    onBrowserAgentStep: (callback: (data: { sessionId: string; step: number; status?: string; action?: string; detail?: string; url?: string; error?: string }) => void) => () => void;
+    // Browser Extended
+    browserGetElements: () => Promise<{ buttons: any[]; links: any[]; inputs: any[]; selects: any[]; total: number }>;
+    browserGetStructure: () => Promise<any>;
+    browserExtractTable: (selector?: string) => Promise<any>;
+    browserExtractLinks: (filter?: string) => Promise<any>;
+    browserFillForm: (fields: Array<{ label?: string; value: string; selector?: string }>) => Promise<any>;
+    browserSelect: (selector: string, value: string) => Promise<any>;
+    browserScroll: (opts: { selector?: string; direction?: string; amount?: number; to_bottom?: boolean; to_top?: boolean }) => Promise<any>;
+    browserOpenTab: (url?: string) => Promise<any>;
+    browserSwitchTab: (tabId: string) => Promise<any>;
+    browserListTabs: () => Promise<Array<{ tabId: string; url: string; title: string; isActive: boolean }>>;
+    browserCloseTab: (tabId: string) => Promise<any>;
+    browserStatus: () => Promise<{ running: boolean; useChrome: boolean; tabs: any[]; activeTab: string; url: string; downloads: string[] }>;
 
     // Attachments (project-scoped)
     attachmentSave: (att: {

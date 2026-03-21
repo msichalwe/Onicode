@@ -1,0 +1,1045 @@
+/* ══════════════════════════════════════════
+   Onboarding Wizard — 7-step animated setup
+   Premium feel with CSS-only animations
+   ══════════════════════════════════════════ */
+
+/* ── Overlay ── */
+
+.ob-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+}
+
+.ob-overlay.ob-mounted {
+    opacity: 1;
+}
+
+/* ── Floating background shapes ── */
+
+.ob-bg-shapes {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.ob-shape {
+    position: absolute;
+    border-radius: 50%;
+    opacity: 0.08;
+    filter: blur(60px);
+}
+
+.ob-shape-1 {
+    width: 400px;
+    height: 400px;
+    background: var(--accent);
+    top: -100px;
+    right: -80px;
+    animation: ob-float-1 12s ease-in-out infinite;
+}
+
+.ob-shape-2 {
+    width: 300px;
+    height: 300px;
+    background: color-mix(in srgb, var(--accent) 60%, #ec4899);
+    bottom: -60px;
+    left: -60px;
+    animation: ob-float-2 15s ease-in-out infinite;
+}
+
+.ob-shape-3 {
+    width: 250px;
+    height: 250px;
+    background: color-mix(in srgb, var(--accent) 40%, #38bdf8);
+    top: 40%;
+    left: 50%;
+    animation: ob-float-3 18s ease-in-out infinite;
+}
+
+@keyframes ob-float-1 {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    33% { transform: translate(-40px, 30px) scale(1.1); }
+    66% { transform: translate(20px, -20px) scale(0.95); }
+}
+
+@keyframes ob-float-2 {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    33% { transform: translate(30px, -40px) scale(1.05); }
+    66% { transform: translate(-20px, 20px) scale(1.1); }
+}
+
+@keyframes ob-float-3 {
+    0%, 100% { transform: translate(-50%, 0) scale(1); }
+    50% { transform: translate(-50%, -30px) scale(1.15); }
+}
+
+/* ── Progress bar ── */
+
+.ob-progress {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--bg-tertiary);
+    z-index: 201;
+}
+
+.ob-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: 0 2px 2px 0;
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* ── Container ── */
+
+.ob-container {
+    width: 560px;
+    max-width: 92vw;
+    max-height: 88vh;
+    overflow-y: auto;
+    padding: 40px;
+    position: relative;
+    z-index: 1;
+}
+
+/* Hide scrollbar but keep scrollable */
+.ob-container::-webkit-scrollbar {
+    width: 4px;
+}
+.ob-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+.ob-container::-webkit-scrollbar-thumb {
+    background: var(--border-light);
+    border-radius: 2px;
+}
+
+/* ── Slide animations ── */
+
+.ob-slide-in {
+    animation: ob-slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.ob-slide-out-forward {
+    animation: ob-slide-out-left 0.25s ease-in forwards;
+}
+
+.ob-slide-out-back {
+    animation: ob-slide-out-right 0.25s ease-in forwards;
+}
+
+@keyframes ob-slide-in {
+    from { opacity: 0; transform: translateY(24px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ob-slide-out-left {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(-40px); }
+}
+
+@keyframes ob-slide-out-right {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(40px); }
+}
+
+/* ── Step base ── */
+
+.ob-step {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.ob-step h2 {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.ob-step-desc {
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    margin: 0 0 8px 0;
+    line-height: 1.5;
+}
+
+/* ════════════════════════════
+   Step 1: Welcome
+   ════════════════════════════ */
+
+.ob-welcome {
+    align-items: center;
+    text-align: center;
+    padding: 60px 0 40px;
+}
+
+.ob-logo-anim {
+    position: relative;
+    margin-bottom: 20px;
+}
+
+.ob-logo-glow {
+    position: absolute;
+    width: 140px;
+    height: 140px;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: radial-gradient(circle, color-mix(in srgb, var(--accent) 35%, transparent), transparent 70%);
+    animation: ob-pulse 3s ease-in-out infinite;
+}
+
+@keyframes ob-pulse {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+    50% { transform: translate(-50%, -50%) scale(1.4); opacity: 0.2; }
+}
+
+.ob-title {
+    font-size: 52px;
+    font-weight: 800;
+    color: var(--text-primary);
+    margin: 0;
+    position: relative;
+    letter-spacing: -1.5px;
+    background: linear-gradient(135deg, var(--text-primary) 30%, var(--accent) 70%, color-mix(in srgb, var(--accent) 60%, #ec4899) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: ob-title-shimmer 4s ease-in-out infinite;
+    background-size: 200% 200%;
+}
+
+@keyframes ob-title-shimmer {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+}
+
+.ob-tagline {
+    font-size: 18px;
+    color: var(--text-secondary);
+    margin: 0;
+    font-weight: 500;
+}
+
+.ob-desc {
+    font-size: 14px;
+    color: var(--text-tertiary);
+    max-width: 380px;
+    line-height: 1.6;
+    margin: 4px 0 28px 0;
+}
+
+/* ════════════════════════════
+   Step 2: Use Cases
+   ════════════════════════════ */
+
+.ob-usecase-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 4px 0;
+}
+
+.ob-usecase-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 16px;
+    border-radius: 12px;
+    border: 1.5px solid var(--border-light);
+    background: var(--bg-secondary);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
+}
+
+.ob-usecase-card:hover {
+    border-color: var(--border);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+.ob-usecase-active {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 1px var(--accent), 0 4px 16px color-mix(in srgb, var(--accent) 15%, transparent);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-secondary));
+    animation: ob-card-select 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes ob-card-select {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.03); }
+    100% { transform: scale(1); }
+}
+
+.ob-usecase-icon {
+    font-size: 22px;
+    line-height: 1;
+    margin-bottom: 4px;
+}
+
+.ob-usecase-label {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.ob-usecase-desc {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+}
+
+.ob-usecase-check {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: ob-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ════════════════════════════
+   Step 3: Theme
+   ════════════════════════════ */
+
+.ob-theme-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin: 8px 0;
+}
+
+.ob-theme-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 6px;
+    border-radius: 10px;
+    border: 1.5px solid var(--border-light);
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.ob-theme-card:hover {
+    border-color: var(--border);
+    transform: translateY(-2px);
+}
+
+.ob-theme-active {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 1px var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-secondary));
+    animation: ob-theme-bounce 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes ob-theme-bounce {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.08); }
+    100% { transform: scale(1); }
+}
+
+.ob-theme-preview {
+    width: 100%;
+    height: 32px;
+    border-radius: 5px;
+    overflow: hidden;
+    display: flex;
+    position: relative;
+}
+
+.ob-theme-bar {
+    flex: 1;
+    height: 100%;
+}
+
+.ob-theme-accent {
+    position: absolute;
+    bottom: 2px;
+    left: 4px;
+    width: 16px;
+    height: 4px;
+    border-radius: 2px;
+}
+
+.ob-theme-accent-2 {
+    position: absolute;
+    bottom: 2px;
+    right: 4px;
+    width: 12px;
+    height: 4px;
+    border-radius: 2px;
+}
+
+.ob-theme-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+/* ════════════════════════════
+   Step 4: Personalize
+   ════════════════════════════ */
+
+.ob-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.ob-field label, .ob-label-top {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.ob-field input {
+    padding: 10px 14px;
+    font-size: 13.5px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    font-family: inherit;
+}
+
+.ob-field input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.ob-field input::placeholder {
+    color: var(--text-tertiary);
+}
+
+/* AI Tone cards */
+.ob-tone-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.ob-tone-card {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1.5px solid var(--border-light);
+    background: var(--bg-secondary);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.ob-tone-card:hover {
+    border-color: var(--border);
+    transform: translateY(-1px);
+}
+
+.ob-tone-active {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 1px var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-secondary));
+    animation: ob-card-select 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.ob-tone-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.ob-tone-desc {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+/* Coding prefs section */
+.ob-coding-prefs {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-light);
+    margin-top: 4px;
+    animation: ob-slide-in 0.3s ease;
+}
+
+/* Chip row */
+.ob-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.ob-chip {
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 99px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    white-space: nowrap;
+}
+
+.ob-chip:hover {
+    border-color: var(--border);
+    background: var(--bg-hover);
+}
+
+.ob-chip-active {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+    animation: ob-chip-pop 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes ob-chip-pop {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.08); }
+    100% { transform: scale(1); }
+}
+
+/* ════════════════════════════
+   Step 5: Account
+   ════════════════════════════ */
+
+.ob-server-health {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    border: 1px solid var(--border-light);
+}
+
+.ob-health-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.ob-health-ok {
+    background: var(--success);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--success) 50%, transparent);
+    animation: ob-dot-pulse 2s ease-in-out infinite;
+}
+
+.ob-health-down {
+    background: var(--error);
+}
+
+.ob-health-checking {
+    background: var(--text-tertiary);
+    animation: ob-dot-pulse 1s ease-in-out infinite;
+}
+
+@keyframes ob-dot-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.ob-health-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.ob-error-msg {
+    font-size: 12px;
+    color: var(--error);
+    margin: 0;
+    padding: 6px 10px;
+    background: color-mix(in srgb, var(--error) 8%, transparent);
+    border-radius: 6px;
+}
+
+.ob-account-success {
+    text-align: center;
+    padding: 24px 0;
+    animation: ob-slide-in 0.4s ease;
+}
+
+.ob-account-msg {
+    font-size: 15px;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.ob-offline {
+    color: var(--warning);
+    font-size: 12px;
+}
+
+.ob-btn-offline {
+    width: 100%;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-top: 4px;
+}
+
+.ob-btn-offline:hover {
+    background: var(--bg-hover);
+    border-color: var(--text-tertiary);
+}
+
+.ob-oni-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 600;
+    margin: 4px 0 0 0;
+}
+
+/* SVG Checkmark animation */
+.ob-success-icon {
+    width: 56px;
+    height: 56px;
+    margin: 0 auto 12px;
+}
+
+.ob-checkmark-svg {
+    width: 100%;
+    height: 100%;
+}
+
+.ob-checkmark-circle {
+    stroke: var(--success);
+    stroke-width: 2;
+    stroke-dasharray: 151;
+    stroke-dashoffset: 151;
+    animation: ob-draw-circle 0.6s cubic-bezier(0.65, 0, 0.45, 1) forwards;
+}
+
+.ob-checkmark-path {
+    stroke: var(--success);
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 50;
+    stroke-dashoffset: 50;
+    animation: ob-draw-check 0.4s cubic-bezier(0.65, 0, 0.45, 1) 0.4s forwards;
+}
+
+@keyframes ob-draw-circle {
+    to { stroke-dashoffset: 0; }
+}
+
+@keyframes ob-draw-check {
+    to { stroke-dashoffset: 0; }
+}
+
+/* ════════════════════════════
+   Step 6: Connect AI
+   ════════════════════════════ */
+
+.ob-connect-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.ob-connect-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.ob-connect-header strong {
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.ob-connect-header p {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin: 2px 0 0 0;
+}
+
+.ob-connect-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    background: var(--accent-light);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.ob-badge-ok {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    padding: 3px 10px;
+    border-radius: 99px;
+}
+
+.ob-connect-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
+}
+
+.ob-btn-connect {
+    width: 100%;
+    padding: 11px 16px;
+    font-size: 13.5px;
+    font-weight: 600;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.ob-btn-connect:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.ob-connect-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ob-connect-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin: 0;
+    line-height: 1.5;
+}
+
+.ob-connect-input {
+    padding: 10px 14px;
+    font-size: 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    color: var(--text-primary);
+    outline: none;
+    font-family: 'JetBrains Mono', monospace;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.ob-connect-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.ob-connect-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.ob-connect-success {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: var(--success);
+}
+
+.ob-connect-error {
+    font-size: 13px;
+    color: var(--error);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ob-check {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.ob-models {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin: 4px 0 0 0;
+}
+
+.ob-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border-light);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: ob-spin 0.7s linear infinite;
+}
+
+@keyframes ob-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ════════════════════════════
+   Step 7: All Set!
+   ════════════════════════════ */
+
+.ob-done-step {
+    align-items: center;
+    text-align: center;
+    position: relative;
+    padding-top: 20px;
+}
+
+.ob-done-title {
+    font-size: 28px;
+    background: linear-gradient(135deg, var(--text-primary) 40%, var(--accent) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* Confetti */
+.ob-done-celebration {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.ob-confetti {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    top: -12px;
+    animation: ob-confetti-fall ease-in forwards;
+}
+
+.ob-confetti-0 { background: var(--accent); width: 8px; height: 8px; }
+.ob-confetti-1 { background: var(--success); width: 6px; height: 10px; border-radius: 50%; }
+.ob-confetti-2 { background: #f59e0b; width: 10px; height: 6px; }
+.ob-confetti-3 { background: #ec4899; width: 7px; height: 7px; border-radius: 50%; }
+.ob-confetti-4 { background: #38bdf8; width: 9px; height: 5px; border-radius: 1px; }
+
+@keyframes ob-confetti-fall {
+    0% { top: -12px; opacity: 1; transform: rotate(0deg) scale(1); }
+    100% { top: 110%; opacity: 0; transform: rotate(720deg) scale(0.2); }
+}
+
+/* Done checkmark */
+.ob-done-checkmark {
+    width: 72px;
+    height: 72px;
+    margin-bottom: 8px;
+}
+
+.ob-checkmark-lg .ob-checkmark-circle {
+    stroke-width: 2;
+}
+
+.ob-checkmark-lg .ob-checkmark-path {
+    stroke-width: 2.5;
+}
+
+/* Summary card */
+.ob-summary {
+    width: 100%;
+    max-width: 360px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin: 8px 0 12px;
+}
+
+.ob-summary-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-light);
+    gap: 12px;
+}
+
+.ob-summary-row:last-child {
+    border-bottom: none;
+}
+
+.ob-summary-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+}
+
+.ob-summary-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: right;
+}
+
+.ob-mono {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--accent);
+}
+
+/* ════════════════════════════
+   Buttons
+   ════════════════════════════ */
+
+.ob-btn-primary {
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.ob-btn-primary:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.ob-btn-primary:active {
+    transform: translateY(0);
+}
+
+.ob-btn-primary:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.ob-btn-lg {
+    padding: 13px 36px;
+    font-size: 15px;
+    border-radius: 12px;
+}
+
+.ob-btn-full {
+    width: 100%;
+}
+
+.ob-btn-back {
+    padding: 9px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.ob-btn-back:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--border);
+}
+
+.ob-btn-text {
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--text-tertiary);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+
+.ob-btn-text:hover {
+    color: var(--text-secondary);
+}
+
+/* Navigation row */
+.ob-nav {
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+    margin-top: 12px;
+}
+
+/* ════════════════════════════
+   Shared keyframes
+   ════════════════════════════ */
+
+@keyframes ob-pop {
+    0% { transform: scale(0); }
+    100% { transform: scale(1); }
+}
+
+/* ════════════════════════════
+   Responsive
+   ════════════════════════════ */
+
+@media (max-width: 580px) {
+    .ob-container { padding: 28px 18px; }
+    .ob-theme-grid { grid-template-columns: repeat(3, 1fr); }
+    .ob-usecase-grid { grid-template-columns: 1fr; }
+    .ob-tone-grid { grid-template-columns: 1fr; }
+    .ob-title { font-size: 38px; }
+    .ob-welcome { padding: 40px 0 24px; }
+    .ob-shape { display: none; }
+}

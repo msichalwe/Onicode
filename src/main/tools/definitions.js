@@ -417,6 +417,102 @@ const TOOL_DEFINITIONS = [
             },
         },
     },
+    // ── Credential Vault Tools ──
+    {
+        type: 'function',
+        function: {
+            name: 'credential_save',
+            description: 'Save a credential to the encrypted vault (AES-256-GCM). Use for API keys, login credentials (username+password), secrets, or OAuth tokens. Each credential has a service name and tags for context-aware search.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Human-readable name (e.g. "Facebook Login", "Stripe Production Key")' },
+                    type: { type: 'string', enum: ['api_key', 'login', 'secret', 'oauth'], description: 'Credential type' },
+                    service: { type: 'string', description: 'Service name (e.g. "facebook", "stripe", "aws", "github")' },
+                    description: { type: 'string', description: 'What this credential is for' },
+                    tags: { type: 'array', items: { type: 'string' }, description: 'Tags for context search (e.g. ["social", "personal"])' },
+                    username: { type: 'string', description: 'Username or email (for login type)' },
+                    password: { type: 'string', description: 'Password (for login type)' },
+                    api_key: { type: 'string', description: 'API key value (for api_key type)' },
+                    token: { type: 'string', description: 'Token value (for oauth/secret type)' },
+                    refresh_token: { type: 'string', description: 'Refresh token (for oauth type)' },
+                    extra: { type: 'object', description: 'Additional key-value pairs', additionalProperties: { type: 'string' } },
+                },
+                required: ['title', 'type', 'service'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'credential_search',
+            description: 'Search the credential vault by service name, title, tags, or description. Returns matching credentials with metadata (NO secrets). Use this FIRST when the user mentions a service and you need to check if credentials exist.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search query — service name, title, or keywords (e.g. "facebook", "aws production")' },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'credential_get',
+            description: 'Get a specific credential by ID. Returns metadata + masked values (e.g. "••••••XXXX"). Use to confirm which credential to use before calling credential_use.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    credential_id: { type: 'string', description: 'The credential ID (from credential_search or credential_list)' },
+                },
+                required: ['credential_id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'credential_use',
+            description: 'Get decrypted credential values for immediate use in a tool call or command. SECURITY: Decrypted values are available ONLY in this tool result — they are NEVER shown in chat or stored in conversation history. Use when you need the actual password/key to authenticate.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    credential_id: { type: 'string', description: 'The credential ID to decrypt' },
+                    fields: { type: 'array', items: { type: 'string' }, description: 'Specific fields to retrieve (e.g. ["username", "password"]). If omitted, returns all fields.' },
+                },
+                required: ['credential_id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'credential_list',
+            description: 'List all credentials in the vault. Returns metadata only (title, type, service, tags) — no secrets. Shows what credentials the user has stored.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    type_filter: { type: 'string', enum: ['api_key', 'login', 'secret', 'oauth'], description: 'Filter by credential type' },
+                    service_filter: { type: 'string', description: 'Filter by service name' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'credential_delete',
+            description: 'Delete a credential from the vault. This is permanent and cannot be undone. Always confirm with the user before deleting.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    credential_id: { type: 'string', description: 'The credential ID to delete' },
+                },
+                required: ['credential_id'],
+            },
+        },
+    },
     // ── Browser / Puppeteer Tools ──
     {
         type: 'function',
@@ -527,6 +623,193 @@ const TOOL_DEFINITIONS = [
             name: 'browser_close',
             description: 'Close the browser instance and free resources.',
             parameters: { type: 'object', properties: {} },
+        },
+    },
+    // ── Browser Agent Tools (Chrome Automation) ──
+    {
+        type: 'function',
+        function: {
+            name: 'browser_agent_run',
+            description: 'Launch an autonomous browser agent that uses your Chrome browser to achieve a goal. The agent navigates pages, clicks buttons, fills forms, and extracts data to accomplish web tasks. Use this for multi-step web workflows like: searching for information, filling out forms, comparing products, booking services, or any task that requires browsing multiple pages. The agent uses the user\'s actual Chrome browser with their existing sessions/cookies.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    goal: { type: 'string', description: 'Natural language description of what to accomplish (e.g., "Search Google for the latest news about AI and summarize the top 3 results", "Go to amazon.com and find the cheapest wireless earbuds under $50")' },
+                    start_url: { type: 'string', description: 'Optional starting URL. If not provided, the agent will navigate to where it needs to go.' },
+                    max_steps: { type: 'integer', description: 'Maximum number of steps the agent can take (default 30)' },
+                    use_chrome: { type: 'boolean', description: 'Use the user\'s Chrome browser (default true). Set to false for headless mode.' },
+                },
+                required: ['goal'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_get_elements',
+            description: 'Get all interactive elements on the current browser page — buttons, links, inputs, dropdowns. Returns each element with its text/label, type, CSS selector, and position. Use this to understand what actions are available on the current page before clicking or typing.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_get_structure',
+            description: 'Get the semantic structure of the current page — title, headings, navigation, main content, forms, tables, images. Use this to understand the overall layout and content of a page.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_extract_table',
+            description: 'Extract structured data from HTML tables on the current page. Returns headers and rows as arrays. Useful for scraping tabular data like prices, listings, schedules, etc.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    selector: { type: 'string', description: 'Optional CSS selector to target a specific table. If omitted, extracts all tables.' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_extract_links',
+            description: 'Extract all links from the current page. Optionally filter by text or URL pattern. Returns link text, href, whether it\'s external, and surrounding context.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filter: { type: 'string', description: 'Optional keyword to filter links by text or URL' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_fill_form',
+            description: 'Fill multiple form fields at once by matching field labels. More efficient than individual browser_type calls. Handles text inputs, checkboxes, radio buttons, and dropdowns.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    fields: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                label: { type: 'string', description: 'Field label text to match (e.g., "Email", "First Name")' },
+                                value: { type: 'string', description: 'Value to fill in' },
+                                selector: { type: 'string', description: 'Optional explicit CSS selector (overrides label matching)' },
+                            },
+                            required: ['value'],
+                        },
+                        description: 'Array of fields to fill',
+                    },
+                },
+                required: ['fields'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_select',
+            description: 'Select an option from a dropdown/select element by value or visible text.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    selector: { type: 'string', description: 'CSS selector of the select element' },
+                    value: { type: 'string', description: 'Option value or visible text to select' },
+                },
+                required: ['selector', 'value'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_scroll',
+            description: 'Scroll the page. Can scroll to an element, scroll by pixels, or scroll to top/bottom.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    selector: { type: 'string', description: 'CSS selector to scroll to (element will be scrolled into view)' },
+                    direction: { type: 'string', description: '"up" or "down" (default "down")' },
+                    amount: { type: 'integer', description: 'Pixels to scroll (default 500)' },
+                    to_bottom: { type: 'boolean', description: 'Scroll to the bottom of the page' },
+                    to_top: { type: 'boolean', description: 'Scroll to the top of the page' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_tab_open',
+            description: 'Open a new browser tab, optionally navigating to a URL. Returns the tab ID for later switching.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'Optional URL to navigate to in the new tab' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_tab_switch',
+            description: 'Switch to a different browser tab by its tab ID.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    tab_id: { type: 'string', description: 'Tab ID to switch to (from browser_tab_list)' },
+                },
+                required: ['tab_id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_tab_list',
+            description: 'List all open browser tabs with their URLs, titles, and tab IDs.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_tab_close',
+            description: 'Close a specific browser tab by its tab ID.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    tab_id: { type: 'string', description: 'Tab ID to close' },
+                },
+                required: ['tab_id'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'browser_status',
+            description: 'Get the current browser status — whether it\'s running, using Chrome or headless, open tabs, current URL, and available downloads.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
         },
     },
     // ── Task Management Tools ──
@@ -1459,6 +1742,57 @@ const TOOL_DEFINITIONS = [
                     timeout_ms: { type: 'integer', description: 'Max wait time in ms when blocking. Default 30000 (30s). Max 300000 (5min).' },
                 },
                 required: ['process_id'],
+            },
+        },
+    },
+    // ══════════════════════════════════════════
+    //  Self-Management & Platform Identity Tools
+    // ══════════════════════════════════════════
+    {
+        type: 'function',
+        function: {
+            name: 'get_platform_info',
+            description: 'Get comprehensive information about the Onicode platform, including version, active provider/model, loaded tools count, active project, connected services, system resources, and diagnostic health checks. Use this to understand your own capabilities and troubleshoot issues.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    include_diagnostics: { type: 'boolean', description: 'Run diagnostic checks (memory usage, tool count, provider status, storage health). Default true.' },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'update_config',
+            description: 'Update Onicode configuration settings. Can modify soul.md (your personality), user.md (user profile), theme, permission mode, auto-commit preference, and other behavioral settings. Use this to adapt your behavior based on user preferences.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    setting: {
+                        type: 'string',
+                        enum: ['soul', 'user_profile', 'theme', 'permission_mode', 'auto_commit', 'thinking_level', 'compact_threshold'],
+                        description: 'The setting to update',
+                    },
+                    value: { type: 'string', description: 'The new value for the setting. For soul/user_profile: the full content to write. For theme: theme name (sand, midnight, obsidian, ocean, aurora, monokai, rose-pine, nord, catppuccin, light, dark, neutral). For permission_mode: auto-allow, ask-destructive, plan-only. For auto_commit: true/false. For thinking_level: low, medium, high. For compact_threshold: number (token count).' },
+                },
+                required: ['setting', 'value'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'self_diagnose',
+            description: 'Run self-diagnostic checks on Onicode systems. Checks: AI provider connectivity, tool definitions integrity, memory system health, storage (SQLite) status, MCP server connections, active terminal sessions, and recent errors from logs. Returns a structured health report with issues and recommendations.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    checks: {
+                        type: 'string',
+                        description: 'Comma-separated checks to run: "provider,tools,memory,storage,mcp,terminals,errors,all" (default: "all")',
+                    },
+                },
             },
         },
     },

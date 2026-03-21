@@ -8,6 +8,7 @@
   --bg-tertiary: #e8d5b7;
   --bg-input: #ffffff;
   --bg-code: #e8ded0;
+  --bg-chat: #faf6ef;
   --bg-message-user: #c9a882;
   --bg-message-ai: #ffffff;
   --bg-sidebar: #ede3d3;
@@ -62,6 +63,7 @@
   --bg-tertiary: #2a2a42;
   --bg-input: #16162a;
   --bg-code: #14142a;
+  --bg-chat: #161628;
   --bg-message-user: #e8b54d;
   --bg-message-ai: #22223a;
   --bg-sidebar: #14142a;
@@ -98,6 +100,7 @@
   --bg-tertiary: #1a1a22;
   --bg-input: #08080d;
   --bg-code: #0e0e15;
+  --bg-chat: #07070c;
   --bg-message-user: #b87333;
   --bg-message-ai: #121218;
   --bg-sidebar: #08080d;
@@ -129,6 +132,7 @@
   --bg-tertiary: #283848;
   --bg-input: #152030;
   --bg-code: #141e2e;
+  --bg-chat: #172432;
   --bg-message-user: #4fd1c5;
   --bg-message-ai: #213040;
   --bg-sidebar: #152030;
@@ -160,6 +164,7 @@
   --bg-tertiary: #e9ecef;
   --bg-input: #ffffff;
   --bg-code: #f1f3f5;
+  --bg-chat: #ffffff;
   --bg-message-user: #228be6;
   --bg-message-ai: #f8f9fa;
   --bg-sidebar: #f1f3f5;
@@ -213,6 +218,7 @@
   --bg-tertiary: #2d2d30;
   --bg-input: #1a1a1a;
   --bg-code: #1e1e1e;
+  --bg-chat: #1a1a1a;
   --bg-message-user: #0078d4;
   --bg-message-ai: #252526;
   --bg-sidebar: #1a1a1a;
@@ -249,6 +255,7 @@
   --bg-tertiary: #d0d0d0;
   --bg-input: #f0f0f0;
   --bg-code: #d8d8d8;
+  --bg-chat: #f0f0f0;
   --bg-message-user: #6b7280;
   --bg-message-ai: #f0f0f0;
   --bg-sidebar: #d8d8d8;
@@ -301,6 +308,7 @@
   --bg-tertiary: #2c1e42;
   --bg-input: #150d22;
   --bg-code: #130c20;
+  --bg-chat: #160e24;
   --bg-message-user: #a855f7;
   --bg-message-ai: #221436;
   --bg-sidebar: #150d22;
@@ -331,6 +339,7 @@
   --bg-tertiary: #3e3d32;
   --bg-input: #1e1f1a;
   --bg-code: #1e1f1a;
+  --bg-chat: #232420;
   --bg-message-user: #a6e22e;
   --bg-message-ai: #2d2e27;
   --bg-sidebar: #1e1f1a;
@@ -361,6 +370,7 @@
   --bg-tertiary: #26233a;
   --bg-input: #15131f;
   --bg-code: #15131f;
+  --bg-chat: #151320;
   --bg-message-user: #c4a7e7;
   --bg-message-ai: #1f1d2e;
   --bg-sidebar: #15131f;
@@ -391,6 +401,7 @@
   --bg-tertiary: #434c5e;
   --bg-input: #272d38;
   --bg-code: #272d38;
+  --bg-chat: #2a303c;
   --bg-message-user: #88c0d0;
   --bg-message-ai: #3b4252;
   --bg-sidebar: #272d38;
@@ -421,6 +432,7 @@
   --bg-tertiary: #313244;
   --bg-input: #181825;
   --bg-code: #181825;
+  --bg-chat: #1a1a28;
   --bg-message-user: #cba6f7;
   --bg-message-ai: #24243a;
   --bg-sidebar: #181825;

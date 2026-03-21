@@ -17,21 +17,150 @@ let _aiCallFunction = null;
  */
 function setAICallFunction(fn) { _aiCallFunction = fn; }
 
+// ─── Model-Aware Context Limits ──────────────────────────────────────────────
+
+/**
+ * Model context window sizes (input tokens).
+ * Used for compaction thresholds and context bar display.
+ */
+const MODEL_CONTEXT_WINDOWS = {
+    'gpt-5.4': 1048576,     // 1.05M
+    'gpt-5.4-pro': 1048576,
+    'gpt-5': 1048576,
+    'gpt-5-mini': 1048576,
+    'gpt-5-nano': 524288,   // 512K
+    'gpt-4.1': 1048576,
+    'gpt-4.1-mini': 1048576,
+    'gpt-4.1-nano': 1048576,
+    'gpt-4o': 128000,
+    'gpt-4o-mini': 128000,
+    'o3': 200000,
+    'o3-pro': 200000,
+    'o3-mini': 200000,
+    'o4-mini': 200000,
+    'claude-opus-4-6': 200000,
+    'claude-sonnet-4-6': 200000,
+    'claude-sonnet-4-20250514': 200000,
+    'claude-haiku-4-5-20251001': 200000,
+    'claude-3-5-haiku-20241022': 200000,
+};
+
+/**
+ * Model max output tokens.
+ */
+const MODEL_MAX_OUTPUT = {
+    'gpt-5.4': 131072,      // 128K
+    'gpt-5.4-pro': 131072,
+    'gpt-5': 65536,          // 64K
+    'gpt-5-mini': 65536,
+    'gpt-5-nano': 32768,
+    'gpt-4.1': 32768,
+    'gpt-4.1-mini': 32768,
+    'gpt-4.1-nano': 16384,
+    'gpt-4o': 16384,
+    'gpt-4o-mini': 16384,
+    'o3': 100000,
+    'o3-pro': 100000,
+    'o3-mini': 100000,
+    'o4-mini': 100000,
+    'claude-opus-4-6': 32000,
+    'claude-sonnet-4-6': 16000,
+    'claude-sonnet-4-20250514': 16000,
+};
+
+/**
+ * Get the context window size for a model.
+ * @param {string} model
+ * @returns {number}
+ */
+function getModelContextWindow(model) {
+    if (!model) return 128000;
+    // Direct match
+    if (MODEL_CONTEXT_WINDOWS[model]) return MODEL_CONTEXT_WINDOWS[model];
+    // Prefix match (e.g. "gpt-5.4-turbo" → gpt-5.4)
+    if (model.startsWith('gpt-5.4')) return 1048576;
+    if (model.startsWith('gpt-5')) return 1048576;
+    if (model.startsWith('gpt-4.1')) return 1048576;
+    if (model.startsWith('gpt-4o')) return 128000;
+    if (model.startsWith('o3') || model.startsWith('o4')) return 200000;
+    if (model.startsWith('claude')) return 200000;
+    return 128000; // safe default
+}
+
+/**
+ * Get the max output tokens for a model.
+ * @param {string} model
+ * @returns {number}
+ */
+function getModelMaxOutput(model) {
+    if (!model) return 16384;
+    if (MODEL_MAX_OUTPUT[model]) return MODEL_MAX_OUTPUT[model];
+    if (model.startsWith('gpt-5.4')) return 131072;
+    if (model.startsWith('gpt-5')) return 65536;
+    if (model.startsWith('gpt-4.1')) return 32768;
+    if (model.startsWith('o3') || model.startsWith('o4')) return 100000;
+    if (model.startsWith('claude')) return 16000;
+    return 16384;
+}
+
+/**
+ * Get the compaction threshold for a model — compact at ~50% of context window.
+ * This leaves plenty of room for the AI to work after compaction.
+ * @param {string} model
+ * @returns {number} token threshold at which to trigger compaction
+ */
+function getCompactionThreshold(model) {
+    const ctx = getModelContextWindow(model);
+    if (ctx >= 1000000) return 500000;  // 1M+ models: compact at 500K
+    if (ctx >= 200000) return 120000;   // 200K models: compact at 120K
+    if (ctx >= 128000) return 80000;    // 128K models: compact at 80K
+    return 60000;                        // smaller: compact at 60K
+}
+
 // ─── Token Estimation ────────────────────────────────────────────────────────
 
 /**
- * Rough token estimate for a string (≈ 1 token per 4 characters).
+ * Estimate tokens for a string.
+ * Uses ~3.8 chars/token for mixed English+code content (GPT-5.x cl200k_base tokenizer).
+ * Code-heavy text averages ~3.2 chars/token, prose ~4.2 chars/token.
  * @param {string} text
  * @returns {number}
  */
 function estimateStringTokens(text) {
     if (!text) return 0;
-    return Math.ceil(text.length / 4);
+    return Math.ceil(text.length / 3.8);
+}
+
+/**
+ * Estimate token overhead for tool definitions in the API call.
+ * Each tool definition adds ~150-300 tokens (name, description, parameters schema).
+ * @param {number} toolCount — number of tool definitions
+ * @returns {number}
+ */
+function estimateToolTokens(toolCount) {
+    if (!toolCount || toolCount <= 0) return 0;
+    // Average ~200 tokens per tool definition (name + desc + param schema)
+    return toolCount * 200;
+}
+
+/**
+ * Estimate tokens for an image based on detail level.
+ * OpenAI vision token costs:
+ *   - low detail: 85 tokens (fixed)
+ *   - high detail: 85 + 170 * tiles (each 512x512 tile = 170 tokens)
+ *   - auto: assume high detail average (~765 tokens for typical image)
+ * @param {string} [detail='auto'] — 'low', 'high', or 'auto'
+ * @returns {number}
+ */
+function estimateImageTokens(detail) {
+    if (detail === 'low') return 85;
+    if (detail === 'high') return 1105; // ~6 tiles average (85 + 170*6)
+    return 765; // auto: assume ~4 tiles average
 }
 
 /**
  * Estimate total tokens across an array of chat messages.
- * Accounts for role labels, content, tool call metadata, etc.
+ * Accounts for role labels, content, tool call metadata, image tokens, etc.
  * @param {Array<{role: string, content: string, tool_calls?: any[], name?: string}>} messages
  * @returns {number}
  */
@@ -40,8 +169,10 @@ function estimateTokens(messages) {
 
     let total = 0;
     for (const msg of messages) {
-        // Role token overhead (~4 tokens per message for role + separators)
-        total += 4;
+        // Per-message overhead: role token, separators, message framing
+        // OpenAI uses ~4 base tokens per message + additional for role/name fields
+        // With tool calls and structured content, overhead is higher (~15-50 tokens)
+        total += 15;
 
         if (typeof msg.content === 'string') {
             total += estimateStringTokens(msg.content);
@@ -51,7 +182,8 @@ function estimateTokens(messages) {
                 if (part.type === 'text') {
                     total += estimateStringTokens(part.text);
                 } else if (part.type === 'image_url') {
-                    total += 85; // rough estimate for image token overhead
+                    const detail = part.image_url?.detail || 'auto';
+                    total += estimateImageTokens(detail);
                 }
             }
         }
@@ -59,6 +191,7 @@ function estimateTokens(messages) {
         // Tool calls in assistant messages
         if (Array.isArray(msg.tool_calls)) {
             for (const tc of msg.tool_calls) {
+                total += 10; // tool_call framing overhead (id, type, function wrapper)
                 total += estimateStringTokens(tc.function?.name || '');
                 total += estimateStringTokens(tc.function?.arguments || '');
             }
@@ -78,10 +211,13 @@ function estimateTokens(messages) {
 /**
  * Determine whether the conversation should be compacted.
  * @param {Array} messages
- * @param {number} [threshold]
+ * @param {number|string} [thresholdOrModel] — token threshold or model name for auto-threshold
  * @returns {boolean}
  */
-function shouldCompact(messages, threshold = DEFAULT_TOKEN_THRESHOLD) {
+function shouldCompact(messages, thresholdOrModel = DEFAULT_TOKEN_THRESHOLD) {
+    const threshold = typeof thresholdOrModel === 'string'
+        ? getCompactionThreshold(thresholdOrModel)
+        : thresholdOrModel;
     return estimateTokens(messages) > threshold;
 }
 
@@ -505,9 +641,12 @@ function registerCompactorIPC(ipcMain) {
         }
     });
 
-    ipcMain.handle('estimate-tokens', (_event, messages) => {
+    ipcMain.handle('estimate-tokens', (_event, messages, model) => {
         try {
-            return { tokens: estimateTokens(messages) };
+            const tokens = estimateTokens(messages);
+            const contextWindow = model ? getModelContextWindow(model) : 128000;
+            const maxOutput = model ? getModelMaxOutput(model) : 16384;
+            return { tokens, contextWindow, maxOutput };
         } catch (err) {
             return { error: err.message, tokens: 0 };
         }
@@ -578,9 +717,16 @@ function looksLikeDecision(line) {
 
 module.exports = {
     estimateTokens,
+    estimateStringTokens,
+    estimateToolTokens,
+    estimateImageTokens,
     shouldCompact,
     compactMessages,
     semanticCompact,
     setAICallFunction: setAICallFunction,
     registerCompactorIPC,
+    getCompactionThreshold,
+    getModelContextWindow,
+    getModelMaxOutput,
+    MODEL_CONTEXT_WINDOWS,
 };

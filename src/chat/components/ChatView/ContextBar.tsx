@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import { getActiveProvider } from './helpers';
 import type { ContextBarProps, ProviderConfig } from './types';
 
@@ -11,7 +11,7 @@ const DEFAULT_MODELS: Record<string, string[]> = {
     ollama: ['llama3.3', 'codellama', 'mistral', 'deepseek-coder-v2', 'qwen2.5-coder'],
 };
 
-const PROVIDER_NAMES: Record<string, string> = { openai: 'OpenAI', codex: 'OpenAI Codex', anthropic: 'Anthropic', ollama: 'Ollama', oniai: 'OniAI', openclaw: 'OpenClaw' };
+const PROVIDER_NAMES: Record<string, string> = { openai: 'OpenAI API', codex: 'OpenAI', anthropic: 'Anthropic', ollama: 'Ollama', oniai: 'OniAI', openclaw: 'OpenClaw' };
 
 export default function ContextBar({
     contextInfo,
@@ -21,6 +21,20 @@ export default function ContextBar({
     onSetShowModelPicker,
     onSetThinkingLevel,
 }: ContextBarProps) {
+    const pickerRef = useRef<HTMLSpanElement>(null);
+
+    // Close model picker on click outside
+    useEffect(() => {
+        if (!showModelPicker) return;
+        const handleClickOutside = (e: MouseEvent) => {
+            if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+                onSetShowModelPicker(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [showModelPicker, onSetShowModelPicker]);
+
     if (!contextInfo || messagesCount === 0) return null;
 
     const handleSelectModel = (prov: ProviderConfig, model: string) => {
@@ -67,10 +81,18 @@ export default function ContextBar({
 
     const activeProvider = getActiveProvider();
 
-    let connectedProviders: ProviderConfig[] = [];
+    // Show enabled providers (or connected ones) — not just connected, so the picker works before test-connection
+    let availableProviders: ProviderConfig[] = [];
     try {
         const saved = localStorage.getItem('onicode-providers');
-        if (saved) connectedProviders = JSON.parse(saved).filter((p: ProviderConfig) => p.connected && (p.apiKey?.trim() || p.id === 'ollama'));
+        if (saved) {
+            const all: ProviderConfig[] = JSON.parse(saved);
+            availableProviders = all.filter((p: ProviderConfig) => p.enabled || p.connected);
+            // Always include the active provider even if somehow not in the list
+            if (activeProvider && !availableProviders.find(p => p.id === activeProvider.id)) {
+                availableProviders.unshift(activeProvider);
+            }
+        }
     } catch { /* ignore */ }
 
     return (
@@ -79,50 +101,54 @@ export default function ContextBar({
                 <circle cx="12" cy="12" r="10" />
                 <path d="M12 6v6l4 2" />
             </svg>
-            <button
-                className="context-model"
-                style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0, fontSize: 'inherit', fontFamily: 'inherit', position: 'relative' }}
-                onClick={() => onSetShowModelPicker(!showModelPicker)}
-                title="Click to change model"
-            >
-                {activeProvider?.selectedModel || 'gpt-5.4'}
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ marginLeft: 3, verticalAlign: 'middle' }}><polyline points="6 9 12 15 18 9" /></svg>
-            </button>
-            {showModelPicker && (
-                <div className="model-picker-dropdown">
-                    {connectedProviders.map((prov: ProviderConfig) => {
-                        const models = prov.models?.length ? prov.models : (DEFAULT_MODELS[prov.id] || []);
-                        const isActive = prov.id === activeProvider?.id;
-                        return (
-                            <div key={prov.id} className="model-picker-group">
-                                <div className="model-picker-provider">
-                                    {PROVIDER_NAMES[prov.id] || prov.id}
-                                    {isActive && <span className="model-picker-active">active</span>}
-                                    <button
-                                        className="model-picker-refresh"
-                                        onClick={(e) => { e.stopPropagation(); handleRefreshModels(prov); }}
-                                        title="Refresh models from API"
-                                    >
-                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                            <path d="M23 4v6h-6M1 20v-6h6" />
-                                            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-                                        </svg>
-                                    </button>
+            <span className="context-model-wrapper" ref={pickerRef}>
+                <button
+                    className="context-model"
+                    onClick={() => onSetShowModelPicker(!showModelPicker)}
+                    title="Click to change model"
+                >
+                    {activeProvider?.selectedModel || 'gpt-5.4'}
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ marginLeft: 3, verticalAlign: 'middle' }}><polyline points="6 9 12 15 18 9" /></svg>
+                </button>
+                {showModelPicker && (
+                    <div className="model-picker-dropdown">
+                        {availableProviders.length === 0 && (
+                            <div className="model-picker-empty">No providers enabled. Go to Settings to configure.</div>
+                        )}
+                        {availableProviders.map((prov: ProviderConfig) => {
+                            const models = prov.models?.length ? prov.models : (DEFAULT_MODELS[prov.id] || []);
+                            const isActive = prov.id === activeProvider?.id;
+                            return (
+                                <div key={prov.id} className="model-picker-group">
+                                    <div className="model-picker-provider">
+                                        {PROVIDER_NAMES[prov.id] || prov.id}
+                                        {isActive && <span className="model-picker-active">active</span>}
+                                        <button
+                                            className="model-picker-refresh"
+                                            onClick={(e) => { e.stopPropagation(); handleRefreshModels(prov); }}
+                                            title="Refresh models from API"
+                                        >
+                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                <path d="M23 4v6h-6M1 20v-6h6" />
+                                                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                                            </svg>
+                                        </button>
+                                    </div>
+                                    {models.map((m: string) => (
+                                        <button
+                                            key={`${prov.id}-${m}`}
+                                            className={`model-picker-item${isActive && m === prov.selectedModel ? ' selected' : ''}`}
+                                            onClick={() => handleSelectModel(prov, m)}
+                                        >{m}</button>
+                                    ))}
                                 </div>
-                                {models.map((m: string) => (
-                                    <button
-                                        key={`${prov.id}-${m}`}
-                                        className={`model-picker-item${isActive && m === prov.selectedModel ? ' selected' : ''}`}
-                                        onClick={() => handleSelectModel(prov, m)}
-                                    >{m}</button>
-                                ))}
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
+                            );
+                        })}
+                    </div>
+                )}
+            </span>
             <span className="context-divider">&middot;</span>
-            <span>~{contextInfo.tokens.toLocaleString()} tokens &middot; {contextInfo.messages} msgs</span>
+            <span>~{contextInfo.tokens.toLocaleString()} {contextInfo.contextWindow ? `/ ${contextInfo.contextWindow >= 1000000 ? `${(contextInfo.contextWindow / 1048576).toFixed(2)}M` : `${Math.round(contextInfo.contextWindow / 1000)}K`}` : ''} tokens &middot; {contextInfo.messages} msgs</span>
             <span className="context-divider">&middot;</span>
             <button
                 className="thinking-level-btn"
@@ -141,7 +167,8 @@ export default function ContextBar({
                 </svg>
                 <span className={`thinking-level-label thinking-level-${thinkingLevel}`}>{thinkingLevel}</span>
             </button>
-            {contextInfo.tokens > 60000 && <span className="context-warning">compacting soon</span>}
+            {contextInfo.contextWindow && contextInfo.tokens > contextInfo.contextWindow * 0.4 && <span className="context-warning">compacting soon</span>}
+            {!contextInfo.contextWindow && contextInfo.tokens > 60000 && <span className="context-warning">compacting soon</span>}
         </div>
     );
 }
